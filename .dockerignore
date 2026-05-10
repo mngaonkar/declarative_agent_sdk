@@ -1,0 +1,98 @@
+# Docker ignore file for Generic Declarative Agent SDK Image
+# SDK is installed from GitHub, agents are mounted at runtime
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Python cache and artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Environment files (secrets should not be in image)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+*.out
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Workspace data (mounted as volume at runtime)
+workspace/
+*/workspace/*
+
+# Skills directory (mounted at runtime, not copied into image)
+skills/
+
+# All agent directories (mounted at runtime, not copied into image)
+autoresearch/
+basic_agent/
+book_agent/
+introduction/
+music_agent/
+storage_agent/
+wazy_agent/
+
+# SDK (installed from GitHub, not copied from build context)
+declarative_agent_sdk/
+
+# Build artifacts
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+
+# Temporary files
+tmp/
+temp/
+*.tmp

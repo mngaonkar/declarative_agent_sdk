@@ -1,0 +1,27 @@
+.env
+.pyc
+__pycache__
+.adk/
+.DS_Store
+logs/
+*.log
+output/
+workspace/
+.vscode/
+
+# Python packaging
+build/
+dist/
+*.egg-info
+*.egg
+*.mp3
+.eggs/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Node
+node_modules/
+.wireit/
