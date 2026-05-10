@@ -1,0 +1,161 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "declarative-agent-sdk"
+version = "0.9.0"
+description = "Declarative YAML-based SDK for building production-grade Google ADK agents"
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [
+    {name = "Google ADK Samples Contributors"}
+]
+keywords = [
+    "google-adk",
+    "agents",
+    "declarative",
+    "yaml",
+    "llm",
+    "langgraph",
+    "multi-agent",
+    "workflows",
+    "genai"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core dependencies
+dependencies = [
+    # Google ADK and AI
+    "google-adk>=1.27.0",
+    "google-genai>=1.67.0",
+    
+    # A2A Protocol
+    "a2a-sdk>=0.1.0",
+    
+    # Data validation and configuration
+    "pydantic>=2.12.0",
+    "pydantic-settings>=2.11.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    
+    # LangChain ecosystem
+    "langgraph>=1.1.0",
+    "langchain>=1.2.0",
+    "langchain-core>=1.2.0",
+    "langchain-community>=0.4.0",
+    "langchain-tavily>=0.2.0",
+    
+    # LLM providers and tools
+    "litellm>=1.82.0",
+    "openai>=2.29.0",
+    "tiktoken>=0.12.0",
+    
+    # Server frameworks
+    "fastapi>=0.135.0",
+    "starlette>=0.52.0",
+    "sse-starlette>=3.0.0",
+    
+    # Utilities
+    "jsonschema>=4.25.0",
+    "rich>=14.0.0",
+    "httpx>=0.28.0",
+]
+
+# Optional dependency groups
+[project.optional-dependencies]
+# Development dependencies
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+# vLLM provider support
+vllm = [
+    "litellm>=1.0.0",
+]
+
+# Enhanced tool support
+tools = [
+    "langchain-tavily>=0.1.0",  # For Tavily search tool
+]
+
+# All optional features
+all = [
+    "declarative-agent-sdk[dev,vllm,tools]",
+]
+
+[project.urls]
+Homepage = "https://github.com/mngaonkar/google-adk-samples"
+Documentation = "https://github.com/mngaonkar/google-adk-samples/tree/main/sdk#readme"
+Repository = "https://github.com/mngaonkar/google-adk-samples"
+"Bug Tracker" = "https://github.com/mngaonkar/google-adk-samples/issues"
+
+# Package discovery configuration
+# The package is called "declarative_agent_sdk" and source files are in the current directory
+[tool.setuptools]
+packages = ["declarative_agent_sdk", "declarative_agent_sdk.plugins", "declarative_agent_sdk.builtin_tools"]
+
+[tool.setuptools.package-dir]
+declarative_agent_sdk = "."
+
+# Black formatting configuration
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+include = '\.pyi?$'
+
+# Ruff linting configuration
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+]
+
+# MyPy type checking configuration
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+
+# Pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+
+[tool.uv.workspace]
+members = [
+    "examples/simple_agent",
+]
