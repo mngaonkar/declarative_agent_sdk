@@ -1,7 +1,8 @@
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.utils.constants import DEFAULT_RPC_URL
+from a2a.utils.constants import DEFAULT_RPC_URL, TransportProtocol, PROTOCOL_VERSION_CURRENT
+from a2a.types import AgentInterface
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 import socket
@@ -22,7 +23,7 @@ class AIAgentServer():
         if self._agent.agent_card is None:
             raise ValueError("agent_card cannot be None")
 
-        if self._agent.agent_card.url is None:
+        if not self._agent.agent_card.supported_interfaces:
             if host == "0.0.0.0":
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -34,8 +35,13 @@ class AIAgentServer():
             else:
                 card_host = host
 
-            self._agent.agent_card.url = f"http://{card_host}:{port}/"
-            logger.info(f"Agent card URL set to: {self._agent.agent_card.url}")
+            url = f"http://{card_host}:{port}/"
+            self._agent.agent_card.supported_interfaces.append(AgentInterface(
+                url=url,
+                protocol_binding=TransportProtocol.JSONRPC.value,
+                protocol_version=PROTOCOL_VERSION_CURRENT,
+            ))
+            logger.info(f"Agent card URL set to: {url}")
 
         request_handler = DefaultRequestHandler(
             agent_executor=self._agent_executor,

@@ -6,8 +6,8 @@ from google.genai import types
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
-from a2a.types import AgentCard, AgentSkill
-from vertexai.preview.reasoning_engines.templates.a2a import create_agent_card
+from a2a.types import AgentCard, AgentInterface, AgentSkill
+from a2a.utils.constants import TransportProtocol, PROTOCOL_VERSION_CURRENT
 
 from declarative_agent_sdk.utils import read_from_file
 from declarative_agent_sdk.constants import DEFAULT_MODEL, MAX_REMOTE_CALLS, SKILLS_DIRECTORY, WORKSPACE_DIRECTORY
@@ -372,14 +372,17 @@ class AIAgent(Agent):
                 )
                 agent_skills.append(skill_card)
 
-        agent_card = create_agent_card(
-            agent_name=name,
-            description=description,
-            skills=agent_skills
-        )
-        
-        # Override URL if provided (to match the actual server port)
+        interfaces = []
         if url:
-            agent_card.url = url
-        
-        return agent_card
+            interfaces.append(AgentInterface(
+                url=url,
+                protocol_binding=TransportProtocol.JSONRPC.value,
+                protocol_version=PROTOCOL_VERSION_CURRENT,
+            ))
+
+        return AgentCard(
+            name=name,
+            description=description,
+            skills=agent_skills,
+            supported_interfaces=interfaces,
+        )
