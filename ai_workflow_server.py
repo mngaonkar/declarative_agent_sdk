@@ -1,12 +1,12 @@
-from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
+from a2a.utils.constants import DEFAULT_RPC_URL
+from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
-from starlette.staticfiles import StaticFiles
 from declarative_agent_sdk.ai_graph_executor import AIWorkflowExecutor
 from langgraph.graph.state import CompiledStateGraph
 from declarative_agent_sdk.ai_workflow import AIWorkflow
-
 
 from declarative_agent_sdk.agent_logging import get_logger
 logger = get_logger(__name__)
@@ -26,20 +26,21 @@ class AIWorkflowServer():
         request_handler = DefaultRequestHandler(
             agent_executor=self._workflow_executor,
             task_store=InMemoryTaskStore(),
-        )
-        self.server = A2AStarletteApplication(
-            agent_card=self._workflow.agent_card, http_handler=request_handler
+            agent_card=self._workflow.agent_card,
         )
 
-        
-        self.app = self.server.build()
+        routes = (
+            create_agent_card_routes(self._workflow.agent_card)
+            + create_jsonrpc_routes(request_handler, DEFAULT_RPC_URL)
+        )
+
+        self.app = Starlette(routes=routes)
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
             allow_methods=["*"],
-            allow_headers=["*"])
-        
-        # self.app.mount("/static", StaticFiles(directory="images"), name="static")
+            allow_headers=["*"],
+        )
 
     def run(self):
         try:
@@ -47,7 +48,7 @@ class AIWorkflowServer():
         except ImportError:
             logger.error("uvicorn is not installed. Please install it with 'pip install uvicorn' to run the server.")
             return
-        
+
         try:
             uvicorn.run(self.app, host=self._host, port=self._port)
         except Exception as e:
