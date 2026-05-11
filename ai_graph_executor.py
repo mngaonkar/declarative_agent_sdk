@@ -7,10 +7,7 @@ from declarative_agent_sdk.base_executor import BaseExecutor
 
 logger = get_logger(__name__)
 
-from a2a.types import (
-    Part,
-    TextPart,
-)
+from a2a.types import Part
 
 class AIWorkflowExecutor(BaseExecutor):
     def __init__(self, graph: CompiledStateGraph):
@@ -33,5 +30,5 @@ class AIWorkflowExecutor(BaseExecutor):
         logger.info(f"Agent execution result: {result}")
         
         if result:
-            await updater.add_artifact([Part(root=TextPart(text=str(result)))], name="final_response")
+            await updater.add_artifact([Part(text=str(result))], name="final_response")
             await updater.complete()
