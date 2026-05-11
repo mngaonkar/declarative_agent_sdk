@@ -1,7 +1,6 @@
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 from declarative_agent_sdk import AIAgent
-from a2a.utils import new_agent_text_message
 from a2a.server.tasks import TaskUpdater
 from declarative_agent_sdk.agent_logging import get_logger
 from declarative_agent_sdk.utils import remove_think_content
@@ -94,6 +93,6 @@ class AIAgentExecutor(BaseExecutor):
                 # Fallback to plain text
                 await updater.update_status(
                     TaskState.completed,
-                    message=new_agent_text_message(str(result)),
+                    message=updater.new_agent_message(parts=[Part(text=str(result))]),
                     final=True
                 )
