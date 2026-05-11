@@ -7,7 +7,7 @@ name = "declarative-agent-sdk"
 version = "0.9.0"
 description = "Declarative YAML-based SDK for building production-grade Google ADK agents"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = "==3.13"
 license = {text = "MIT"}
 authors = [
     {name = "Google ADK Samples Contributors"}
