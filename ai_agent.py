@@ -319,11 +319,9 @@ class AIAgent(Agent):
             if event.content and event.content.parts:
                 logger.info(f"EVENT: {event.content.parts}")
 
-            
             if event.is_final_response():
                 if event.content and event.content.parts:
                     final_response = event.content.parts[0].text
-                break
         
         # Get output_key data if configured
         output_key_data = None
