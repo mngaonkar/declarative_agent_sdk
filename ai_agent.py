@@ -149,8 +149,6 @@ class AIAgent(Agent):
         # Resolve tool names from YAML to actual tool objects
         # Tools can be specified as strings (tool names) or tool objects
         resolved_tools = skills_registry._get_tool_registry().get_all()  # Start with all tools from skills
-        # register_common_tools()
-        # resolved_tools.extend(ToolRegistry.get_all()) # Append global tools
 
         # Register built-in tools from declarative_agent_sdk's builtin directory
         ToolRegistry.register_built_in_tools()
