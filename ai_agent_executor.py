@@ -36,7 +36,7 @@ class AIAgentExecutor(BaseExecutor):
                 result_text = remove_think_content(result_text)
 
                 await updater.update_status(
-                    TaskState.completed,
+                    TaskState.TASK_STATE_COMPLETED,
                     message=updater.new_agent_message(parts=[
                         _data_part({"beginRendering": {"surfaceId": "main", "root": "response"}}),
                         _data_part({"surfaceUpdate": {
@@ -55,7 +55,6 @@ class AIAgentExecutor(BaseExecutor):
             except Exception as e:
                 logger.warning(f"Failure sending A2UI response: {e}")
                 await updater.update_status(
-                    TaskState.completed,
-                    message=updater.new_agent_message(parts=[Part(text=str(result))]),
-                    final=True
+                    TaskState.TASK_STATE_FAILED,
+                    message=updater.new_agent_message(parts=[Part(text=str(result))])
                 )

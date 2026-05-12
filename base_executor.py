@@ -149,7 +149,7 @@ class BaseExecutor(AgentExecutor, ABC):
             if updater:
                 try:
                     await updater.update_status(
-                        TaskState.failed,
+                        TaskState.TASK_STATE_FAILED,
                         message=updater.new_agent_message(parts=[Part(text=f"An error occurred: {str(e)}")]),
                         final=True,
                     )
