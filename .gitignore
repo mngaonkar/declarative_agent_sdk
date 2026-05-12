@@ -8,6 +8,7 @@ logs/
 output/
 workspace/
 .vscode/
+*.lock
 
 # Python packaging
 build/

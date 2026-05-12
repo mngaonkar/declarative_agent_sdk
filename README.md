@@ -122,7 +122,7 @@ Agents are defined in YAML files and instantiated via `AgentFactory.from_yaml_fi
 |-----------|------|---------|-------------|
 | `skills` | list[string] | `None` | Skill directory paths to auto-discover tools from (e.g. `["skills/search", "skills/write"]`). Each directory must contain a `SKILL.md` and a `scripts/` folder |
 | `skills_directory` | string | `skills` | Base directory prepended to each path in `skills` |
-| `tools` | list[string] | `[]` | Explicit tool names to include (resolved from the global `ToolRegistry`) |
+| `tools` | list[string] | `[]` | Explicit tool names to include (resolved from the global `ToolRegistry`). If not specified, all discovered tools are added. |
 | `tools_approval_required` | boolean | `true` | When `true`, prompts the user to approve each tool call before execution |
 
 #### Token Management (Optional)

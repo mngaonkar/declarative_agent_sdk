@@ -123,7 +123,7 @@ class ToolRegistry:
                     tool_name = f"{prefix}{name}" if prefix else name
                     cls.register(tool_name, obj)
                     registered_count += 1
-                    logger.info(f"Registered function '{tool_name}' from {file_path}")
+                    logger.info(f"Registered tool '{tool_name}' from {file_path}")
             
             return registered_count
             
