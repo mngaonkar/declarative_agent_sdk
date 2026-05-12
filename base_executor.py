@@ -5,6 +5,7 @@ from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
 from a2a.utils.errors import UnsupportedOperationError
 from a2a.types import Part, TaskState
+from a2a.helpers import new_task, new_task_from_user_message
 from google.protobuf.json_format import MessageToDict
 from declarative_agent_sdk.agent_logging import get_logger
 
@@ -92,7 +93,17 @@ class BaseExecutor(AgentExecutor, ABC):
 
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
         if not context.current_task:
-            await updater.submit()
+            # The consumer requires a Task object in the queue before it will
+            # accept any TaskStatusUpdateEvent. For new tasks the task doesn't
+            # exist in the store yet, so enqueue a Task directly first.
+            if context.message:
+                await event_queue.enqueue_event(
+                    new_task_from_user_message(context.message)
+                )
+            else:
+                await event_queue.enqueue_event(
+                    new_task(context.task_id, context.context_id, TaskState.TASK_STATE_SUBMITTED)
+                )
         await updater.start_work()
 
         return updater
