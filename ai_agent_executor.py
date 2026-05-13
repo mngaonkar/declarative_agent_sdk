@@ -48,8 +48,7 @@ class AIAgentExecutor(BaseExecutor):
                             "path": "/",
                             "contents": [{"key": "result", "valueString": result_text}]
                         }}),
-                    ]),
-                    final=True
+                    ])
                 )
 
             except Exception as e:

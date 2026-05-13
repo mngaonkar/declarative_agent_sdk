@@ -150,8 +150,7 @@ class BaseExecutor(AgentExecutor, ABC):
                 try:
                     await updater.update_status(
                         TaskState.TASK_STATE_FAILED,
-                        message=updater.new_agent_message(parts=[Part(text=f"An error occurred: {str(e)}")]),
-                        final=True,
+                        message=updater.new_agent_message(parts=[Part(text=f"An error occurred: {str(e)}")])
                     )
                 except:
                     logger.error(f"Failed to send error status: {e}")
