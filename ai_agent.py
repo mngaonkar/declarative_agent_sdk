@@ -1,7 +1,7 @@
 from google.adk.agents.llm_agent import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools import BaseTool, ToolContext
+from google.adk.tools import BaseTool, ToolContext, FunctionTool
 from google.genai import types
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
@@ -176,8 +176,11 @@ class AIAgent(Agent):
             # disable=True,          # Optional: fully disable auto-loop if needed
         )
 
-        # Initialize parent Agent class with all configuration
+        # Set up tool approval if required
         logger.debug(f"Tools approval required: {tools_approval_required}")
+        if tools_approval_required:
+            resolved_tools = [FunctionTool(tool, require_confirmation=True) for tool in resolved_tools]
+        
         super().__init__(
             model=model,
             name=name,
@@ -190,7 +193,7 @@ class AIAgent(Agent):
             ),
             output_key=output_key,
             before_model_callback=dynamic_context_callback,
-            before_tool_callback=dynamic_tool_callback if tools_approval_required else None
+            # before_tool_callback=dynamic_tool_callback if tools_approval_required else None
         )
         
         # Set custom fields AFTER parent initialization

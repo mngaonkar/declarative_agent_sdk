@@ -29,6 +29,16 @@ class AIAgentExecutor(BaseExecutor):
         """Execute the AI agent and send A2UI formatted response."""
         final_response = ""
         async for event in self._agent.run(query):
+            logger.info(f"Received event from agent: {event}")
+            if event.actions.requested_tool_confirmations:
+                logger.info(f"Agent requested tool confirmations: {event.actions.requested_tool_confirmations}")
+                # For simplicity, auto-confirm all tools. In production, you would want to send a message to the user for approval.
+                await updater.requires_input(
+                    message=updater.new_agent_message(parts=[
+                        Part(text="Agent requested confirmation for tools: " + ", ".join(event.actions.requested_tool_confirmations))
+                    ])
+                )
+
             if event.is_final_response() and event.content and event.content.parts:
                 final_response = event.content.parts[0].text
         logger.info(f"Agent final response: {final_response}")
