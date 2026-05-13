@@ -254,37 +254,17 @@ class AIAgent(Agent):
             # plugins=[SmartContextFilterPlugin(get_updated_context_func=get_updated_context)]
         )
 
-    async def run(self, 
-                  input_text: str, 
-                  app_name: Optional[str] = None, 
-                  user_id: str = "user123") -> dict[str, Any]:
-        """
-        Run the agent with the given input.
-        
-        Args:
-            input_text: The input query or prompt for the agent
-            app_name: Optional app name (defaults to agent name)
-            user_id: Optional user ID (defaults to "user123")
-            
-        Returns:
-            Dictionary containing:
-                - final_response: The agent's final response text
-                - session_id: The session ID used
-                - output_key_data: Data stored in output_key (if configured)
-        """
-        # Ensure required attributes are initialized
+    async def run(self, input_text: str) -> dict[str, Any]:
         assert self.runner is not None, "Runner not initialized"
-        assert self.session_id is not None, "Session ID not initialized"
         assert self.session_service is not None, "Session service not initialized"
-        
-        # Delayed session creation if event loop is not running.
-        if self.event_loop_running:
-            await self.session_service.create_session(
-                app_name=self.name,
-                user_id=self.user_id,
-                session_id=self.session_id,
-            
-            )
+
+        # Each call gets its own session so concurrent requests don't share state.
+        session_id = uuid.uuid4().hex
+        await self.session_service.create_session(
+            app_name=self.name,
+            user_id=self.user_id,
+            session_id=session_id,
+        )
 
         # Apply token truncation if configured
         processed_input = input_text
@@ -298,20 +278,18 @@ class AIAgent(Agent):
                 safety_margin=self.safety_margin,
                 truncate_strategy=self.truncate_strategy
             )
-        
-        # Create content message
+
         content = types.Content(
             role="user",
             parts=[types.Part(text=processed_input)]
         )
-        
+
         final_response = ""
-        
-        # Run async loop
-        logger.info(f"runner = {self.runner} session_id = {self.session_id} user_id = {self.user_id}")
+
+        logger.info(f"runner = {self.runner} session_id = {session_id} user_id = {self.user_id}")
         async for event in self.runner.run_async(
             user_id=self.user_id,
-            session_id=self.session_id,
+            session_id=session_id,
             new_message=content
         ):
             if event.content and event.content.parts:
@@ -327,33 +305,19 @@ class AIAgent(Agent):
             session = await self.session_service.get_session(
                 app_name=self.name,
                 user_id=self.user_id,
-                session_id=self.session_id
+                session_id=session_id
             )
             if session:
                 output_key_data = session.state.get(self.output_key)
-        
+
         return {
             "final_response": final_response,
-            "session_id": self.session_id,
+            "session_id": session_id,
             "output_key_data": output_key_data
         }
     
-    def run_sync(self, 
-                 input_text: str, 
-                 app_name: Optional[str] = None, 
-                 user_id: str = "user123") -> dict[str, Any]:
-        """
-        Synchronous wrapper for the run method.
-        
-        Args:
-            input_text: The input query or prompt for the agent
-            app_name: Optional app name (defaults to agent name)
-            user_id: Optional user ID (defaults to "user123")
-            
-        Returns:
-            Dictionary containing final_response, session_id, and output_key_data
-        """
-        return asyncio.run(self.run(input_text, app_name, user_id))
+    def run_sync(self, input_text: str) -> dict[str, Any]:
+        return asyncio.run(self.run(input_text))
 
     def _create_agent_card(self, name: str, description: str, skills: Dict[str, str] | None, url: Optional[str] = None):
         agent_skills = []
