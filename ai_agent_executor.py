@@ -27,13 +27,15 @@ class AIAgentExecutor(BaseExecutor):
         updater: TaskUpdater
     ) -> None:
         """Execute the AI agent and send A2UI formatted response."""
-        result = await self._agent.run(query)
-        logger.info(f"Agent execution result: {result}")
+        final_response = ""
+        async for event in self._agent.run(query):
+            if event.is_final_response() and event.content and event.content.parts:
+                final_response = event.content.parts[0].text
+        logger.info(f"Agent final response: {final_response}")
 
-        if result:
+        if final_response:
             try:
-                result_text = str(result.get("final_response", result)) if isinstance(result, dict) else str(result)
-                result_text = remove_think_content(result_text)
+                result_text = remove_think_content(final_response)
 
                 await updater.update_status(
                     TaskState.TASK_STATE_COMPLETED,
@@ -55,5 +57,5 @@ class AIAgentExecutor(BaseExecutor):
                 logger.warning(f"Failure sending A2UI response: {e}")
                 await updater.update_status(
                     TaskState.TASK_STATE_FAILED,
-                    message=updater.new_agent_message(parts=[Part(text=str(result))])
+                    message=updater.new_agent_message(parts=[Part(text=str(e))])
                 )

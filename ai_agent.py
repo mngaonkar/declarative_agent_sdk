@@ -17,7 +17,7 @@ from declarative_agent_sdk.tool_registry import ToolRegistry
 import asyncio
 import uuid
 import os
-from typing import Optional, Any, Union, List, Dict
+from typing import Optional, Any, Union, List, Dict, AsyncIterator
 from pydantic import Field
 import declarative_agent_sdk.plugins.context_updater as context_updater
 
@@ -254,7 +254,7 @@ class AIAgent(Agent):
             # plugins=[SmartContextFilterPlugin(get_updated_context_func=get_updated_context)]
         )
 
-    async def run(self, input_text: str) -> dict[str, Any]:
+    async def run(self, input_text: str) -> AsyncIterator[Any]:
         assert self.runner is not None, "Runner not initialized"
         assert self.session_service is not None, "Session service not initialized"
 
@@ -274,7 +274,7 @@ class AIAgent(Agent):
                 input_text=input_text,
                 max_context_tokens=self.context_window,
                 max_output_tokens=self.max_output_tokens,
-                model="gpt-4",  # For tokenization
+                model="gpt-4",
                 safety_margin=self.safety_margin,
                 truncate_strategy=self.truncate_strategy
             )
@@ -284,8 +284,6 @@ class AIAgent(Agent):
             parts=[types.Part(text=processed_input)]
         )
 
-        final_response = ""
-
         logger.info(f"runner = {self.runner} session_id = {session_id} user_id = {self.user_id}")
         async for event in self.runner.run_async(
             user_id=self.user_id,
@@ -294,30 +292,16 @@ class AIAgent(Agent):
         ):
             if event.content and event.content.parts:
                 logger.info(f"EVENT: {event.content.parts}")
-
-            if event.is_final_response():
-                if event.content and event.content.parts:
-                    final_response = event.content.parts[0].text
-        
-        # Get output_key data if configured
-        output_key_data = None
-        if self.output_key:
-            session = await self.session_service.get_session(
-                app_name=self.name,
-                user_id=self.user_id,
-                session_id=session_id
-            )
-            if session:
-                output_key_data = session.state.get(self.output_key)
-
-        return {
-            "final_response": final_response,
-            "session_id": session_id,
-            "output_key_data": output_key_data
-        }
+            yield event
     
-    def run_sync(self, input_text: str) -> dict[str, Any]:
-        return asyncio.run(self.run(input_text))
+    def run_sync(self, input_text: str) -> str:
+        async def _collect() -> str:
+            final_response = ""
+            async for event in self.run(input_text):
+                if event.is_final_response() and event.content and event.content.parts:
+                    final_response = event.content.parts[0].text
+            return final_response
+        return asyncio.run(_collect())
 
     def _create_agent_card(self, name: str, description: str, skills: Dict[str, str] | None, url: Optional[str] = None):
         agent_skills = []
