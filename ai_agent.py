@@ -6,8 +6,11 @@ from google.genai import types
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
-from a2a.types import AgentCard, AgentInterface, AgentSkill
+from a2a.types import AgentCard, AgentInterface, AgentSkill, Message, Role
+import json
+from google.protobuf.json_format import MessageToDict
 from a2a.utils.constants import TransportProtocol, PROTOCOL_VERSION_CURRENT
+from a2a.server.agent_execution import RequestContext
 
 from declarative_agent_sdk.utils import read_from_file
 from declarative_agent_sdk.constants import DEFAULT_MODEL, MAX_REMOTE_CALLS, SKILLS_DIRECTORY, WORKSPACE_DIRECTORY
@@ -74,7 +77,6 @@ class AIAgent(Agent):
     agent_card: Optional[AgentCard] = Field(default=None, exclude=True)
     runner: Optional[Runner] = Field(default=None, exclude=True)
     session_service: Optional[InMemorySessionService] = Field(default=None, exclude=True)
-    session_id: Optional[str] = Field(default=None, exclude=True)
     user_id: str = Field(default="user_id", exclude=True)
     event_loop_running: bool = Field(default=False, exclude=True)
     publish_url: Optional[str] = Field(default=None, exclude=True)
@@ -132,7 +134,6 @@ class AIAgent(Agent):
             6. Initializes parent Agent class with all configuration
         """
         # Read main instruction file
-        # Read main instruction file
         instruction_text = read_from_file(instruction_file) if instruction_file else ''
                 
         # Create instance-level skill registry (isolated from global registry)
@@ -142,7 +143,7 @@ class AIAgent(Agent):
             '_skills': {},  # Instance-specific skills dict
         })
 
-        # Register skill from specified directories
+        # Register only specified skills from skill directory
         if skills:
             skills_registry.register_multiple_from_directory(skill_directory=skills_directory, skills_list=skills)
 
@@ -226,29 +227,13 @@ class AIAgent(Agent):
             raise
 
         object.__setattr__(self, 'session_service', None)
-        object.__setattr__(self, 'session_id', None)
         object.__setattr__(self, 'user_id', None)
         object.__setattr__(self, 'runner', None)
         object.__setattr__(self, "event_loop_running", False)
 
         self.session_service = InMemorySessionService()
-        self.session_id = uuid.uuid4().hex
         self.user_id = "user_id"
-        
-        # Create session synchronously (since __init__ cannot be async)
-        try:
-            asyncio.get_running_loop()
-            object.__setattr__(self, "event_loop_running", True)
-        except RuntimeError:
-            # Event loop is not running safe to create session.
-            asyncio.run(self.session_service.create_session(
-                app_name=self.name,
-                user_id=self.user_id,
-                session_id=self.session_id,
-            
-            ))
-            object.__setattr__(self, "event_loop_running", False)
-        
+                
         # Create runner
         self.runner = Runner(
             agent=self,
@@ -257,50 +242,120 @@ class AIAgent(Agent):
             # plugins=[SmartContextFilterPlugin(get_updated_context_func=get_updated_context)]
         )
 
-    async def run(self, input_text: str) -> AsyncIterator[Any]:
+    async def _get_or_create_session(self, session_id: str):
+        assert self.session_service is not None, "Session service not initialized"
+        assert self.user_id is not None, "User ID not set"
+        assert session_id is not None, "Session ID not set"
+
+        session = await self.session_service.get_session(
+                app_name=self.name,
+                user_id=self.user_id,
+                session_id=session_id,
+            )
+        if session:
+            logger.info(f"Session already exists: {session_id}")
+            return session
+        else:
+            logger.info(f"Creating new session: {session_id}")
+            session = await self.session_service.create_session(
+                app_name=self.name,
+                user_id=self.user_id,
+                session_id=session_id,
+            )
+            return session
+
+    async def tool_confirmation(
+        self,
+        context_id: str,
+        session_id: str,
+        yes: bool
+    ) -> AsyncIterator[Any]:
         assert self.runner is not None, "Runner not initialized"
         assert self.session_service is not None, "Session service not initialized"
 
-        # Each call gets its own session so concurrent requests don't share state.
-        session_id = uuid.uuid4().hex
-        await self.session_service.create_session(
-            app_name=self.name,
-            user_id=self.user_id,
-            session_id=session_id,
-        )
-
-        # Apply token truncation if configured
-        processed_input = input_text
-        if self.enable_truncation and self.context_window and self.max_output_tokens:
-            logger.info(f"Token truncation enabled for agent '{self.name}'")
-            processed_input = fit_to_context_window(
-                input_text=input_text,
-                max_context_tokens=self.context_window,
-                max_output_tokens=self.max_output_tokens,
-                model="gpt-4",
-                safety_margin=self.safety_margin,
-                truncate_strategy=self.truncate_strategy
-            )
+        await self._get_or_create_session(session_id)
 
         content = types.Content(
             role="user",
-            parts=[types.Part(text=processed_input)]
+            parts=[
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id=context_id,
+                        name="adk_request_confirmation",
+                        response={
+                            "confirmed": yes,
+                            "payload": {
+                            },
+                        },
+                    )
+                )
+            ],
         )
 
-        logger.info(f"runner = {self.runner} session_id = {session_id} user_id = {self.user_id}")
         async for event in self.runner.run_async(
             user_id=self.user_id,
             session_id=session_id,
-            new_message=content
+            new_message=content,
+        ):
+            if event.content and event.content.parts:
+                logger.info(f"EVENT: {event.content.parts}")
+            yield event
+
+
+    def adk_content_from_message(self, message: Message) -> types.Content:
+        parts: list[types.Part] = []
+        for part in message.parts:
+            which = part.WhichOneof('content')
+            if which == 'text' and part.text:
+                parts.append(types.Part(text=part.text))
+            elif which == 'data':
+                data = MessageToDict(part.data)
+                fn_resp = data.get('function_response') or data.get('functionResponse')
+                if fn_resp:
+                    parts.append(types.Part(
+                        function_response=types.FunctionResponse(
+                            id=fn_resp.get('id', ''),
+                            name=fn_resp.get('name', ''),
+                            response=fn_resp.get('response', {}),
+                        )
+                    ))
+                else:
+                    parts.append(types.Part(text=json.dumps(data)))
+        if not parts:
+            raise ValueError("Could not extract any content from the A2A message")
+        return types.Content(parts=parts, role="user")
+
+
+    async def run(self, context: RequestContext) -> AsyncIterator[Any]:
+        assert self.runner is not None, "Runner not initialized"
+        assert self.session_service is not None, "Session service not initialized"
+        assert context is not None, "Context is required for running the agent"
+        assert context.message is not None, "Context message is required for running the agent"
+        assert context.context_id is not None, "Context ID is required for running the agent"
+
+        # TODO: apply token truncation if configured
+
+        _ = await self._get_or_create_session(context.context_id)
+        logger.info(f"runner = {self.runner} session_id = {context.context_id} user_id = {self.user_id}")
+        
+        # Experimental API to convert incoming A2A message to ADK event format
+        # adk_event = convert_a2a_message_to_event(context.message, author="user")
+        new_message = self.adk_content_from_message(context.message)
+
+        async for event in self.runner.run_async(
+            user_id=self.user_id,
+            session_id=context.context_id,
+            new_message=new_message,
         ):
             if event.content and event.content.parts:
                 logger.info(f"EVENT: {event.content.parts}")
             yield event
     
-    def run_sync(self, input_text: str) -> str:
+
+    def run_sync(self, input_text: str, session_id: str) -> str:
         async def _collect() -> str:
             final_response = ""
-            async for event in self.run(input_text):
+            async for event in self.run(input_text, session_id):
                 if event.is_final_response() and event.content and event.content.parts:
                     final_response = event.content.parts[0].text
             return final_response
