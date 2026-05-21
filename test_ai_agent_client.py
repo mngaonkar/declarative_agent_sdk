@@ -21,6 +21,7 @@ def _extract_function_id(parts) -> str | None:
 
 
 async def handle_events(client: AIAgentClient, event_stream) -> None:
+    """Handle events from the agent, including printing completed responses and sending tool confirmations."""
     async for event in event_stream:
         if not event.HasField('task'):
             logger.warning("Skipping non-task event: %s", event.WhichOneof('payload'))
@@ -42,8 +43,9 @@ async def handle_events(client: AIAgentClient, event_stream) -> None:
             d = MessageToDict(parts[0].data)
             fn_name = d.get('function_response', {}).get('name', 'unknown tool') if isinstance(d, dict) else 'unknown tool'
             answer = input(f"Approve '{fn_name}'? (y/n): ").strip().lower()
-            method = client.send_tool_approval if answer == "y" else client.send_tool_denial
-            await handle_events(client, method(task.id, task.context_id, fn_id))
+            approved = answer == "y"
+
+            await handle_events(client, client.send_tool_confirmation(task.id, task.context_id, fn_id, approved))
 
         elif state == TaskState.TASK_STATE_FAILED:
             logger.error("Agent failed: %s", parts[0].text if parts else "unknown error")

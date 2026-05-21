@@ -59,18 +59,20 @@ class AIAgentClient():
         async for event in self.send_message(message):
             yield event
 
-    async def send_tool_approval(
+
+    async def send_tool_confirmation(
         self,
         task_id: str,
         context_id: str,
-        function_id: str
+        function_id: str,
+        approved: bool = False
     ) -> AsyncIterator[StreamResponse]:
         unblock_message = new_message(
             parts=[Part(data=_data_value({
                 "function_response": {
                     "id": function_id,
                     "name": "adk_request_confirmation",
-                    "response": {"confirmed": True},
+                    "response": {"confirmed": approved},
                 }
             }))],
             context_id=context_id,
@@ -82,26 +84,4 @@ class AIAgentClient():
         ):
             yield event
 
-    async def send_tool_denial(
-        self,
-        task_id: str,
-        context_id: str,
-        function_id: str
-    ) -> AsyncIterator[StreamResponse]:
-        unblock_message = new_message(
-            parts=[Part(data=_data_value({
-                "function_response": {
-                    "id": function_id,
-                    "name": "adk_request_confirmation",
-                    "response": {"confirmed": False},
-                }
-            }))],
-            context_id=context_id,
-            task_id=task_id,
-            role=Role.ROLE_USER,
-        )
-        async for event in self.send_message(
-            unblock_message
-        ):
-            yield event
 
