@@ -8,17 +8,16 @@ from google.protobuf.json_format import ParseDict
 from declarative_agent_sdk.agent_logging import get_logger
 from declarative_agent_sdk.utils import remove_think_content
 from declarative_agent_sdk.base_executor import BaseExecutor
+from declarative_agent_sdk.a2a_utils import _data_part, ResponseType
+from declarative_agent_sdk.response_formatter import ResponseFormatter
 
 logger = get_logger(__name__)
 
-
-def _data_part(data: dict) -> Part:
-    return Part(data=ParseDict(data, struct_pb2.Value()))
-
-
 class AIAgentExecutor(BaseExecutor):
-    def __init__(self, agent: AIAgent):
+    """Executor for running an AIAgent and sending updates to the A2A client."""
+    def __init__(self, agent: AIAgent, formatter: ResponseFormatter | None = None):
         self._agent = agent
+        self._formatter = formatter
 
     async def _execute_implementation(
         self,
@@ -46,18 +45,7 @@ class AIAgentExecutor(BaseExecutor):
 
                     await updater.update_status(
                         TaskState.TASK_STATE_COMPLETED,
-                        message=updater.new_agent_message(parts=[
-                            _data_part({"beginRendering": {"surfaceId": "main", "root": "response"}}),
-                            _data_part({"surfaceUpdate": {
-                                "surfaceId": "main",
-                                "components": [{"id": "response", "component": {"Text": {"text": {"path": "/result"}}}}]
-                            }}),
-                            _data_part({"dataModelUpdate": {
-                                "surfaceId": "main",
-                                "path": "/",
-                                "contents": [{"key": "result", "valueString": result_text}]
-                            }}),
-                        ])
+                        message=self._formatter.format_response(result_text, ResponseType.TASK_COMPLETED, {"response": result_text}) if self._formatter else None
                     )
 
                 except Exception as e:

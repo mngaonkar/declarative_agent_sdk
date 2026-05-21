@@ -1,12 +1,12 @@
 import asyncio
 import logging
-from ai_agent_client import AIAgentClient
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+
+from declarative_agent_sdk.ai_agent_client import AIAgentClient
 from a2a.types import TaskState
 from google.protobuf.json_format import MessageToDict
 import uuid
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 def _extract_function_id(parts) -> str | None:

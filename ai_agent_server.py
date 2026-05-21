@@ -11,12 +11,13 @@ from declarative_agent_sdk.agent_logging import get_logger
 logger = get_logger(__name__)
 from declarative_agent_sdk import AIAgent
 from declarative_agent_sdk import AIAgentExecutor
+from declarative_agent_sdk.a2ui_response_formatter import A2UIResponseFormatter
 
 
 class AIAgentServer():
     def __init__(self, agent: AIAgent, host: str = "0.0.0.0", port: int = 8000):
         self._agent = agent
-        self._agent_executor = AIAgentExecutor(agent)
+        self._agent_executor = AIAgentExecutor(agent, formatter=A2UIResponseFormatter())
         self._host = host
         self._port = port
 
