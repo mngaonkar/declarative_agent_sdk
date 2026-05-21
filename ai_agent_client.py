@@ -4,7 +4,7 @@ from a2a.helpers import new_text_message, new_message
 from a2a.types.a2a_pb2 import Role, SendMessageRequest
 from a2a.types.a2a_pb2 import StreamResponse
 from typing import Any, AsyncIterator
-from a2a.types import Part
+from a2a.types import Part, Message
 from google.protobuf import struct_pb2
 
 from declarative_agent_sdk.agent_logging import get_logger
@@ -23,10 +23,7 @@ class AIAgentClient():
 
     async def send_message(
         self,
-        message: Message,
-        *,
-        task_id: str | None = None,
-        context_id: str | None = None,
+        message: Message
     ) -> AsyncIterator[StreamResponse]:
         async with httpx.AsyncClient(timeout=self.timeout) as httpx_client:
             # 1. Discover the agent (fetch Agent Card)
@@ -49,15 +46,16 @@ class AIAgentClient():
             logger.info(
                 "Sending message: text=%s task_id=%s context_id=%s",
                 message,
-                task_id,
-                context_id,
+                message.task_id,
+                message.context_id,
             )
             async for event in client.send_message(request):
                 logger.debug(f"Received event: {event}")
                 yield event
 
-    async def run(self, query: str) -> AsyncIterator[StreamResponse]:
+    async def run(self, query: str, context_id: str) -> AsyncIterator[StreamResponse]:
         message = new_text_message(text=query, role=Role.ROLE_USER)
+        message.context_id = context_id
         async for event in self.send_message(message):
             yield event
 
@@ -80,9 +78,7 @@ class AIAgentClient():
             role=Role.ROLE_USER,
         )
         async for event in self.send_message(
-            unblock_message,
-            task_id=task_id,
-            context_id=context_id,
+            unblock_message
         ):
             yield event
 
@@ -105,9 +101,7 @@ class AIAgentClient():
             role=Role.ROLE_USER,
         )
         async for event in self.send_message(
-            unblock_message,
-            task_id=task_id,
-            context_id=context_id,
+            unblock_message
         ):
             yield event
 

@@ -1,40 +1,73 @@
 import asyncio
+import logging
 from ai_agent_client import AIAgentClient
 from a2a.types import TaskState
 from google.protobuf.json_format import MessageToDict
-import json
+import uuid
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def _extract_function_id(parts) -> str | None:
+    for part in parts:
+        if part.HasField('data'):
+            d = MessageToDict(part.data)
+            if isinstance(d, dict):
+                fn_id = d.get('function_response', {}).get('id')
+                if fn_id:
+                    return fn_id
+    return None
+
+
+async def handle_events(client: AIAgentClient, event_stream) -> None:
+    async for event in event_stream:
+        if not event.HasField('task'):
+            logger.warning("Skipping non-task event: %s", event.WhichOneof('payload'))
+            continue
+
+        task = event.task
+        state = task.status.state
+        parts = task.status.message.parts
+
+        if state == TaskState.TASK_STATE_COMPLETED:
+            print(f"Agent: {parts}")
+
+        elif state == TaskState.TASK_STATE_INPUT_REQUIRED:
+            fn_id = _extract_function_id(parts)
+            if not fn_id:
+                logger.warning("INPUT_REQUIRED but no function_id found in parts")
+                continue
+
+            d = MessageToDict(parts[0].data)
+            fn_name = d.get('function_response', {}).get('name', 'unknown tool') if isinstance(d, dict) else 'unknown tool'
+            answer = input(f"Approve '{fn_name}'? (y/n): ").strip().lower()
+            method = client.send_tool_approval if answer == "y" else client.send_tool_denial
+            await handle_events(client, method(task.id, task.context_id, fn_id))
+
+        elif state == TaskState.TASK_STATE_FAILED:
+            logger.error("Agent failed: %s", parts[0].text if parts else "unknown error")
+
 
 async def main():
     agent_url = "http://localhost:8000"
     client = AIAgentClient(agent_url=agent_url)
+    context_id = uuid.uuid4().hex
+    logger.info(f"Using context_id: {context_id}")
 
-    async for event in client.run("Download best nebula images from NASA website"):
-        print(f"Received event: {event}")
-        task_id = event.task.id
-        context_id = event.task.context_id
+    while True:
+        query = input("User: ").strip()
+        if query.lower() == "exit":
+            print("Exiting...")
+            break
+        if not query:
+            continue
 
-
-        if event.task.status.state == TaskState.TASK_STATE_INPUT_REQUIRED:
-            response = input(f"Agent is requesting input: {event.task.status.message.parts[0].text}\nY/N: ")
-            data_dict = MessageToDict(event.task.status.message.parts[0].data)
-            print(f"Event data: {data_dict.get("function_response")}")
-            function_id = data_dict.get("function_response", {}).get("id")
-            assert function_id, "Expected event data to contain function_response details for approval"
-
-            if response.strip().lower() == "y":
-                async for follow_up_event in client.send_tool_approval(
-                    event.task.id,
-                    event.task.context_id,
-                    function_id,
-                ):
-                    print(f"Received follow-up event: {follow_up_event}")
-            else:
-                async for follow_up_event in client.send_tool_denial(
-                    event.task.id,
-                    event.task.context_id,
-                    function_id,
-                ):
-                    print(f"Received follow-up event: {follow_up_event}")
+        try:
+            await handle_events(client, client.run(query, context_id))
+            print("Agent request completed.\n")
+        except Exception as e:
+            logger.error("Error: %s", e)
 
 
 if __name__ == "__main__":
