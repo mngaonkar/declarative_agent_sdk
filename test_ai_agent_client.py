@@ -3,6 +3,11 @@ import logging
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
+from rich.console import Console
+from rich.markdown import Markdown
+
+console = Console()
+
 from declarative_agent_sdk.ai_agent_client import AIAgentClient
 from a2a.types import TaskState
 from google.protobuf.json_format import MessageToDict
@@ -32,7 +37,8 @@ async def handle_events(client: AIAgentClient, event_stream) -> None:
         parts = task.status.message.parts
 
         if state == TaskState.TASK_STATE_COMPLETED:
-            print(f"Agent: {parts}")
+            print(parts[0].text if parts else "No response text")
+            console.print(Markdown(parts[0].text if parts else ""))
 
         elif state == TaskState.TASK_STATE_INPUT_REQUIRED:
             fn_id = _extract_function_id(parts)
