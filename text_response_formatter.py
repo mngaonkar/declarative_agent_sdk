@@ -8,7 +8,7 @@ class TextResponseFormatter:
     def format_response(self, response: str, response_type: ResponseType, args: dict) -> Message | None:
         message = None
 
-        if response_type == ResponseType.TASK_COMPLETED:
-            message = new_text_message(text=response, role=Role.ROLE_USER)
+        if response_type == ResponseType.TASK_COMPLETED or response_type == ResponseType.TASK_WORKING:
+            message = new_text_message(text=response, role=Role.user)
         return message
 
