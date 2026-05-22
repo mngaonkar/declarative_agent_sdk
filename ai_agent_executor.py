@@ -10,6 +10,7 @@ from declarative_agent_sdk.utils import remove_think_content
 from declarative_agent_sdk.base_executor import BaseExecutor
 from declarative_agent_sdk.a2a_utils import _data_part, ResponseType
 from declarative_agent_sdk.response_formatter import ResponseFormatter
+from declarative_agent_sdk.a2a_converter import A2AConverter
 
 logger = get_logger(__name__)
 
@@ -33,6 +34,8 @@ class AIAgentExecutor(BaseExecutor):
             logger.info(f"final response so far: {event.is_final_response()}")
 
             if event.is_final_response() and not event.long_running_tool_ids and event.content and event.content.parts:
+                """Final response received, send TASK_COMPLETED update to A2A client.
+                """
                 final_response = event.content.parts[0].text
                 if not final_response:
                     logger.warning("Final response is empty, skipping A2UI update.")
@@ -55,6 +58,7 @@ class AIAgentExecutor(BaseExecutor):
                         message=updater.new_agent_message(parts=[Part(text=str(e))])
                     )
             elif event.actions.requested_tool_confirmations or event.long_running_tool_ids:
+                """Agent is requesting tool confirmation, send TASK_INPUT_REQUIRED update to A2A client with function call details for confirmation."""
                 try:
                     function_id = event.content.parts[0].function_call.id if event.content and event.content.parts and event.content.parts[0].function_call else "unknown"
                     logger.info(f"Agent is requesting tool confirmation for function_id: {function_id}")
@@ -75,3 +79,16 @@ class AIAgentExecutor(BaseExecutor):
                         TaskState.TASK_STATE_FAILED,
                         message=updater.new_agent_message(parts=[Part(text=str(e))])
                     )
+            else:
+                """For any other events (like intermediate responses), we can send a TASK_WORKING update to the A2A client to indicate that the agent is still processing."""
+                logger.warning("Received event with no actionable content.")
+                parts = event.content.parts if event.content and event.content.parts else []
+                a2a_parts = A2AConverter().convert_parts_to_a2a(parts)
+
+                if not a2a_parts:
+                    logger.warning("No valid parts to send for this event, skipping A2A update.")
+                    continue
+                await updater.update_status(
+                    TaskState.TASK_STATE_WORKING,
+                    message=updater.new_agent_message(parts=a2a_parts)
+                )

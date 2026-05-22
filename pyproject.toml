@@ -39,10 +39,10 @@ classifiers = [
 # Core dependencies
 dependencies = [
     # Google ADK and AI
-    "google-adk>=1.27.0",
+    "google-adk>=2.0.0",
     "google-genai>=1.67.0",
     # A2A Protocol
-    "a2a-sdk>=0.1.0",
+    "a2a-sdk>=1.0.0",
     # Data validation and configuration
     "pydantic>=2.12.0",
     "pydantic-settings>=2.11.0",
@@ -67,6 +67,7 @@ dependencies = [
     "rich>=14.0.0",
     "httpx>=0.28.0",
     "term-image>=0.7.2",
+    "vertexai>=1.71.1",
 ]
 
 # Optional dependency groups

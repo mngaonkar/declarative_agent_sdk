@@ -9,6 +9,6 @@ class TextResponseFormatter:
         message = None
 
         if response_type == ResponseType.TASK_COMPLETED or response_type == ResponseType.TASK_WORKING:
-            message = new_text_message(text=response, role=Role.user)
+            message = new_text_message(text=response, role=Role.ROLE_AGENT)
         return message
 

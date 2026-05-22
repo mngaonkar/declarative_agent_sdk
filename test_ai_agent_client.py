@@ -1,6 +1,6 @@
 import asyncio
 import logging
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from rich.console import Console
@@ -35,6 +35,7 @@ async def handle_events(client: AIAgentClient, event_stream) -> None:
         task = event.task
         state = task.status.state
         parts = task.status.message.parts
+        logger.info(f"Received task update: state={state} parts={parts}")
 
         if state == TaskState.TASK_STATE_COMPLETED:
             print(parts[0].text if parts else "No response text")
@@ -56,6 +57,8 @@ async def handle_events(client: AIAgentClient, event_stream) -> None:
         elif state == TaskState.TASK_STATE_FAILED:
             logger.error("Agent failed: %s", parts[0].text if parts else "unknown error")
 
+        elif state == TaskState.TASK_STATE_WORKING:
+            print(parts[0].text if parts else "Agent is working...")
 
 async def main():
     agent_url = "http://localhost:8000"

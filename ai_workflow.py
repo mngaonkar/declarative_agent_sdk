@@ -1,7 +1,7 @@
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.graph import StateGraph
 from typing import Dict
-from vertexai.preview.reasoning_engines.templates.a2a import create_agent_card
+from declarative_agent_sdk.a2a_utils import create_agent_card
 from a2a.types import AgentSkill
 from declarative_agent_sdk.agent_logging import get_logger
 logger = get_logger(__name__)

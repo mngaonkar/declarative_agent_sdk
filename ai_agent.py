@@ -17,6 +17,7 @@ from declarative_agent_sdk.constants import DEFAULT_MODEL, MAX_REMOTE_CALLS, SKI
 from declarative_agent_sdk.agent_logging import get_logger
 from declarative_agent_sdk.token_utils import fit_to_context_window
 from declarative_agent_sdk.tool_registry import ToolRegistry
+from declarative_agent_sdk.a2a_utils import create_agent_card
 import asyncio
 import uuid
 import os
@@ -216,7 +217,7 @@ class AIAgent(Agent):
         # Create agent card
         skill_descriptions = skills_registry.get_all_skills_description()
         # Don't pass URL during initialization - it will be set by AIAgentServer
-        self.agent_card = self._create_agent_card(name, description, skill_descriptions, url=publish_url)
+        self.agent_card = create_agent_card(name=name, description=description, skills=skill_descriptions, url=publish_url)
 
         # Create workspace directory
         try:
@@ -360,31 +361,3 @@ class AIAgent(Agent):
                     final_response = event.content.parts[0].text
             return final_response
         return asyncio.run(_collect())
-
-    def _create_agent_card(self, name: str, description: str, skills: Dict[str, str] | None, url: Optional[str] = None):
-        agent_skills = []
-
-        if skills:
-            for skill, skill_description in skills.items():
-                skill_card = AgentSkill(
-                    id=skill,
-                    name=skill,
-                    description=skill_description,
-                    tags = [skill]
-                )
-                agent_skills.append(skill_card)
-
-        interfaces = []
-        if url:
-            interfaces.append(AgentInterface(
-                url=url,
-                protocol_binding=TransportProtocol.JSONRPC.value,
-                protocol_version=PROTOCOL_VERSION_CURRENT,
-            ))
-
-        return AgentCard(
-            name=name,
-            description=description,
-            skills=agent_skills,
-            supported_interfaces=interfaces,
-        )
