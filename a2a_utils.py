@@ -1,8 +1,9 @@
 from enum import Enum
+from typing import Dict, Optional
 from a2a.types import Part
 from google.protobuf.json_format import ParseDict
 from google.protobuf import struct_pb2
-from a2a.types import AgentCard, AgentInterface, AgentSkill
+from a2a.types import AgentCard, AgentCapabilities, AgentInterface, AgentSkill
 from a2a.utils.constants import TransportProtocol, PROTOCOL_VERSION_CURRENT
 
 def _data_part(data: dict) -> Part:
@@ -40,4 +41,5 @@ def create_agent_card(name: str, description: str, skills: Dict[str, str] | None
         description=description,
         skills=agent_skills,
         supported_interfaces=interfaces,
+        capabilities=AgentCapabilities(streaming=True),
     )

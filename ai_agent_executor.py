@@ -29,7 +29,7 @@ class AIAgentExecutor(BaseExecutor):
         final_response = ""
         logger.info(f"Executing agent with context: {context.message}")
        
-        async for event in self._agent.run(context):
+        async for event in self._agent.invoke(context):
             logger.info(f"Received event from agent: {event}")
             logger.info(f"final response so far: {event.is_final_response()}")
 
@@ -52,7 +52,7 @@ class AIAgentExecutor(BaseExecutor):
                     )
 
                 except Exception as e:
-                    logger.warning(f"Failure sending A2UI response: {e}")
+                    logger.warning(f"Failure sending response: {e}")
                     await updater.update_status(
                         TaskState.TASK_STATE_FAILED,
                         message=updater.new_agent_message(parts=[Part(text=str(e))])
@@ -88,7 +88,13 @@ class AIAgentExecutor(BaseExecutor):
                 if not a2a_parts:
                     logger.warning("No valid parts to send for this event, skipping A2A update.")
                     continue
-                await updater.update_status(
-                    TaskState.TASK_STATE_WORKING,
-                    message=updater.new_agent_message(parts=a2a_parts)
+                logger.info(f"Sending TASK_WORKING update with parts: {a2a_parts}")
+                # await updater.update_status(
+                #     TaskState.TASK_STATE_WORKING,
+                #     message=updater.new_agent_message(parts=a2a_parts)
+                # )
+                working_message = updater.new_agent_message(
+                    parts=[Part(text='Processing your question...')]
                 )
+
+                await updater.start_work(message=updater.new_agent_message(parts=a2a_parts))

@@ -36,7 +36,7 @@ class AIAgentClient():
             logger.info(f"Connected to: {agent_card}")
 
             # 2. Create client — reuse the same httpx_client so the timeout applies
-            config = ClientConfig(streaming=False, httpx_client=httpx_client)
+            config = ClientConfig(streaming=True, httpx_client=httpx_client)
             client = await create_client(agent=agent_card, client_config=config)
             assert client is not None, "Failed to create A2A client"
 

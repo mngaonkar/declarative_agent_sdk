@@ -6,7 +6,7 @@ from google.genai import types
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
-from a2a.types import AgentCard, AgentInterface, AgentSkill, Message, Role
+from a2a.types import AgentCard, AgentCapabilities, AgentInterface, AgentSkill, Message, Role
 import json
 from google.protobuf.json_format import MessageToDict
 from a2a.utils.constants import TransportProtocol, PROTOCOL_VERSION_CURRENT
@@ -327,7 +327,7 @@ class AIAgent(Agent):
         return types.Content(parts=parts, role="user")
 
 
-    async def run(self, context: RequestContext) -> AsyncIterator[Any]:
+    async def invoke(self, context: RequestContext) -> AsyncIterator[Any]:
         assert self.runner is not None, "Runner not initialized"
         assert self.session_service is not None, "Session service not initialized"
         assert context is not None, "Context is required for running the agent"
@@ -356,7 +356,7 @@ class AIAgent(Agent):
     def run_sync(self, input_text: str, session_id: str) -> str:
         async def _collect() -> str:
             final_response = ""
-            async for event in self.run(input_text, session_id):
+            async for event in self.invoke(input_text, session_id):
                 if event.is_final_response() and event.content and event.content.parts:
                     final_response = event.content.parts[0].text
             return final_response

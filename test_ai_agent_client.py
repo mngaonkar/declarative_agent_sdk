@@ -25,21 +25,34 @@ def _extract_function_id(parts) -> str | None:
     return None
 
 
+def _unpack_event(event):
+    """Extract (state, parts, task_id, context_id) from a StreamResponse payload oneof."""
+    if event.HasField('task'):
+        t = event.task
+        return t.status.state, list(t.status.message.parts), t.id, t.context_id
+    elif event.HasField('status_update'):
+        su = event.status_update
+        return su.status.state, list(su.status.message.parts), su.task_id, su.context_id
+    elif event.HasField('artifact_update'):
+        return None, [], None, None
+    elif event.HasField('message'):
+        return None, [], None, None
+    return None, [], None, None
+
+
 async def handle_events(client: AIAgentClient, event_stream) -> None:
     """Handle events from the agent, including printing completed responses and sending tool confirmations."""
     async for event in event_stream:
-        if not event.HasField('task'):
-            logger.warning("Skipping non-task event: %s", event.WhichOneof('payload'))
+        logger.info(f"Received event: {event}")
+        state, parts, task_id, context_id = _unpack_event(event)
+        if state is None:
             continue
-
-        task = event.task
-        state = task.status.state
-        parts = task.status.message.parts
         logger.info(f"Received task update: state={state} parts={parts}")
 
         if state == TaskState.TASK_STATE_COMPLETED:
-            print(parts[0].text if parts else "No response text")
-            console.print(Markdown(parts[0].text if parts else ""))
+            text = parts[0].text if parts else "No response text"
+            print(text)
+            console.print(Markdown(text))
 
         elif state == TaskState.TASK_STATE_INPUT_REQUIRED:
             fn_id = _extract_function_id(parts)
@@ -47,18 +60,18 @@ async def handle_events(client: AIAgentClient, event_stream) -> None:
                 logger.warning("INPUT_REQUIRED but no function_id found in parts")
                 continue
 
-            d = MessageToDict(parts[0].data)
+            d = MessageToDict(parts[0].data) if parts and parts[0].HasField('data') else {}
             fn_name = d.get('function_response', {}).get('name', 'unknown tool') if isinstance(d, dict) else 'unknown tool'
             answer = input(f"Approve '{fn_name}'? (y/n): ").strip().lower()
             approved = answer == "y"
 
-            await handle_events(client, client.send_tool_confirmation(task.id, task.context_id, fn_id, approved))
+            await handle_events(client, client.send_tool_confirmation(task_id, context_id, fn_id, approved))
 
         elif state == TaskState.TASK_STATE_FAILED:
             logger.error("Agent failed: %s", parts[0].text if parts else "unknown error")
 
         elif state == TaskState.TASK_STATE_WORKING:
-            print(parts[0].text if parts else "Agent is working...")
+            logger.info("Working: %s", parts[0].text if parts else "...")
 
 async def main():
     agent_url = "http://localhost:8000"

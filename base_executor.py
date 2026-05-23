@@ -1,12 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
 from a2a.utils.errors import UnsupportedOperationError
-from a2a.types import Part, TaskState
-from a2a.helpers import new_task, new_task_from_user_message
-from google.protobuf.json_format import MessageToDict
+from a2a.types import Part, TaskState, Task, TaskStatus
+
 from declarative_agent_sdk.agent_logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,28 +30,37 @@ class BaseExecutor(AgentExecutor, ABC):
             Initialized TaskUpdater instance
 
         Raises:
-            UnsupportedOperationError: If task_id or context_id is missing
+            UnsupportedOperationError: If task_id, context_id, or message is missing
         """
         logger.info(f"task_id: {context.task_id}, context_id: {context.context_id}")
 
-        if not context.task_id or not context.context_id:
-            raise UnsupportedOperationError(message="task_id or context_id is None")
+        if not context.task_id or not context.context_id or not context.message:
+            raise UnsupportedOperationError(message="task_id, context_id, or message is None")
 
-        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-        if not context.current_task:
-            logger.info("No current task found in context, enqueuing new task for TaskUpdater.")
-            # The consumer requires a Task object in the queue before it will
-            # accept any TaskStatusUpdateEvent. For new tasks the task doesn't
-            # exist in the store yet, so enqueue a Task directly first.
-            if context.message:
-                await event_queue.enqueue_event(
-                    new_task_from_user_message(context.message)
+        user_message = context.message
+        task_id = context.task_id
+        context_id = context.context_id
+
+        task = context.current_task
+        if not task:
+            await event_queue.enqueue_event(
+                Task(
+                    id=task_id,
+                    context_id=context_id,
+                    status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+                    history=[user_message],
                 )
-            else:
-                await event_queue.enqueue_event(
-                    new_task(context.task_id, context.context_id, TaskState.TASK_STATE_SUBMITTED)
-                )
-        await updater.start_work()
+            )
+
+        updater = TaskUpdater(event_queue, 
+                              context.task_id, 
+                              context.context_id)
+        
+        working_message = updater.new_agent_message(
+            parts=[Part(text='Processing your question...')]
+        )
+
+        await updater.start_work(message=working_message)
 
         return updater
 
