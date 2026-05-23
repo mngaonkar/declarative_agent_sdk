@@ -61,6 +61,8 @@ class AIAgentExecutor(BaseExecutor):
                 """Agent is requesting tool confirmation, send TASK_INPUT_REQUIRED update to A2A client with function call details for confirmation."""
                 try:
                     function_id = event.content.parts[0].function_call.id if event.content and event.content.parts and event.content.parts[0].function_call else "unknown"
+                    function_name = event.content.parts[0].function_call.args["originalFunctionCall"]["name"] if event.content and event.content.parts and event.content.parts[0].function_call else "unknown"
+                    function_args = event.content.parts[0].function_call.args["originalFunctionCall"]["args"] if event.content and event.content.parts and event.content.parts[0].function_call else {}
                     logger.info(f"Agent is requesting tool confirmation for function_id: {function_id}")
                     await updater.update_status(
                         TaskState.TASK_STATE_INPUT_REQUIRED,
@@ -68,7 +70,8 @@ class AIAgentExecutor(BaseExecutor):
                             parts=[_data_part({
                                 "function_response": {
                                     "id": function_id,
-                                    "name": "adk_request_confirmation"
+                                    "name": function_name,
+                                    "args": function_args
                                 }
                             })]
                         )
@@ -89,12 +92,5 @@ class AIAgentExecutor(BaseExecutor):
                     logger.warning("No valid parts to send for this event, skipping A2A update.")
                     continue
                 logger.info(f"Sending TASK_WORKING update with parts: {a2a_parts}")
-                # await updater.update_status(
-                #     TaskState.TASK_STATE_WORKING,
-                #     message=updater.new_agent_message(parts=a2a_parts)
-                # )
-                working_message = updater.new_agent_message(
-                    parts=[Part(text='Processing your question...')]
-                )
 
                 await updater.start_work(message=updater.new_agent_message(parts=a2a_parts))
