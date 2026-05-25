@@ -353,11 +353,36 @@ class AIAgent(Agent):
             yield event
     
 
-    def run_sync(self, input_text: str, session_id: str) -> str:
+    async def run_query(self, query: str, session_id: Optional[str] = None) -> AsyncIterator[Any]:
+        """Run the agent with a plain text query (no RequestContext required)."""
+        sid = session_id or str(uuid.uuid4())
+        await self._get_or_create_session(sid)
+        new_message = types.Content(role="user", parts=[types.Part(text=query)])
+        async for event in self.runner.run_async(
+            user_id=self.user_id,
+            session_id=sid,
+            new_message=new_message,
+        ):
+            if event.content and event.content.parts:
+                logger.info(f"EVENT: {event.content.parts}")
+            yield event
+
+    async def run_query_and_collect(self, query: str, session_id: Optional[str] = None) -> str:
+        """Run the agent with a plain text query and return the final response text."""
+        final_response = ""
+        async for event in self.run_query(query, session_id):
+            if (
+                event.is_final_response()
+                and not event.long_running_tool_ids
+                and event.content
+                and event.content.parts
+            ):
+                final_response = event.content.parts[0].text or ""
+                break
+        return final_response
+
+    def run_sync(self, input_text: str, session_id: Optional[str] = None) -> str:
+        """Run synchronously. Cannot be called from within a running event loop."""
         async def _collect() -> str:
-            final_response = ""
-            async for event in self.invoke(input_text, session_id):
-                if event.is_final_response() and event.content and event.content.parts:
-                    final_response = event.content.parts[0].text
-            return final_response
+            return await self.run_query_and_collect(input_text, session_id)
         return asyncio.run(_collect())
