@@ -96,6 +96,9 @@ class BaseExecutor(AgentExecutor, ABC):
         updater = None
         try:
             updater = await self._initialize_task_updater(context, event_queue)
+            assert updater is not None, "TaskUpdater initialization failed"
+
+            logger.info(f"Updater initialized successfully for task_id: {context.task_id}, context_id: {context.context_id}")
             await self._execute_implementation(context, updater)
         except Exception as e:
             logger.error(f"Error during execution: {e}")

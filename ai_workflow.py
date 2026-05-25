@@ -5,6 +5,7 @@ from declarative_agent_sdk.a2a_utils import create_agent_card
 from a2a.types import AgentSkill
 from declarative_agent_sdk.agent_logging import get_logger
 logger = get_logger(__name__)
+from declarative_agent_sdk.skill_registry import SkillRegistry
 
 class AIWorkflow():
     def __init__(self, name: str, description: str, graph: StateGraph, state: type):
@@ -21,31 +22,16 @@ class AIWorkflow():
         return compiled_graph
     
     def _create_agent_card(self, name: str, description: str, skills: Dict[str, str] | None):
-        agent_skills = []
-
-        if skills:
-            for skill, skill_description in skills.items():
-                skill_card = AgentSkill(
-                    id=skill,
-                    name=skill,
-                    description=skill_description,
-                    tags = [skill]
-                )
-                agent_skills.append(skill_card)
-
-        if not skills:
-            skill_card = AgentSkill(
-                id="default_skill",
-                name="Default Skill",
-                description="A default skill for the AI workflow.",
-                tags = ["default"]
-            )
-            agent_skills.append(skill_card)
+        skills_registry = type('InstanceSkillRegistry', (SkillRegistry,), {
+            '_skills': {},  # Instance-specific skills dict
+        })
+        skill_descriptions = skills_registry.get_all_skills_description()
+        logger.info(f"Creating agent card with skills: {skill_descriptions}")
 
         agent_card = create_agent_card(
-            agent_name=name,
+            name=name,
             description=description,
-            skills=agent_skills
+            skills=skill_descriptions
         )
         return agent_card
     

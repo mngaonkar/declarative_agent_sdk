@@ -16,16 +16,21 @@ class AIWorkflowExecutor(BaseExecutor):
 
     async def _execute_implementation(
         self,
-        query: str,
         context: RequestContext,
         updater: TaskUpdater
     ) -> None:
         """Execute the LangGraph workflow."""
+        if context is None:
+            raise ValueError("RequestContext cannot be None")
+        
+        query = context.get_user_input()
         self._state = {
             "user_query": query,
-            "agent_output": {}
+            "context": context,
+            "agents_output": {}
         }
         
+        logger.info(f"Executing AI workflow with context: {context}")
         result = await self._graph.ainvoke(self._state)
         logger.info(f"Agent execution result: {result}")
         
