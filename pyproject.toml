@@ -8,7 +8,7 @@ version = "0.9.0"
 description = "Declarative YAML-based SDK for building production-grade Google ADK agents"
 readme = "README.md"
 requires-python = ">=3.14"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Google ADK Samples Contributors"}
 ]
@@ -26,7 +26,6 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
