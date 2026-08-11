@@ -6,11 +6,14 @@ This module provides utilities and extensions for working with Google ADK agents
 
 from declarative_agent_sdk.__version__ import __version__
 from declarative_agent_sdk.plugins.context_updater import get_updated_context, AgentContext
+from declarative_agent_sdk.base_agent import BaseAgent
 from declarative_agent_sdk.ai_agent import AIAgent
+from declarative_agent_sdk.langchain_ai_agent import LangChainAIAgent, LangChainEvent
 from declarative_agent_sdk.ai_agent_executor import AIAgentExecutor
 from declarative_agent_sdk.ai_graph_executor import AIWorkflowExecutor
 from declarative_agent_sdk.ai_agent_server import AIAgentServer
 from declarative_agent_sdk.ai_workflow_server import AIWorkflowServer
+from declarative_agent_sdk.discord_agent_server import DiscordAgentServer
 from declarative_agent_sdk.agent_factory import AgentFactory
 from declarative_agent_sdk.agent_registry import AgentRegistry
 from declarative_agent_sdk.model_factory import ModelFactory
@@ -30,11 +33,15 @@ from declarative_agent_sdk import builtin_tools
 
 __all__ = [
     '__version__',
+    'BaseAgent',
     'AIAgent',
+    'LangChainAIAgent',
+    'LangChainEvent',
     'AIAgentExecutor',
     'AIWorkflowExecutor',
     'AIAgentServer',
     'AIWorkflowServer',
+    'DiscordAgentServer',
     'AgentFactory',
     'AgentRegistry',
     'ModelFactory',

@@ -1,0 +1,37 @@
+# Sample agent for the Discord bot example.
+# Used by:  python run_discord_bot.py --mode local --config agent.yaml
+#           python run_discord_bot.py --mode live  --config agent.yaml
+#
+# selftest mode does not read this file — it uses a scripted stub agent.
+
+name: discord_news_agent
+description: Answers questions in Discord and searches the web when needed
+
+instruction_file: instructions.md
+
+# Google Gemini (default). Swap for another provider as needed:
+#
+provider: openai
+model: gpt-4o
+endpoint:
+  url: https://api.openai.com/v1
+#
+#   provider: vllm
+#   model: Qwen/Qwen3-4B
+#   endpoint:
+#     url: http://localhost:8000/v1
+# model: gemini-2.5-flash-lite
+
+# Built-in tools. tavily_search needs TAVILY_API_KEY.
+tools:
+  - web_request
+  - tavily_search
+  - exec_command
+  - read_file
+  - write_file
+
+# true → the bot asks for ✅ / ❌ approval in Discord before each tool call.
+# Set to false for an unattended bot.
+tools_approval_required: true
+
+workspace_directory: workspace

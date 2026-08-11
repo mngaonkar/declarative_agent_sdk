@@ -1,6 +1,6 @@
 # Generic Dockerfile for Declarative Agent SDK Agents
 # Stage 1: Build stage
-FROM python:3.11-slim as builder
+FROM python:3.14-slim as builder
 
 # Set working directory
 WORKDIR /app
@@ -22,12 +22,12 @@ RUN apt-get update && apt-get install -y \
 
 # Install declarative-agent-sdk from GitHub
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir git+https://github.com/mngaonkar/google-adk-samples.git#subdirectory=declarative_agent_sdk
+    pip install --no-cache-dir git+https://github.com/mngaonkar/declarative_agent_sdk.git
 
-# Clone google-adk-samples repo to get a2ui
-RUN git clone https://github.com/mngaonkar/google-adk-samples.git /tmp/google-adk-samples && \
-    cp -r /tmp/google-adk-samples/declarative_agent_sdk/a2ui /app/a2ui && \
-    rm -rf /tmp/google-adk-samples
+# Clone declarative-agent-sdk repo to get a2ui
+RUN git clone https://github.com/mngaonkar/declarative_agent_sdk.git /tmp/declarative_agent_sdk && \
+    cp -r /tmp/declarative_agent_sdk/a2ui /app/a2ui && \
+    rm -rf /tmp/declarative_agent_sdk
 
 # Clone Google's A2UI repo for renderer dependencies
 RUN git clone https://github.com/google/A2UI.git /app/google-a2ui
@@ -76,7 +76,7 @@ RUN set -x && \
     echo "==== npm build completed ===="
 
 # Stage 2: Runtime stage
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Set working directory
 WORKDIR /app
@@ -94,7 +94,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy a2ui with node_modules from builder

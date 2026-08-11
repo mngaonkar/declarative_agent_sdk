@@ -1,6 +1,6 @@
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
-from declarative_agent_sdk import AIAgent
+from declarative_agent_sdk.base_agent import BaseAgent
 from a2a.server.tasks import TaskUpdater
 from a2a.types import Part, TaskState
 from google.protobuf import struct_pb2
@@ -15,8 +15,8 @@ from declarative_agent_sdk.a2a_converter import A2AConverter
 logger = get_logger(__name__)
 
 class AIAgentExecutor(BaseExecutor):
-    """Executor for running an AIAgent and sending updates to the A2A client."""
-    def __init__(self, agent: AIAgent, formatter: ResponseFormatter | None = None):
+    """Executor for running any BaseAgent and sending updates to the A2A client."""
+    def __init__(self, agent: BaseAgent, formatter: ResponseFormatter | None = None):
         self._agent = agent
         self._formatter = formatter
 

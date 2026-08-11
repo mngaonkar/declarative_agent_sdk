@@ -73,6 +73,7 @@ Refer https://github.com/mngaonkar/declarative_agent_sdk_examples/blob/master/si
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                     Servers                               │   │
 │  │   AIAgentServer (A2A/JSON-RPC)  AIWorkflowServer         │   │
+│  │   DiscordAgentServer (Discord bot)                       │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -251,3 +252,80 @@ conditional_edges:
     router_function: route_after_toc
 ```
 
+
+---
+
+## Running an Agent
+
+The same agent object can be exposed over different transports. Pick a server, hand it the agent, call `run()`.
+
+### A2A / JSON-RPC
+
+```python
+from declarative_agent_sdk import AgentFactory, AgentRegistry, AIAgentServer
+
+agent = AgentFactory.from_yaml_file('configs/agent.yaml')
+AgentRegistry.register(agent, category="news")
+
+server = AIAgentServer(agent, host="0.0.0.0", port=8000)
+server.run()
+```
+
+### Discord Bot
+
+`DiscordAgentServer` runs the same agent as a Discord bot. It listens for @-mentions, direct messages, or a command prefix, keeps one agent session per channel, and posts the agent's answer back to the channel.
+
+```python
+import os
+from declarative_agent_sdk import AgentFactory, AgentRegistry, DiscordAgentServer
+
+agent = AgentFactory.from_yaml_file('configs/agent.yaml')
+AgentRegistry.register(agent, category="news")
+
+server = DiscordAgentServer(agent, token=os.environ["DISCORD_BOT_TOKEN"])
+server.run()
+```
+
+A runnable test program lives in [`examples/discord_bot/`](examples/discord_bot/) — `python run_discord_bot.py` self-tests the bot behaviour with no token, API key or network, and `--mode local` gives you a terminal REPL against your real agent before you connect to Discord.
+
+#### Setup
+
+1. Install the optional dependency: `pip install "declarative-agent-sdk[discord]"`
+2. Create an application and bot at https://discord.com/developers/applications
+3. Under **Bot → Privileged Gateway Intents**, enable **MESSAGE CONTENT INTENT** (without it, message text arrives empty and the bot never replies)
+4. Invite the bot with the `bot` scope and the *Send Messages*, *Read Message History* and *Add Reactions* permissions
+5. Export the token as `DISCORD_BOT_TOKEN` (or pass `token=...`)
+
+#### Constructor Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `agent` | BaseAgent | — | Any agent — `AIAgent`, `LangChainAIAgent`, or a custom `BaseAgent` |
+| `token` | string | `$DISCORD_BOT_TOKEN` | Discord bot token |
+| `respond_to_mentions` | bool | `true` | Reply when the bot is @-mentioned in a server channel |
+| `respond_to_dms` | bool | `true` | Reply to direct messages |
+| `respond_to_all_messages` | bool | `false` | Reply to every message in allowed channels, no mention needed |
+| `command_prefix` | string | `None` | Extra trigger, e.g. `"!ask "`; stripped before the query reaches the agent |
+| `allowed_channels` | list | `None` | Channel IDs the bot may answer in (DMs are unaffected) |
+| `session_scope` | string | `channel` | Conversation memory granularity — `channel`, `user`, or `global` |
+| `show_working_updates` | bool | `true` | Post a status message while the agent works, replaced by the final answer |
+| `tool_confirmation_timeout` | float | `120.0` | Seconds to wait for a tool-approval reaction before denying |
+| `activity_status` | string | `None` | Text shown as the bot's "Playing …" status |
+
+#### Behaviour Notes
+
+- **Sessions** — each Discord channel maps to its own agent session by default, so conversations in different channels stay independent. Turns within a session are serialised, so rapid-fire messages queue instead of interleaving.
+- **Tool approval** — agents created with `tools_approval_required: true` prompt in-channel with the tool name and arguments. The bot seeds ✅ and ❌ so they are one click away; the person who asked approves by clicking either **or** by replying `yes` / `no`, and the typed reply is consumed by the prompt rather than treated as a new question. Once answered the bot withdraws its own reactions and edits the outcome into the prompt, so a resolved request never looks like a pending vote. Only the asker's answer counts, and no answer within `tool_confirmation_timeout` denies the call.
+- **Long answers** — responses over Discord's 2000-character limit are split across messages on line and word boundaries.
+- **Embedding** — use `await server.start()` instead of `server.run()` to attach the bot to an event loop you already own, and `await server.close()` to disconnect.
+
+```python
+server = DiscordAgentServer(
+    agent,
+    command_prefix="!ask ",
+    allowed_channels=[1234567890],
+    session_scope="user",
+    activity_status="answering questions",
+)
+server.run()
+```

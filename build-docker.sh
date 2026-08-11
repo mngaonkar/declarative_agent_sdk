@@ -14,21 +14,11 @@ echo "Building Declarative Agent SDK Docker Image"
 echo "Image: ${IMAGE_NAME}:${TAG}"
 echo "========================================"
 
-# Get the SDK directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-
-echo "SDK directory: ${SCRIPT_DIR}"
-echo "Project root: ${PROJECT_ROOT}"
-
-# Build the Docker image from project root to include skills
-cd "${PROJECT_ROOT}"
-
 docker buildx build \
     --platform linux/amd64,linux/arm64 \
     --no-cache \
     -t "${IMAGE_NAME}:${TAG}" \
-    -f declarative_agent_sdk/Dockerfile \
+    -f Dockerfile \
     .
 
 echo ""
