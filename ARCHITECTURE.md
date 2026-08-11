@@ -16,7 +16,7 @@ versa). Transports only depend on the shared `BaseAgent` + `AgentEvent` contract
 │                       Declarative Agent SDK                              │
 │                                                                          │
 │   YAML / Python ──► AgentFactory ──► LeanAIAgent      (default)          │
-│                                   or AIAgent          (ADK)              │
+│                                   or ADKAIAgent          (ADK)              │
 │                                   or LangChainAIAgent (deepagent)        │
 │                                              │                           │
 │                         each owns its own loop / sessions                │
@@ -66,7 +66,7 @@ declarative_agent_sdk/                 # repo root == package root
 │   │   ├── agent.py                   # LeanAIAgent
 │   │   └── runtime/                   # loop, skills, tools, llm, chat_backend
 │   ├── adk/
-│   │   ├── agent.py                   # AIAgent (Google ADK Runner)
+│   │   ├── agent.py                   # ADKAIAgent (Google ADK Runner)
 │   │   └── plugins/                   # context_updater, etc.
 │   └── deepagent/
 │       └── agent.py                   # LangChainAIAgent (create_deep_agent)
@@ -100,7 +100,7 @@ declarative_agent_sdk/                 # repo root == package root
 
 ```python
 from declarative_agent_sdk import (
-    AgentFactory, LeanAIAgent, AIAgent, LangChainAIAgent,
+    AgentFactory, LeanAIAgent, ADKAIAgent, LangChainAIAgent,
     DiscordAgentServer, AgentEvent,
 )
 
@@ -117,7 +117,7 @@ from declarative_agent_sdk.core.agent_factory import AgentFactory
 | Value | Class | Loop owner | Default models / notes |
 |-------|--------|------------|-------------------------|
 | **`lean`** (default) | `LeanAIAgent` | Native `LeanLoop` (ESP-style ReAct) | OpenAI-compatible; progressive skills |
-| `adk` | `AIAgent` | Google ADK `Runner` | Gemini / LiteLLM; FunctionTool confirmation |
+| `adk` | `ADKAIAgent` | Google ADK `Runner` | Gemini / LiteLLM; FunctionTool confirmation |
 | `deepagent` | `LangChainAIAgent` | `deepagents.create_deep_agent` (LangGraph) | Anthropic/OpenAI/…; `interrupt_on` HITL |
 
 YAML:
@@ -175,7 +175,7 @@ LeanAIAgent.__init__
 ### ADK path (`agents/adk/`)
 
 ```
-AIAgent.__init__
+ADKAIAgent.__init__
     │
     ├─ ModelFactory.create_model(provider, endpoint, …)
     ├─ SkillRegistry (instance-isolated) + ToolRegistry built-ins
@@ -414,7 +414,7 @@ LeanToolRegistry for OpenAI function schemas.
 | `LeanAIAgent` | `agents/lean/agent.py` | Lean runtime entry |
 | `LeanLoop` | `agents/lean/runtime/loop.py` | Native ReAct + approval |
 | `SkillRegistry` (lean) | `agents/lean/runtime/skills.py` | Progressive skills |
-| `AIAgent` | `agents/adk/agent.py` | ADK Runner end-to-end |
+| `ADKAIAgent` | `agents/adk/agent.py` | ADK Runner end-to-end |
 | `LangChainAIAgent` | `agents/deepagent/agent.py` | deepagents end-to-end |
 | `DiscordAgentServer` | `transports/discord/server.py` | Discord gateway |
 | `AIAgentServer` | `transports/a2a/server.py` | A2A HTTP server |

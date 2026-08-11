@@ -1,7 +1,7 @@
 """
 Canonical agent stream events.
 
-Both AIAgent (ADK) and LangChainAIAgent (deepagent) yield ``AgentEvent``.
+Both ADKAIAgent (ADK) and LangChainAIAgent (deepagent) yield ``AgentEvent``.
 Transports (Discord, A2A) already duck-type a small ADK-like surface:
 
     event.is_final_response()

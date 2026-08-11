@@ -66,7 +66,7 @@ class LeanAIAgent(BaseAgent):
     """
     Lean runtime end-to-end: ReAct loop + progressive skills.
 
-    Peer of AIAgent (ADK) and LangChainAIAgent (deepagent). Same BaseAgent
+    Peer of ADKAIAgent (ADK) and LangChainAIAgent (deepagent). Same BaseAgent
     surface for Discord/A2A; does not embed other frameworks.
     """
 

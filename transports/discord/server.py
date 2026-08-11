@@ -714,7 +714,7 @@ def _format_tool_prompt(request: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 class DiscordAgentServer:
-    """Serve a BaseAgent (AIAgent, LangChainAIAgent, …) as a Discord bot."""
+    """Serve a BaseAgent (ADKAIAgent, LangChainAIAgent, …) as a Discord bot."""
 
     def __init__(
         self,

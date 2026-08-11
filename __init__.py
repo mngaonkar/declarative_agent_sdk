@@ -17,7 +17,7 @@ from declarative_agent_sdk.core import utils, constants
 
 # Agents (peer end-to-end loops)
 from declarative_agent_sdk.agents.lean.agent import LeanAIAgent
-from declarative_agent_sdk.agents.adk.agent import AIAgent
+from declarative_agent_sdk.agents.adk.agent import ADKAIAgent
 from declarative_agent_sdk.agents.deepagent.agent import LangChainAIAgent, LangChainEvent
 from declarative_agent_sdk.agents.adk.plugins.context_updater import get_updated_context
 
@@ -43,7 +43,7 @@ from declarative_agent_sdk.workflows.server import AIWorkflowServer
 __all__ = [
     "__version__",
     "BaseAgent",
-    "AIAgent",
+    "ADKAIAgent",
     "LeanAIAgent",
     "LangChainAIAgent",
     "LangChainEvent",

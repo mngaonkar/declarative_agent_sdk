@@ -110,7 +110,7 @@ Pick **one** loop per agent. Do not nest frameworks.
 | Value | Class | Loop owner | Typical use |
 |-------|--------|------------|-------------|
 | **`lean`** (default) | `LeanAIAgent` | Native ReAct + progressive skills | Product bots, Discord, simple tools |
-| `adk` | `AIAgent` | Google ADK `Runner` | Gemini / ADK-native sessions |
+| `adk` | `ADKAIAgent` | Google ADK `Runner` | Gemini / ADK-native sessions |
 | `deepagent` | `LangChainAIAgent` | `deepagents` / LangGraph | Deep multi-step graphs, HITL interrupts |
 
 ```yaml
@@ -133,7 +133,7 @@ Shared across all three:
 ## Architecture (high level)
 
 ```
-YAML ──► AgentFactory ──► LeanAIAgent | AIAgent | LangChainAIAgent
+YAML ──► AgentFactory ──► LeanAIAgent | ADKAIAgent | LangChainAIAgent
                                       │
                                       ▼
                                AgentEvent stream
@@ -150,7 +150,7 @@ YAML ──► AgentFactory ──► LeanAIAgent | AIAgent | LangChainAIAgent
 core/                 # factory, events, BaseAgent, registries
 agents/
   lean/               # LeanAIAgent + runtime/ (loop, skills, tools, llm)
-  adk/                # AIAgent + ADK plugins
+  adk/                # ADKAIAgent + ADK plugins
   deepagent/          # LangChainAIAgent
 tools/                # ToolRegistry, SkillRegistry, builtin/
 models/               # ModelFactory (ADK providers)

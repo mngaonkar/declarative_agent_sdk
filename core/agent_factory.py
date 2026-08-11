@@ -5,7 +5,7 @@ Three peer runtimes — each owns its loop end-to-end (no mixing):
 
   - ``lean`` (default)  → LeanAIAgent
         Native ReAct + progressive skills (ESP-style)
-  - ``adk``             → AIAgent
+  - ``adk``             → ADKAIAgent
         Google ADK Runner + sessions + tool confirmation
   - ``deepagent``       → LangChainAIAgent
         deepagents / LangGraph create_deep_agent
@@ -158,7 +158,7 @@ class AgentFactory:
 
     @staticmethod
     def _create_adk_agent(common: CommonAgentConfig) -> BaseAgent:
-        from declarative_agent_sdk.agents.adk.agent import AIAgent
+        from declarative_agent_sdk.agents.adk.agent import ADKAIAgent
         from declarative_agent_sdk.models.model_factory import ModelFactory
 
         if not common.instruction_file:
@@ -180,7 +180,7 @@ class AgentFactory:
             **model_kwargs,
         )
         logger.info(f"Creating ADK agent '{common.name}' (ADK Runner end-to-end)")
-        return AIAgent(
+        return ADKAIAgent(
             name=common.name,
             description=common.description,
             instruction_file=common.instruction_file,

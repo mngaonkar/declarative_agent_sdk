@@ -4,7 +4,7 @@ Lean agent runtime — ESP-style ReAct loop with progressive skills.
 One of three peer agent_framework choices (each owns its loop end-to-end):
 
   - lean      → this package (LeanLoop + skills)
-  - adk       → Google ADK Runner (ai_agent.AIAgent)
+  - adk       → Google ADK Runner (ai_agent.ADKAIAgent)
   - deepagent → deepagents / LangGraph (langchain_ai_agent.LangChainAIAgent)
 
 No framework mixing: pick one outer loop via agent_framework in YAML.

@@ -9,14 +9,14 @@ import socket
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 logger = get_logger(__name__)
-from declarative_agent_sdk.agents.adk.agent import AIAgent
+from declarative_agent_sdk.core.base_agent import BaseAgent
 from declarative_agent_sdk.transports.a2a.executor import AIAgentExecutor
 from declarative_agent_sdk.transports.a2a.formatters.a2ui_response_formatter import A2UIResponseFormatter
 from declarative_agent_sdk.transports.a2a.formatters.text_response_formatter import TextResponseFormatter
 
 
 class AIAgentServer():
-    def __init__(self, agent: AIAgent, host: str = "0.0.0.0", port: int = 8000):
+    def __init__(self, agent: BaseAgent, host: str = "0.0.0.0", port: int = 8000):
         self._agent = agent
         self._agent_executor = AIAgentExecutor(agent, formatter=TextResponseFormatter())
         self._host = host

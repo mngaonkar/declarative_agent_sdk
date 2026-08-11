@@ -108,7 +108,7 @@ Then `--mode connect` to confirm, and `--mode live` to serve.
 | `agent_framework` | Class | Owns the loop |
 |---|---|---|
 | **`lean` (default)** | `LeanAIAgent` | Native ReAct + progressive skills |
-| `adk` | `AIAgent` | Google ADK Runner |
+| `adk` | `ADKAIAgent` | Google ADK Runner |
 | `deepagent` | `LangChainAIAgent` | deepagents / LangGraph |
 
 Shared across all three: YAML config shape, `AgentEvent` stream, Discord/A2A transports.  

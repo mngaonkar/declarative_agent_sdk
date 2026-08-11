@@ -73,14 +73,14 @@ async def dynamic_context_callback(
 
 
 # ---------------------------------------------------------------------------
-# AIAgent
+# ADKAIAgent
 # ---------------------------------------------------------------------------
 
-class AIAgent(BaseAgent):
+class ADKAIAgent(BaseAgent):
     """
     Google ADK-backed agent.
 
-    Composes (rather than extends) google.adk.agents.Agent so that AIAgent
+    Composes (rather than extends) google.adk.agents.Agent so that ADKAIAgent
     is a plain Python class that satisfies the BaseAgent interface.  The
     internal ADK agent is stored as self._adk_agent and passed to the Runner.
     """

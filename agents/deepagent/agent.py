@@ -1,6 +1,6 @@
 """Deepagents / LangGraph agent — create_deep_agent owns the loop end-to-end.
 
-Peer of LeanAIAgent and AIAgent (ADK). Select with::
+Peer of LeanAIAgent and ADKAIAgent (ADK). Select with::
 
     agent_framework: deepagent
 
@@ -270,7 +270,7 @@ class LangChainAIAgent(BaseAgent):
     """
     Deep agent backed by deepagents.create_deep_agent (LangGraph harness).
 
-    Yields ``AgentEvent`` — the same type as AIAgent — so Discord / A2A need
+    Yields ``AgentEvent`` — the same type as ADKAIAgent — so Discord / A2A need
     no backend-specific handling.
     """
 
