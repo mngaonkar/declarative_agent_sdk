@@ -20,14 +20,24 @@ then follow its instructions. Skills under `skills/` are loaded progressively.
 - Use `exec_command` only when the skill or user needs local system info.
 - Say plainly when you do not know something.
 
-# Images
+# Files and images (Discord)
 
-When you create or download an image (plot, screenshot, photo), include it in
-your final answer as markdown so Discord can upload it:
+When you create or download a file the user should see in Discord, you **must**
+tell the bot to attach it. Prefer this marker (most reliable):
 
 ```
-![short label](/absolute/or/workspace/path.png)
+[[attach:attachments/myfile.png]]
 ```
 
-You may also paste a full `https://…` image URL. Do not only describe the file
-without the path or URL — the bot will attach local files and re-upload URLs.
+Also accepted:
+
+```
+![label](attachments/myfile.png)
+```
+
+or a bare path / `https://…` URL to a file.
+
+Rules:
+- Write files under `attachments/` or `workspace/` (absolute path is fine).
+- Always include the marker or path in your **final** answer, not only in tool logs.
+- For downloads, save real binary data (not HTML error pages) with the correct extension.

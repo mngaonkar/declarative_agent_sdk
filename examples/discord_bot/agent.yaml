@@ -8,7 +8,7 @@
 name: discord_news_agent
 description: Answers questions in Discord with tools and progressive skills
 
-agent_framework: deepagent 
+agent_framework: lean 
 
 instruction_file: instructions.md
 skills_directory: skills

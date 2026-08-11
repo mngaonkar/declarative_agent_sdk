@@ -151,6 +151,13 @@ def _mention(user_id="1"):
 # ---------------------------------------------------------------------------
 
 class TestExtractImageRefs:
+    def test_attach_marker(self):
+        text, refs = extract_image_refs(
+            "Chart ready [[attach:attachments/plot.png]] thanks"
+        )
+        assert refs == ["attachments/plot.png"]
+        assert "[[" not in text
+
     def test_markdown_image(self):
         text, refs = extract_image_refs("See ![plot](workspace/out.png) above")
         assert refs == ["workspace/out.png"]

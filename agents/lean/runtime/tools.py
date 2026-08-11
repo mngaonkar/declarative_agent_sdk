@@ -39,10 +39,16 @@ class LeanToolRegistry:
         self.skills = skills
         self.workspace = str(Path(workspace).expanduser().resolve())
         os.makedirs(self.workspace, exist_ok=True)
+        # Sibling attachments/ dir (common for Discord file drops)
+        self.attachments = str(
+            (Path(self.workspace).parent / "attachments").resolve()
+        )
+        os.makedirs(self.attachments, exist_ok=True)
         skills_root = str(Path(skills.root).resolve())
         self._mutable_prefixes = mutable_prefixes or [
             skills_root.rstrip("/") + "/",
             self.workspace.rstrip("/") + "/",
+            self.attachments.rstrip("/") + "/",
             "/tmp/",
         ]
         self._handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
@@ -186,8 +192,11 @@ class LeanToolRegistry:
         )
         self.add(
             "write_file",
-            "Create or overwrite a text file under the workspace or skills tree. "
-            "For a new skill write skills/<name>/SKILL.md then optional scripts/.",
+            "Create or overwrite a text file under workspace/, attachments/, or "
+            "the skills tree. For a new skill write skills/<name>/SKILL.md. "
+            "When saving a file for the user to see in Discord, write under "
+            "attachments/ and include [[attach:attachments/filename.ext]] in "
+            "your final answer so the bot uploads it.",
             {
                 "path": {"type": "string", "description": "File path."},
                 "content": {"type": "string", "description": "Full file contents."},

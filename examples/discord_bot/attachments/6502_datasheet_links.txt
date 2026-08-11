@@ -1,0 +1,11 @@
+6502 / 65C02 Datasheet Links
+
+1) Original MOS Technology 6502 family datasheets archive:
+https://6502.org/documents/datasheets/mos/
+
+2) WDC W65C02S product page (includes datasheet link):
+https://www.westerndesigncenter.com/wdc/w65c02s-chip.cfm
+
+Notes:
+- I could verify the WDC page live.
+- The 6502.org archive was found in search results, but direct fetch returned 404 from this environment, so I’m attaching the link file instead of the PDF.

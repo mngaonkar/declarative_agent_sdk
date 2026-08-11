@@ -18,6 +18,7 @@ Discord developer portal, otherwise message text arrives empty.
 """
 
 import asyncio
+import io
 import json
 import mimetypes
 import os
@@ -26,7 +27,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
 
 from declarative_agent_sdk.core.agent_logging import get_logger
@@ -37,7 +38,7 @@ logger = get_logger(__name__)
 
 # Discord rejects messages longer than this.
 DISCORD_MESSAGE_LIMIT = 2000
-# Non-boosted servers: 25 MiB is the usual bot upload cap; stay under it.
+# Stay under typical bot upload caps (25 MiB).
 DISCORD_FILE_MAX_BYTES = 24 * 1024 * 1024
 DISCORD_MAX_FILES_PER_MESSAGE = 10
 
@@ -49,6 +50,26 @@ APPROVE_WORDS = {"y", "yes", "ok", "okay", "approve", "approved", "go", "do it"}
 DENY_WORDS = {"n", "no", "nope", "deny", "denied", "cancel", "stop"}
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+# Non-image files we will still attach when found on disk.
+_FILE_EXTS = _IMAGE_EXTS + (
+    ".pdf",
+    ".txt",
+    ".csv",
+    ".json",
+    ".md",
+    ".zip",
+    ".gz",
+    ".tar",
+    ".mp3",
+    ".mp4",
+    ".wav",
+    ".webm",
+    ".svg",
+    ".xlsx",
+    ".docx",
+    ".py",
+    ".log",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -105,21 +126,29 @@ _TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 _HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
 _HR_RE = re.compile(r"^(?:\s*[-*_]){3,}\s*$", re.MULTILINE)
-# Bare image URLs (optional query string).
-_IMAGE_URL_RE = re.compile(
-    r"(https?://[^\s<>`\"')\]]+\.(?:png|jpe?g|gif|webp|bmp)(?:\?[^\s<>`\"')\]]*)?)",
+# Explicit attach markers agents can emit (most reliable).
+# Examples: [[attach:workspace/out.png]]  [[file:/tmp/a.pdf]]
+_ATTACH_MARKER_RE = re.compile(
+    r"\[\[(?:attach|file|discord_file)\s*:\s*([^\]]+)\]\]",
     re.IGNORECASE,
 )
-# Any path-like token ending in an image extension (quoted or bare).
-# Covers attachments/foo.jpg, workspace/x.png, /abs/path.jpg, `file.png`.
-_IMAGE_PATH_TOKEN_RE = re.compile(
+# Bare media URLs (optional query string).
+_FILE_URL_RE = re.compile(
+    r"(https?://[^\s<>`\"')\]]+\.(?:"
+    + "|".join(re.escape(e.lstrip(".")) for e in _FILE_EXTS)
+    + r")(?:\?[^\s<>`\"')\]]*)?)",
+    re.IGNORECASE,
+)
+# Path-like tokens ending in a known attachable extension.
+_ext_alt = "|".join(re.escape(e.lstrip(".")) for e in _FILE_EXTS)
+_FILE_PATH_TOKEN_RE = re.compile(
     r"[`\"']?("
-    r"(?:/(?!/)[^\s`\"'<>]+\.(?:png|jpe?g|gif|webp|bmp))"
-    r"|(?:\./[^\s`\"'<>]+\.(?:png|jpe?g|gif|webp|bmp))"
-    r"|(?:[A-Za-z]:\\[^\s`\"'<>]+\.(?:png|jpe?g|gif|webp|bmp))"
-    r"|(?:(?:attachments|workspace|skills|tmp|photos|output|outputs|images|img)"
-    r"/[^\s`\"'<>]+\.(?:png|jpe?g|gif|webp|bmp))"
-    r"|(?:[A-Za-z0-9_.\-]+/(?:[A-Za-z0-9_./\-])+\.(?:png|jpe?g|gif|webp|bmp))"
+    rf"(?:/(?!/)[^\s`\"'<>]+\.(?:{_ext_alt}))"
+    rf"|(?:\./[^\s`\"'<>]+\.(?:{_ext_alt}))"
+    rf"|(?:[A-Za-z]:\\[^\s`\"'<>]+\.(?:{_ext_alt}))"
+    rf"|(?:(?:attachments|workspace|skills|tmp|photos|output|outputs|images|img)"
+    rf"/[^\s`\"'<>]+\.(?:{_ext_alt}))"
+    rf"|(?:[A-Za-z0-9_.\-]+/(?:[A-Za-z0-9_./\-])+\.(?:{_ext_alt}))"
     r")[`\"']?",
     re.IGNORECASE,
 )
@@ -165,6 +194,11 @@ def _format_table_block(rows: List[List[str]]) -> str:
 def _looks_like_image_ref(ref: str) -> bool:
     lower = ref.split("?", 1)[0].lower()
     return any(lower.endswith(ext) for ext in _IMAGE_EXTS)
+
+
+def _looks_like_file_ref(ref: str) -> bool:
+    lower = ref.split("?", 1)[0].lower()
+    return any(lower.endswith(ext) for ext in _FILE_EXTS)
 
 
 def _is_real_image_bytes(data: bytes) -> bool:
@@ -243,8 +277,8 @@ def _image_watch_dirs() -> List[Path]:
     return out
 
 
-def snapshot_image_files(dirs: Optional[List[Path]] = None) -> Dict[str, float]:
-    """Map absolute image path → mtime for dirs (shallow + one level)."""
+def snapshot_attachable_files(dirs: Optional[List[Path]] = None) -> Dict[str, float]:
+    """Map absolute attachable file path → mtime (shallow + one level)."""
     snap: Dict[str, float] = {}
     for d in dirs or _image_watch_dirs():
         if not d.is_dir():
@@ -255,46 +289,62 @@ def snapshot_image_files(dirs: Optional[List[Path]] = None) -> Dict[str, float]:
             continue
         for entry in entries:
             try:
-                if entry.is_file() and _looks_like_image_ref(entry.name):
+                if entry.is_file() and _looks_like_file_ref(entry.name):
                     snap[str(entry.resolve())] = entry.stat().st_mtime
                 elif entry.is_dir():
                     for child in entry.iterdir():
-                        if child.is_file() and _looks_like_image_ref(child.name):
+                        if child.is_file() and _looks_like_file_ref(child.name):
                             snap[str(child.resolve())] = child.stat().st_mtime
             except OSError:
                 continue
     return snap
 
 
-def new_images_since(before: Dict[str, float], after: Optional[Dict[str, float]] = None) -> List[str]:
-    """Return paths that are new or updated after *before* snapshot."""
-    after = after if after is not None else snapshot_image_files()
+# Back-compat aliases
+snapshot_image_files = snapshot_attachable_files
+
+
+def new_files_since(
+    before: Dict[str, float], after: Optional[Dict[str, float]] = None
+) -> List[str]:
+    """Return attachable paths that are new or updated after *before*."""
+    after = after if after is not None else snapshot_attachable_files()
     out: List[str] = []
     for path, mtime in after.items():
         prev = before.get(path)
         if prev is None or mtime > prev + 0.01:
-            if _is_real_image_file(path):
-                out.append(path)
+            # Images must be real; other types only need non-empty size
+            if _looks_like_image_ref(path):
+                if _is_real_image_file(path):
+                    out.append(path)
+            else:
+                try:
+                    if Path(path).stat().st_size > 0:
+                        out.append(path)
+                except OSError:
+                    pass
     return out
 
 
-def extract_image_refs(text: str) -> Tuple[str, List[str]]:
-    """
-    Find image markdown / URLs / local paths in *text*.
+new_images_since = new_files_since  # back-compat
 
-    Returns ``(cleaned_text, refs)`` where refs are unique sources in order.
-    Markdown image syntax is removed from the text (files will be attached);
-    bare URLs/paths are left in place so the message still documents the source.
+
+def extract_file_refs(text: str) -> Tuple[str, List[str]]:
+    """
+    Find attach markers / markdown images / URLs / local paths in *text*.
+
+    Returns ``(cleaned_text, refs)``. Explicit ``[[attach:…]]`` markers and
+    markdown images are stripped (files will be attached).
     """
     if not text:
         return text, []
 
     refs: List[str] = []
-    seen: set = set()
+    seen: Set[str] = set()
 
     def _add(ref: str) -> None:
         ref = (ref or "").strip().strip("<>\"'`")
-        if not ref or not _looks_like_image_ref(ref):
+        if not ref or not _looks_like_file_ref(ref):
             return
         if ref.startswith("//"):
             return
@@ -302,27 +352,39 @@ def extract_image_refs(text: str) -> Tuple[str, List[str]]:
             seen.add(ref)
             refs.append(ref)
 
-    # 1) ![alt](src) — strip from text; attach instead
+    # 0) explicit markers — most reliable
+    def _marker_sub(match: re.Match) -> str:
+        _add(match.group(1).strip())
+        return ""
+
+    cleaned = _ATTACH_MARKER_RE.sub(_marker_sub, text)
+
+    # 1) ![alt](src)
     def _md_sub(match: re.Match) -> str:
         _add(match.group(2))
-        alt = (match.group(1) or "").strip()
-        return alt
+        return (match.group(1) or "").strip()
 
-    cleaned = _IMAGE_RE.sub(_md_sub, text)
+    cleaned = _IMAGE_RE.sub(_md_sub, cleaned)
 
-    # 2) bare image URLs
-    for match in _IMAGE_URL_RE.finditer(cleaned):
+    # 2) bare file URLs
+    for match in _FILE_URL_RE.finditer(cleaned):
         _add(match.group(1))
 
-    # 3) path-like tokens (attachments/foo.jpg, workspace/x.png, /abs/…)
-    for match in _IMAGE_PATH_TOKEN_RE.finditer(cleaned):
+    # 3) path-like tokens
+    for match in _FILE_PATH_TOKEN_RE.finditer(cleaned):
         _add(match.group(1))
 
+    # collapse leftover blank lines from stripped markers
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, refs
 
 
-def resolve_local_image_path(ref: str) -> Optional[Path]:
-    """Resolve a local image ref against cwd and common project dirs."""
+# Back-compat name used by tests / callers
+extract_image_refs = extract_file_refs
+
+
+def resolve_local_file_path(ref: str) -> Optional[Path]:
+    """Resolve a local file ref against cwd and common project dirs."""
     raw = os.path.expanduser((ref or "").strip())
     if not raw or raw.startswith(("http://", "https://")):
         return None
@@ -334,8 +396,8 @@ def resolve_local_image_path(ref: str) -> Optional[Path]:
     else:
         for base in _search_bases():
             candidates.append(base / raw)
-            # also try basename under attachments/
             candidates.append(base / "attachments" / Path(raw).name)
+            candidates.append(base / "workspace" / Path(raw).name)
             candidates.append(base / Path(raw).name)
 
     for cand in candidates:
@@ -348,36 +410,39 @@ def resolve_local_image_path(ref: str) -> Optional[Path]:
     return None
 
 
-def resolve_image_files(
+resolve_local_image_path = resolve_local_file_path
+
+
+def resolve_attachable_files(
     refs: List[str],
     *,
     max_files: int = DISCORD_MAX_FILES_PER_MESSAGE,
     max_bytes: int = DISCORD_FILE_MAX_BYTES,
 ) -> Tuple[List[str], List[str]]:
     """
-    Resolve refs to local filesystem paths ready for ``discord.File``.
+    Resolve refs to local paths ready for ``discord.File``.
 
-    Downloads http(s) images to temp files. Skips HTML/error pages masquerading
-    as images. Returns ``(local_paths, notes)``.
+    Downloads http(s) when needed. Validates image magic bytes for image
+    extensions. Returns ``(local_paths, notes)``.
     """
     local_paths: List[str] = []
     notes: List[str] = []
-    temp_dir = tempfile.mkdtemp(prefix="discord_imgs_")
-    seen_resolved: set = set()
+    temp_dir = tempfile.mkdtemp(prefix="discord_files_")
+    seen_resolved: Set[str] = set()
 
     for ref in refs:
         if len(local_paths) >= max_files:
             notes.append(
-                f"(skipped remaining images — Discord max {max_files} per message)"
+                f"(skipped remaining files — Discord max {max_files} per message)"
             )
             break
 
         if ref.startswith(("http://", "https://")):
-            path = _download_image(ref, temp_dir, max_bytes=max_bytes)
+            path = _download_file(ref, temp_dir, max_bytes=max_bytes)
             if path and path not in seen_resolved:
-                if not _is_real_image_file(path):
+                if _looks_like_image_ref(path) and not _is_real_image_file(path):
                     notes.append(
-                        f"Downloaded file is not a valid image (got HTML/error?): {ref}"
+                        f"Downloaded file is not a valid image (HTML/error?): {ref}"
                     )
                     try:
                         os.remove(path)
@@ -387,12 +452,12 @@ def resolve_image_files(
                 seen_resolved.add(path)
                 local_paths.append(path)
             elif not path:
-                notes.append(f"Could not fetch image: {ref}")
+                notes.append(f"Could not fetch file: {ref}")
             continue
 
-        candidate = resolve_local_image_path(ref)
+        candidate = resolve_local_file_path(ref)
         if candidate is None:
-            notes.append(f"Image not found: {ref}")
+            notes.append(f"File not found: {ref}")
             continue
         key = str(candidate)
         if key in seen_resolved:
@@ -403,15 +468,15 @@ def resolve_image_files(
             notes.append(f"Cannot read {ref}: {exc}")
             continue
         if size == 0:
-            notes.append(f"Empty image file: {ref}")
+            notes.append(f"Empty file: {ref}")
             continue
         if size > max_bytes:
             notes.append(
-                f"Image too large for Discord upload ({size // (1024 * 1024)} MiB, "
+                f"File too large for Discord ({size // (1024 * 1024)} MiB, "
                 f"limit ~{max_bytes // (1024 * 1024)} MiB): {ref}"
             )
             continue
-        if not _is_real_image_file(key):
+        if _looks_like_image_ref(key) and not _is_real_image_file(key):
             notes.append(
                 f"File is not a valid image (HTML/error page saved as image?): {ref}"
             )
@@ -422,13 +487,16 @@ def resolve_image_files(
     return local_paths, notes
 
 
-def _download_image(url: str, dest_dir: str, *, max_bytes: int) -> Optional[str]:
+resolve_image_files = resolve_attachable_files
+
+
+def _download_file(url: str, dest_dir: str, *, max_bytes: int) -> Optional[str]:
     """Download *url* into *dest_dir*; return local path or None."""
     try:
         parsed = urlparse(url)
-        name = Path(unquote(parsed.path)).name or "image"
-        if not any(name.lower().endswith(ext) for ext in _IMAGE_EXTS):
-            name = name + ".png"
+        name = Path(unquote(parsed.path)).name or "download"
+        if not _looks_like_file_ref(name):
+            name = name + ".bin"
         name = re.sub(r"[^\w.\-]+", "_", name)[:120]
         dest = os.path.join(dest_dir, name)
         base, ext = os.path.splitext(dest)
@@ -443,36 +511,41 @@ def _download_image(url: str, dest_dir: str, *, max_bytes: int) -> Optional[str]
                 "User-Agent": (
                     "Mozilla/5.0 (compatible; declarative-agent-sdk-discord/1.0)"
                 ),
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Accept": "*/*",
             },
             method="GET",
         )
-        with urllib.request.urlopen(req, timeout=45) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             data = resp.read(max_bytes + 1)
             content_type = (resp.headers.get("Content-Type") or "").lower()
         if len(data) > max_bytes:
-            logger.warning(f"Downloaded image exceeds size cap: {url}")
+            logger.warning(f"Downloaded file exceeds size cap: {url}")
             return None
         if not data:
             return None
-        if "text/html" in content_type or not _is_real_image_bytes(data):
-            logger.warning(
-                f"URL did not return image bytes (content-type={content_type!r}): {url}"
-            )
-            return None
-        if not any(dest.lower().endswith(ext) for ext in _IMAGE_EXTS):
+        # For image URLs, reject HTML error pages
+        if _looks_like_image_ref(dest) or "image/" in content_type:
+            if "text/html" in content_type or not _is_real_image_bytes(data):
+                logger.warning(
+                    f"URL did not return image bytes (content-type={content_type!r}): {url}"
+                )
+                return None
+        if not _looks_like_file_ref(dest):
             guess = mimetypes.guess_extension(content_type.split(";")[0].strip())
-            if guess and guess.lower() in _IMAGE_EXTS:
+            if guess:
                 dest = dest + guess
         with open(dest, "wb") as f:
             f.write(data)
         return dest
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
-        logger.warning(f"Failed to download image {url}: {exc}")
+        logger.warning(f"Failed to download file {url}: {exc}")
         return None
     except Exception as exc:
         logger.warning(f"Unexpected error downloading {url}: {exc}")
         return None
+
+
+_download_image = _download_file
 
 
 def to_discord_markdown(text: str) -> str:
@@ -874,20 +947,18 @@ class DiscordAgentServer:
         channel = message.channel
         status_message: Any = None
         answered = False
-        # Collect image refs from the whole turn (tool status + final). Agents
-        # often print "saved to attachments/foo.jpg" only in tool output.
-        turn_image_refs: List[str] = []
-        # Tool stdout is NOT streamed to Discord — snapshot image dirs so we
-        # still pick up files the agent wrote under attachments/workspace.
-        images_before = snapshot_image_files()
+        # File refs harvested from the whole turn + dirs snapshotted for new files
+        # (tool stdout is not streamed, so path-only tool results would be missed).
+        turn_file_refs: List[str] = []
+        files_before = snapshot_attachable_files()
 
-        def _harvest_images(raw: str) -> None:
+        def _harvest_files(raw: str) -> None:
             if not raw:
                 return
-            _, refs = extract_image_refs(raw)
+            _, refs = extract_file_refs(raw)
             for ref in refs:
-                if ref not in turn_image_refs:
-                    turn_image_refs.append(ref)
+                if ref not in turn_file_refs:
+                    turn_file_refs.append(ref)
 
         stream = self._agent.run_query(query, session_id)
         while stream is not None:
@@ -895,30 +966,28 @@ class DiscordAgentServer:
 
             async for event in stream:
                 event_text = _event_text(event)
-                _harvest_images(event_text)
+                _harvest_files(event_text)
 
                 if _is_final(event):
                     text = remove_think_content(event_text)
-                    # Files created during the turn
-                    for path in new_images_since(images_before):
-                        if path not in turn_image_refs:
-                            turn_image_refs.append(path)
-                    if not text and not turn_image_refs:
+                    for path in new_files_since(files_before):
+                        if path not in turn_file_refs:
+                            turn_file_refs.append(path)
+                    if not text and not turn_file_refs:
                         continue
                     if self._format_markdown and text:
                         text = to_discord_markdown(text)
                     status_message = await self._clear_status(status_message)
                     await self._send_reply(
-                        channel, text or "", extra_image_refs=turn_image_refs
+                        channel, text or "", extra_file_refs=turn_file_refs
                     )
                     answered = True
                     continue
 
                 confirmation = _confirmation_request(event)
                 if confirmation:
-                    # Tool args sometimes include output paths
                     try:
-                        _harvest_images(json.dumps(confirmation.get("args") or {}))
+                        _harvest_files(json.dumps(confirmation.get("args") or {}))
                     except (TypeError, ValueError):
                         pass
                     pending_confirmation = confirmation
@@ -1072,12 +1141,11 @@ class DiscordAgentServer:
     ) -> Any:
         """Send text to a channel, splitting it across the 2000-char limit.
 
-        When *files* is provided, attachments go on the **first** chunk only
-        (Discord requires a non-empty message or at least one file).
+        When *files* is provided, attachments go on the **first** chunk only.
         """
         chunks = split_message(text) if text else []
         if not chunks and files:
-            chunks = [""]  # attachment-only message
+            chunks = [None]  # attachment-only: no empty-string content
         if not chunks:
             return None
 
@@ -1087,20 +1155,57 @@ class DiscordAgentServer:
             if chunk:
                 kwargs["content"] = chunk
             if i == 0 and files:
+                # Prefer files= list; also works with a single File
                 kwargs["files"] = files
             if not kwargs:
                 continue
             try:
                 sent = await channel.send(**kwargs)
+            except TypeError:
+                # Older/mock clients may only accept content=
+                try:
+                    if i == 0 and files and len(files) == 1:
+                        sent = await channel.send(
+                            content=kwargs.get("content"), file=files[0]
+                        )
+                    else:
+                        raise
+                except Exception as exc:
+                    logger.error(f"Failed to send Discord message: {exc}", exc_info=True)
+                    if i == 0 and files:
+                        try:
+                            await channel.send(
+                                content=(
+                                    (kwargs.get("content") or "")
+                                    + "\n⚠️ Could not upload attachment(s). "
+                                    "Check bot **Attach Files** permission and file size."
+                                ).strip()
+                            )
+                        except Exception:
+                            pass
+                    return None
             except Exception as exc:
-                logger.warning(f"Failed to send Discord message: {exc}")
+                logger.error(f"Failed to send Discord message: {exc}", exc_info=True)
                 # Retry text without files if attachment upload failed
-                if i == 0 and files and "content" in kwargs:
+                if i == 0 and files:
+                    err = str(exc)
+                    hint = ""
+                    if "403" in err or "Missing Permissions" in err or "50013" in err:
+                        hint = (
+                            " Bot needs **Attach Files** (and Send Messages) "
+                            "in this channel."
+                        )
                     try:
-                        sent = await channel.send(content=kwargs["content"])
-                        logger.warning("Sent text without image attachments after upload failure")
+                        body = kwargs.get("content") or ""
+                        sent = await channel.send(
+                            content=(
+                                body
+                                + f"\n⚠️ Attachment upload failed: {exc}.{hint}"
+                            ).strip()
+                        )
+                        logger.warning("Sent text without attachments after upload failure")
                     except Exception as exc2:
-                        logger.warning(f"Fallback text send also failed: {exc2}")
+                        logger.error(f"Fallback text send also failed: {exc2}")
                         return None
                 else:
                     return None
@@ -1111,79 +1216,78 @@ class DiscordAgentServer:
         channel: Any,
         text: str,
         *,
-        extra_image_refs: Optional[List[str]] = None,
+        extra_file_refs: Optional[List[str]] = None,
+        extra_image_refs: Optional[List[str]] = None,  # back-compat alias
     ) -> Any:
         """
-        Send a final agent answer, uploading any local/remote images found
-        in the text (and *extra_image_refs* from the turn) as Discord
-        file attachments so they render in-channel.
+        Send a final agent answer and upload any files found in the text or
+        *extra_file_refs* (paths harvested during the turn).
         """
-        cleaned, refs = extract_image_refs(text or "")
-        # Merge turn-wide refs (tool logs often have paths the final text omits)
-        for ref in extra_image_refs or []:
+        cleaned, refs = extract_file_refs(text or "")
+        for ref in list(extra_file_refs or []) + list(extra_image_refs or []):
             if ref not in refs:
                 refs.append(ref)
 
-        logger.info(f"Discord image refs for reply: {refs or '(none)'}")
-        local_paths, notes = resolve_image_files(refs) if refs else ([], [])
+        logger.info(f"Discord file refs for reply: {refs or '(none)'}")
+        local_paths, notes = (
+            resolve_attachable_files(refs) if refs else ([], [])
+        )
         if local_paths:
-            logger.info(f"Resolved image files for upload: {local_paths}")
+            logger.info(f"Resolved files for Discord upload: {local_paths}")
         if notes:
-            logger.warning(f"Image resolve notes: {notes}")
+            logger.warning(f"File resolve notes: {notes}")
             note_block = "\n".join(f"_{n}_" for n in notes)
             cleaned = (cleaned + "\n\n" + note_block).strip() if cleaned else note_block
 
         discord_files: List[Any] = []
-        open_handles: List[Any] = []
         if local_paths:
             discord = self._import_discord()
             for path in local_paths:
                 try:
-                    # Open binary handles so discord.py always has seekable data
-                    handle = open(path, "rb")
-                    open_handles.append(handle)
+                    # Copy into BytesIO so discord.py never depends on open handles
+                    data = Path(path).read_bytes()
+                    buf = io.BytesIO(data)
+                    buf.seek(0)
                     discord_files.append(
-                        discord.File(handle, filename=Path(path).name)
+                        discord.File(buf, filename=Path(path).name)
                     )
                 except Exception as exc:
                     logger.warning(
-                        f"Could not open image for Discord upload ({path}): {exc}"
+                        f"Could not prepare file for Discord upload ({path}): {exc}"
                     )
             if discord_files:
                 logger.info(
-                    f"Attaching {len(discord_files)} image(s) to Discord reply: "
+                    f"Attaching {len(discord_files)} file(s) to Discord reply: "
                     f"{[Path(p).name for p in local_paths[: len(discord_files)]]}"
                 )
+            else:
+                logger.warning(
+                    "Had local paths but built zero discord.File objects — "
+                    f"paths={local_paths}"
+                )
 
-        try:
-            if self._reply_as_embed and not discord_files:
-                discord = self._import_discord()
-                embed_limit = 4096
-                sent = None
-                for chunk in split_message(cleaned, limit=embed_limit) or [""]:
-                    try:
-                        embed = discord.Embed(description=chunk or None)
-                        if refs and len(refs) == 1 and refs[0].startswith("http"):
-                            embed.set_image(url=refs[0])
-                        sent = await channel.send(embed=embed)
-                    except Exception as exc:
-                        logger.warning(
-                            f"Failed to send Discord embed reply, falling back to text: {exc}"
-                        )
-                        return await self._send(channel, cleaned, files=None)
-                return sent
-
-            return await self._send(
-                channel,
-                cleaned,
-                files=discord_files or None,
-            )
-        finally:
-            for handle in open_handles:
+        if self._reply_as_embed and not discord_files:
+            discord = self._import_discord()
+            embed_limit = 4096
+            sent = None
+            for chunk in split_message(cleaned, limit=embed_limit) or [""]:
                 try:
-                    handle.close()
-                except Exception:
-                    pass
+                    embed = discord.Embed(description=chunk or None)
+                    if refs and len(refs) == 1 and refs[0].startswith("http"):
+                        embed.set_image(url=refs[0])
+                    sent = await channel.send(embed=embed)
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to send Discord embed reply, falling back to text: {exc}"
+                    )
+                    return await self._send(channel, cleaned, files=None)
+            return sent
+
+        return await self._send(
+            channel,
+            cleaned,
+            files=discord_files or None,
+        )
 
     async def _update_status(self, channel: Any, status_message: Any, text: str) -> Any:
         """Post the working status, or edit the existing status message in place."""
