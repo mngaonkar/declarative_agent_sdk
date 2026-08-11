@@ -1,5 +1,7 @@
 """LangChain Deep Agent backed by the `deepagents` library."""
 
+from __future__ import annotations
+
 import os
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
@@ -7,12 +9,14 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 
 from deepagents import create_deep_agent
 
 from a2a.server.agent_execution import RequestContext
 
 from declarative_agent_sdk.a2a_utils import create_agent_card
+from declarative_agent_sdk.agent_event import AgentEvent
 from declarative_agent_sdk.agent_logging import get_logger
 from declarative_agent_sdk.base_agent import BaseAgent
 from declarative_agent_sdk.constants import SKILLS_DIRECTORY, WORKSPACE_DIRECTORY
@@ -24,45 +28,28 @@ logger = get_logger(__name__)
 DEFAULT_LANGCHAIN_MODEL = "claude-sonnet-4-6"
 DEFAULT_LANGCHAIN_PROVIDER = "anthropic"
 
+_DEEPAGENT_BUILTIN_TOOL_NAMES = (
+    "write_todos",
+    "ls",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "execute",
+    "task",
+)
 
-# ---------------------------------------------------------------------------
-# Minimal event objects compatible with AIAgentExecutor's expected interface
-# ---------------------------------------------------------------------------
+_APPROVE_REJECT_CONFIG: Dict[str, Any] = {
+    "allowed_decisions": ["approve", "reject"],
+}
 
-class _Part:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _Content:
-    def __init__(self, text: str) -> None:
-        self.parts = [_Part(text)]
-
-
-class _Actions:
-    def __init__(self) -> None:
-        self.requested_tool_confirmations: list = []
-
-
-class LangChainEvent:
-    """
-    Event yielded by LangChainAIAgent — shaped to match the interface that
-    AIAgentExecutor expects (is_final_response, content.parts, long_running_tool_ids,
-    actions.requested_tool_confirmations).
-    """
-
-    def __init__(self, text: str = "", is_final: bool = False) -> None:
-        self.content: Optional[_Content] = _Content(text) if text else None
-        self.long_running_tool_ids: list = []
-        self.actions = _Actions()
-        self._is_final = is_final
-
-    def is_final_response(self) -> bool:
-        return self._is_final
+# Back-compat alias — tests and external code may still import LangChainEvent
+LangChainEvent = AgentEvent
 
 
 # ---------------------------------------------------------------------------
-# Model resolution
+# Model / tool helpers
 # ---------------------------------------------------------------------------
 
 def _resolve_model(
@@ -70,14 +57,7 @@ def _resolve_model(
     provider: Optional[str],
     max_output_tokens: Optional[int] = None,
 ) -> Union[str, Any]:
-    """
-    Return a model value accepted by create_deep_agent.
-
-    - Pre-built BaseChatModel: returned as-is.
-    - "anthropic" / "openai" / "google*": formatted as "provider:model" string
-      for deepagents / init_chat_model resolution.
-    - "vllm" / "litellm" / unknown: fall back to a ChatLiteLLM BaseChatModel.
-    """
+    """Return a model value accepted by create_deep_agent."""
     if not isinstance(model, str):
         return model
 
@@ -93,7 +73,6 @@ def _resolve_model(
     if p in ("google", "google_genai"):
         return f"google_genai:{model}"
 
-    # vLLM / LiteLLM: build a BaseChatModel and hand it directly to deepagents
     try:
         from langchain_community.chat_models.litellm import ChatLiteLLM  # type: ignore
 
@@ -107,17 +86,173 @@ def _resolve_model(
         ) from exc
 
 
-# ---------------------------------------------------------------------------
-# Tool conversion
-# ---------------------------------------------------------------------------
+def _message_text(content: Any) -> str:
+    """Normalize AIMessage.content (str or content-block list) to plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if block is None:
+                continue
+            if isinstance(block, str):
+                parts.append(block)
+                continue
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                if block_type in (None, "text", "output_text", "input_text"):
+                    text = block.get("text")
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+                    elif isinstance(text, dict):
+                        value = text.get("value") or text.get("text")
+                        if isinstance(value, str) and value:
+                            parts.append(value)
+                continue
+            text = getattr(block, "text", None)
+            if isinstance(text, str) and text:
+                parts.append(text)
+                continue
+            block_type = getattr(block, "type", None)
+            if block_type in (None, "text", "output_text") and hasattr(block, "content"):
+                nested = _message_text(getattr(block, "content", None))
+                if nested:
+                    parts.append(nested)
+        return "\n".join(p for p in parts if p).strip()
+    text = getattr(content, "text", None)
+    if isinstance(text, str):
+        return text
+    return str(content)
+
 
 def _to_lc_tool(fn: Any) -> BaseTool:
-    """Convert a Python callable to a LangChain BaseTool."""
     if isinstance(fn, BaseTool):
         return fn
     if callable(fn):
         return StructuredTool.from_function(fn)
     raise TypeError(f"Cannot convert {fn!r} to a LangChain tool")
+
+
+def _build_interrupt_on(
+    lc_tools: List[BaseTool],
+    tools_approval_required: bool,
+    interrupt_on: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if interrupt_on is not None:
+        return interrupt_on
+    if not tools_approval_required:
+        return None
+    resolved = {
+        t.name: dict(_APPROVE_REJECT_CONFIG)
+        for t in lc_tools
+        if getattr(t, "name", None)
+    }
+    for builtin in _DEEPAGENT_BUILTIN_TOOL_NAMES:
+        resolved.setdefault(builtin, dict(_APPROVE_REJECT_CONFIG))
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Stream → AgentEvent
+# ---------------------------------------------------------------------------
+
+def events_from_stream_chunk(
+    chunk: Any,
+    *,
+    session_id: str,
+    pending_hitl: Dict[str, int],
+    agent_name: str = "",
+) -> List[AgentEvent]:
+    """Convert one LangGraph ``stream_mode='updates'`` chunk to AgentEvents."""
+    if not isinstance(chunk, dict):
+        return []
+
+    if "__interrupt__" in chunk:
+        return _events_from_interrupt(
+            chunk["__interrupt__"],
+            session_id=session_id,
+            pending_hitl=pending_hitl,
+            agent_name=agent_name,
+        )
+
+    events: List[AgentEvent] = []
+    for node_name, node_output in chunk.items():
+        if not isinstance(node_output, dict):
+            continue
+        messages = node_output.get("messages") or []
+        if not isinstance(messages, (list, tuple)):
+            try:
+                messages = list(messages)
+            except TypeError:
+                continue
+
+        for msg in messages:
+            if not isinstance(msg, AIMessage):
+                continue
+            tool_calls = getattr(msg, "tool_calls", None) or []
+            if tool_calls:
+                names = [
+                    tc.get("name", "?") if isinstance(tc, dict) else getattr(tc, "name", "?")
+                    for tc in tool_calls
+                ]
+                logger.debug(f"[{agent_name}] Calling tools: {names}")
+                events.append(AgentEvent.status(f"Calling tools: {', '.join(names)}"))
+            else:
+                text = _message_text(msg.content)
+                if text:
+                    logger.debug(f"[{agent_name}] Final response ({len(text)} chars)")
+                    events.append(AgentEvent.final_text(text))
+    return events
+
+
+def _events_from_interrupt(
+    interrupts: Any,
+    *,
+    session_id: str,
+    pending_hitl: Dict[str, int],
+    agent_name: str = "",
+) -> List[AgentEvent]:
+    if interrupts is None:
+        return []
+    if not isinstance(interrupts, (list, tuple)):
+        interrupts = (interrupts,)
+
+    events: List[AgentEvent] = []
+    for intr in interrupts:
+        value = getattr(intr, "value", intr)
+        if not isinstance(value, dict):
+            logger.warning(f"[{agent_name}] Unexpected interrupt value: {type(value)!r}")
+            continue
+
+        action_requests = value.get("action_requests") or []
+        if not action_requests:
+            call_id = str(getattr(intr, "id", None) or uuid.uuid4())
+            pending_hitl[session_id] = 1
+            events.append(AgentEvent.tool_approval(call_id, "action", value))
+            continue
+
+        pending_hitl[session_id] = len(action_requests)
+
+        if len(action_requests) == 1:
+            ar = action_requests[0]
+            name = ar.get("name", "unknown")
+            args = ar.get("args") or {}
+            call_id = str(uuid.uuid4())
+            logger.info(f"[{agent_name}] Tool approval required: {name}({args})")
+            events.append(AgentEvent.tool_approval(call_id, name, args))
+        else:
+            names = [ar.get("name", "?") for ar in action_requests]
+            combined_args = {
+                ar.get("name", f"tool_{i}"): (ar.get("args") or {})
+                for i, ar in enumerate(action_requests)
+            }
+            call_id = str(uuid.uuid4())
+            display = f"{names[0]} (+{len(names) - 1} more)"
+            logger.info(f"[{agent_name}] Tool approval required for batch: {names}")
+            events.append(AgentEvent.tool_approval(call_id, display, combined_args))
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -128,14 +263,8 @@ class LangChainAIAgent(BaseAgent):
     """
     Deep agent backed by deepagents.create_deep_agent (LangGraph harness).
 
-    Satisfies the same BaseAgent interface as AIAgent so both backends are
-    interchangeable wherever a BaseAgent is expected.
-
-    deepagents built-ins (always present unless excluded via HarnessProfile):
-        write_todos, ls, read_file, write_file, edit_file, glob, grep,
-        execute, task (sub-agent spawning)
-
-    User tools passed via the ``tools`` argument are additive on top of these.
+    Yields ``AgentEvent`` — the same type as AIAgent — so Discord / A2A need
+    no backend-specific handling.
     """
 
     def __init__(
@@ -144,6 +273,7 @@ class LangChainAIAgent(BaseAgent):
         instruction_file: str,
         description: str = "",
         tools: Optional[list] = None,
+        tools_approval_required: bool = True,
         skills_directory: str = SKILLS_DIRECTORY,
         workspace_directory: str = WORKSPACE_DIRECTORY,
         skills: Optional[List[str]] = None,
@@ -159,33 +289,8 @@ class LangChainAIAgent(BaseAgent):
         publish_url: Optional[str] = None,
         middleware: Optional[list] = None,
         subagents: Optional[list] = None,
+        interrupt_on: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """
-        Initialize the LangChain Deep Agent.
-
-        Args:
-            name: Agent name.
-            instruction_file: Path to the system instruction file (markdown).
-            description: Brief description of the agent's purpose.
-            tools: Additional tools — names resolved from ToolRegistry, callables,
-                   or LangChain BaseTool objects.  Additive to deepagents built-ins.
-            skills_directory: Base directory containing skill sub-directories.
-            workspace_directory: Directory for agent outputs / scratch files.
-            skills: Skill sub-directory names to auto-discover tools from.
-            input_key_map: Optional mapping of input keys.
-            output_key: Optional session-state key for structured output.
-            model: Model name string or a pre-built LangChain BaseChatModel.
-            provider: LLM provider — "anthropic", "openai", "google",
-                      "google_genai", "vllm", or "litellm".
-            max_output_tokens: Maximum tokens the model should generate.
-            context_window: Total context window (reserved for future truncation).
-            enable_truncation: Reserved for future truncation support.
-            truncate_strategy: "start", "end", or "middle".
-            safety_margin: Extra token buffer subtracted from context_window.
-            publish_url: URL written into the A2A AgentCard for discovery.
-            middleware: deepagents AgentMiddleware instances (e.g. MemoryMiddleware).
-            subagents: SubAgent / CompiledSubAgent / AsyncSubAgent instances.
-        """
         self.name = name
         self.description = description
         self.input_key_map = input_key_map or {}
@@ -197,10 +302,13 @@ class LangChainAIAgent(BaseAgent):
         self.safety_margin = safety_margin
         self.skills = skills or []
         self.publish_url = publish_url
+        self.tools_approval_required = tools_approval_required
+        self._pending_hitl: Dict[str, int] = {}
 
-        self._instruction: str = read_from_file(instruction_file) if instruction_file else ""
+        self._instruction: str = (
+            read_from_file(instruction_file) if instruction_file else ""
+        )
 
-        # Instance-isolated SkillRegistry
         from declarative_agent_sdk.skill_registry import SkillRegistry
 
         skills_registry = type(
@@ -238,17 +346,29 @@ class LangChainAIAgent(BaseAgent):
 
         logger.info(f"LangChainAIAgent '{name}' loaded {len(lc_tools)} user tool(s)")
 
+        resolved_interrupt_on = _build_interrupt_on(
+            lc_tools, tools_approval_required, interrupt_on
+        )
+        if resolved_interrupt_on:
+            logger.info(
+                f"LangChainAIAgent '{name}' tool approval enabled for "
+                f"{len(resolved_interrupt_on)} tool(s)"
+            )
+
         resolved_model = _resolve_model(model, provider, max_output_tokens)
         self._memory = MemorySaver()
-        self._graph = create_deep_agent(
-            model=resolved_model,
-            tools=lc_tools if lc_tools else None,
-            system_prompt=self._instruction if self._instruction else None,
-            middleware=tuple(middleware) if middleware else (),
-            subagents=subagents,
-            checkpointer=self._memory,
-            name=name,
-        )
+        create_kwargs: Dict[str, Any] = {
+            "model": resolved_model,
+            "tools": lc_tools if lc_tools else None,
+            "system_prompt": self._instruction if self._instruction else None,
+            "middleware": tuple(middleware) if middleware else (),
+            "subagents": subagents,
+            "checkpointer": self._memory,
+            "name": name,
+        }
+        if resolved_interrupt_on:
+            create_kwargs["interrupt_on"] = resolved_interrupt_on
+        self._graph = create_deep_agent(**create_kwargs)
 
         if workspace_directory and not os.path.exists(workspace_directory):
             try:
@@ -257,54 +377,63 @@ class LangChainAIAgent(BaseAgent):
                 logger.error(f"Failed to create workspace '{workspace_directory}': {exc}")
                 raise
 
-        skill_descriptions = skills_registry.get_all_skills_description()
         self.agent_card = create_agent_card(
             name=name,
             description=description,
-            skills=skill_descriptions,
+            skills=skills_registry.get_all_skills_description(),
             url=publish_url,
         )
 
     # ------------------------------------------------------------------
-    # BaseAgent interface
+    # Streaming
     # ------------------------------------------------------------------
+
+    async def _stream(
+        self, input_data: Any, session_id: str
+    ) -> AsyncGenerator[AgentEvent, None]:
+        config = {"configurable": {"thread_id": session_id}}
+        async for chunk in self._graph.astream(
+            input_data, config=config, stream_mode="updates"
+        ):
+            for event in events_from_stream_chunk(
+                chunk,
+                session_id=session_id,
+                pending_hitl=self._pending_hitl,
+                agent_name=self.name,
+            ):
+                yield event
 
     async def run_query(
         self, query: str, session_id: Optional[str] = None
-    ) -> AsyncGenerator[LangChainEvent, None]:
-        """Yield LangChainEvents for a plain-text query."""
+    ) -> AsyncGenerator[AgentEvent, None]:
         sid = session_id or str(uuid.uuid4())
-        config = {"configurable": {"thread_id": sid}}
-
-        async for chunk in self._graph.astream(
-            {"messages": [HumanMessage(content=query)]},
-            config=config,
-            stream_mode="updates",
+        async for event in self._stream(
+            {"messages": [HumanMessage(content=query)]}, sid
         ):
-            for _node, node_output in chunk.items():
-                for msg in node_output.get("messages", []):
-                    if not isinstance(msg, AIMessage):
-                        continue
-                    if msg.tool_calls:
-                        tool_names = [tc["name"] for tc in msg.tool_calls]
-                        logger.debug(f"[{self.name}] Calling tools: {tool_names}")
-                        yield LangChainEvent(
-                            text=f"Calling tools: {', '.join(tool_names)}",
-                            is_final=False,
-                        )
-                    elif msg.content:
-                        text = (
-                            msg.content
-                            if isinstance(msg.content, str)
-                            else str(msg.content)
-                        )
-                        logger.debug(f"[{self.name}] Final response ({len(text)} chars)")
-                        yield LangChainEvent(text=text, is_final=True)
+            yield event
+
+    async def tool_confirmation(
+        self,
+        context_id: str,
+        session_id: str,
+        yes: bool,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Resume after human approve/deny via LangGraph Command(resume=...)."""
+        n = self._pending_hitl.pop(session_id, 1)
+        decision_type = "approve" if yes else "reject"
+        decisions = [{"type": decision_type} for _ in range(max(1, n))]
+        logger.info(
+            f"[{self.name}] Resuming after tool confirmation "
+            f"(yes={yes}, decisions={len(decisions)}, context_id={context_id})"
+        )
+        async for event in self._stream(
+            Command(resume={"decisions": decisions}), session_id
+        ):
+            yield event
 
     async def invoke(
         self, context: RequestContext
-    ) -> AsyncGenerator[LangChainEvent, None]:
-        """Yield LangChainEvents for an A2A RequestContext."""
+    ) -> AsyncGenerator[AgentEvent, None]:
         assert context is not None, "Context is required"
         assert context.message is not None, "Context message is required"
         assert context.context_id is not None, "Context ID is required"

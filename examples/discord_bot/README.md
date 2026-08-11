@@ -18,9 +18,19 @@ export TAVILY_API_KEY=...      # only if the config keeps the tavily_search tool
 python run_discord_bot.py --mode local --config agent.yaml
 ```
 
-`local` and `live` check credentials before starting and tell you exactly what to export if something is missing, rather than failing on the first model call. Keys are read from the environment, or from a `.env` file next to this example or at the repo root. The shipped `agent.yaml` uses Gemini — switch the `model` / `provider` / `endpoint` block to OpenAI or a local vLLM server if that is what you have a key for.
+`local` and `live` check credentials before starting and tell you exactly what to export if something is missing, rather than failing on the first model call. Keys are read from the environment, or from a `.env` file next to this example or at the repo root.
 
-Gives you a terminal REPL. Everything you type is wrapped as a Discord message mentioning the bot and pushed through `DiscordAgentServer.handle_message`, so you see exactly what the bot would post — including status updates and tool-approval prompts, which you answer with `y`/`n` at the prompt instead of reactions. Use this to check prompt and formatting behaviour before involving Discord.
+The shipped `agent.yaml` uses **`agent_framework: deepagent`** (deepagents / LangGraph) with OpenAI. To exercise Google ADK instead, set:
+
+```yaml
+agent_framework: adk
+provider: google
+model: gemini-2.5-flash-lite
+```
+
+Supported `agent_framework` values: `adk` (default if omitted), `deepagent` (aliases: `deepagents`, `langchain`, `langgraph`). The legacy key `backend` still works with the same values. Switch `model` / `provider` / `endpoint` to match the API key you have (OpenAI, Anthropic, Google, or local vLLM).
+
+Gives you a terminal REPL. Everything you type is wrapped as a Discord message mentioning the bot and pushed through `DiscordAgentServer.handle_message`, so you see exactly what the bot would post — including status updates and tool-approval prompts (ADK only), which you answer with `y`/`n` at the prompt instead of reactions. Use this to check prompt and formatting behaviour before involving Discord.
 
 ## 3. `connect` — real Discord, no agent
 
@@ -87,5 +97,28 @@ Then `--mode connect` to confirm, and `--mode live` to serve.
 | File | Purpose |
 |---|---|
 | `run_discord_bot.py` | The test program (all four modes) |
-| `agent.yaml` | Sample agent config — used by `local` and `live` only |
+| `agent.yaml` | Sample agent config (`agent_framework`, provider, tools) — `local` / `live` only |
 | `instructions.md` | System instructions for the sample agent |
+
+### Choosing ADK vs deepagent
+
+| `agent_framework` | Class | Notes |
+|---|---|---|
+| `adk` (default) | `AIAgent` | Google ADK; Discord ✅/❌ when `tools_approval_required: true` |
+| `deepagent` | `LangChainAIAgent` | `deepagents.create_deep_agent`; same Discord ✅/❌ via `interrupt_on` when `tools_approval_required: true` |
+
+### Markdown on Discord
+
+Discord only supports a **subset** of Markdown. Agent replies are passed through
+`to_discord_markdown()` so tables, HTML, images, and `---` rules become forms
+Discord can show (e.g. tables → monospace code blocks). Bold, lists, and code
+fences already render natively.
+
+In `run_discord_bot.py` live mode you can also set:
+
+```python
+DiscordAgentServer(..., format_markdown=True, reply_as_embed=True)
+```
+
+`reply_as_embed=True` puts the answer in an embed card (often cleaner for long
+answers; ~4096 characters per embed chunk).

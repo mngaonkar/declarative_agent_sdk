@@ -491,12 +491,26 @@ def load_dotenv_if_present() -> None:
             print(f"loaded environment from {os.path.normpath(candidate)}")
 
 
+def _framework_from_config(config: dict) -> str:
+    """Canonical agent_framework from YAML (adk | deepagent). Falls back safely."""
+    try:
+        from declarative_agent_sdk.agent_factory import resolve_agent_framework
+        return resolve_agent_framework(config)
+    except ValueError as exc:
+        # preflight reports this as a problem instead of raising
+        return f"__invalid__:{exc}"
+
+
 def preflight(config: dict) -> List[str]:
     """Return human-readable problems that would break the first model call."""
     problems: List[str] = []
 
-    backend = str(config.get("backend", "adk")).lower()
-    default_provider = "anthropic" if backend in ("langchain", "deepagents") else "google"
+    framework = _framework_from_config(config)
+    if framework.startswith("__invalid__:"):
+        problems.append(framework.split(":", 1)[1])
+        framework = "adk"
+
+    default_provider = "anthropic" if framework == "deepagent" else "google"
     provider = str(config.get("provider") or default_provider).lower()
     model = config.get("model", "<default>")
 
@@ -506,10 +520,10 @@ def preflight(config: dict) -> List[str]:
     elif expected and not any(os.environ.get(var) for var in expected):
         options = " or ".join(expected)
         problems.append(
-            f"Provider '{provider}' (model {model}) needs {options}.\n"
+            f"Provider '{provider}' (model {model}, agent_framework={framework}) needs {options}.\n"
             f"      export {expected[0]}=...\n"
             f"      …or edit {config.get('name', 'the agent')}'s config to a provider you have a key for "
-            f"(agent.yaml lists OpenAI and vLLM alternatives)."
+            f"(agent.yaml lists OpenAI, Anthropic, and vLLM alternatives)."
         )
 
     if "tavily_search" in (config.get("tools") or []) and not os.environ.get("TAVILY_API_KEY"):
@@ -545,13 +559,16 @@ def check_credentials(config_path: str) -> Optional[dict]:
 
 async def local(config_path: str) -> int:
     from declarative_agent_sdk import AgentFactory, AgentRegistry
+    from declarative_agent_sdk.agent_factory import resolve_agent_framework
 
-    if check_credentials(config_path) is None:
+    config = check_credentials(config_path)
+    if config is None:
         return 1
 
+    framework = resolve_agent_framework(config)
     agent = AgentFactory.from_yaml_file(config_path)
-    # Required: the ADK before_model_callback resolves the agent's context
-    # through AgentRegistry, so an unregistered agent fails on its first call.
+    # Required for ADK: before_model_callback resolves context via AgentRegistry.
+    # Harmless for deepagent; keep for a single code path.
     AgentRegistry.register(agent, category="discord")
 
     server = DiscordAgentServer(agent, token="local-test-token")
@@ -563,7 +580,10 @@ async def local(config_path: str) -> int:
     attach_fake_client(server, reaction_provider=ask_terminal)
     channel = FakeChannel("local", echo=True)
 
-    print(f"\nLocal Discord simulation for agent '{agent.name}'. Ctrl-C or 'quit' to exit.\n")
+    print(
+        f"\nLocal Discord simulation for agent '{agent.name}' "
+        f"(agent_framework={framework}). Ctrl-C or 'quit' to exit.\n"
+    )
     while True:
         try:
             text = await asyncio.to_thread(input, "you > ")
@@ -663,8 +683,10 @@ def connect() -> int:
 
 def live(config_path: str) -> int:
     from declarative_agent_sdk import AgentFactory, AgentRegistry
+    from declarative_agent_sdk.agent_factory import resolve_agent_framework
 
-    if check_credentials(config_path) is None:
+    config = check_credentials(config_path)
+    if config is None:
         return 1
 
     token = os.environ.get("DISCORD_BOT_TOKEN")
@@ -672,8 +694,9 @@ def live(config_path: str) -> int:
         print("DISCORD_BOT_TOKEN is not set — export it before running live mode.", file=sys.stderr)
         return 1
 
+    framework = resolve_agent_framework(config)
     agent = AgentFactory.from_yaml_file(config_path)
-    # Required: see the comment in local() — the agent must be in the registry.
+    # Required for ADK; harmless for deepagent — see comment in local().
     AgentRegistry.register(agent, category="discord")
 
     server = DiscordAgentServer(
@@ -681,8 +704,15 @@ def live(config_path: str) -> int:
         token=token,
         command_prefix="!ask ",
         activity_status=f"{agent.name} — mention me",
+        # Convert GFM tables/HTML to Discord-friendly markdown; set
+        # reply_as_embed=True if you prefer answers in an embed card.
+        format_markdown=True,
+        reply_as_embed=False,
     )
-    print(f"Connecting agent '{agent.name}' to Discord… (Ctrl-C to stop)")
+    print(
+        f"Connecting agent '{agent.name}' (agent_framework={framework}) "
+        f"to Discord… (Ctrl-C to stop)"
+    )
     server.run()
     return 0
 

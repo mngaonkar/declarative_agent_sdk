@@ -14,6 +14,7 @@ from declarative_agent_sdk.base_agent import BaseAgent
 from declarative_agent_sdk.langchain_ai_agent import (
     LangChainAIAgent,
     LangChainEvent,
+    _message_text,
     _resolve_model,
     _to_lc_tool,
 )
@@ -68,6 +69,7 @@ def _make_agent(chunks: list | None = None, name: str = "test_agent") -> LangCha
             model="claude-3-5-haiku-20241022",
             provider="anthropic",
             workspace_directory="/tmp",
+            tools_approval_required=False,
         )
 
 
@@ -115,6 +117,53 @@ class TestLangChainEvent:
     def test_event_always_has_empty_confirmations(self):
         event = LangChainEvent(text="x")
         assert event.actions.requested_tool_confirmations == []
+
+
+# ---------------------------------------------------------------------------
+# _message_text
+# ---------------------------------------------------------------------------
+
+class TestMessageText:
+    def test_plain_string(self):
+        assert _message_text("Hello") == "Hello"
+
+    def test_none_and_empty(self):
+        assert _message_text(None) == ""
+        assert _message_text([]) == ""
+
+    def test_openai_style_text_blocks(self):
+        content = [{
+            "type": "text",
+            "text": "Here's the current disk space usage:\n\n- **Root**: 22% used",
+            "annotations": [],
+            "id": "msg_01bca071ad62fb3b006a7b7b5e202881999a0de584d86b7347",
+        }]
+        assert _message_text(content) == (
+            "Here's the current disk space usage:\n\n- **Root**: 22% used"
+        )
+
+    def test_multiple_text_blocks_joined(self):
+        content = [
+            {"type": "text", "text": "Part one."},
+            {"type": "text", "text": "Part two."},
+        ]
+        assert _message_text(content) == "Part one.\nPart two."
+
+    def test_skips_non_text_blocks(self):
+        content = [
+            {"type": "thinking", "thinking": "secret"},
+            {"type": "text", "text": "Visible answer"},
+            {"type": "tool_use", "name": "search", "id": "t1"},
+        ]
+        assert _message_text(content) == "Visible answer"
+
+    def test_mixed_strings_and_blocks(self):
+        content = ["Prefix", {"type": "text", "text": "body"}]
+        assert _message_text(content) == "Prefix\nbody"
+
+    def test_object_with_text_attr(self):
+        block = type("Block", (), {"type": "text", "text": "from object"})()
+        assert _message_text([block]) == "from object"
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +303,160 @@ class TestRunQuery:
         ])
         events = [e async for e in agent.run_query("question")]
         assert events == []
+
+    async def test_none_node_output_is_skipped(self):
+        """deepagents can stream {node: None} for middleware/routing nodes."""
+        agent = _make_agent([
+            {"middleware": None},
+            {"model": {"messages": [AIMessage(content="Still works.")]}},
+            {"other": None},
+        ])
+        events = [e async for e in agent.run_query("disk space")]
+        assert len(events) == 1
+        assert events[0].is_final_response() is True
+        assert events[0].content.parts[0].text == "Still works."
+
+    async def test_non_dict_chunk_is_skipped(self):
+        agent = _make_agent([
+            "not-a-dict",
+            {"model": {"messages": [AIMessage(content="ok")]}},
+        ])
+        events = [e async for e in agent.run_query("hi")]
+        assert len(events) == 1
+        assert events[0].content.parts[0].text == "ok"
+
+    async def test_list_content_blocks_become_plain_text(self):
+        content = [{
+            "type": "text",
+            "text": "Disk free: 43Gi available",
+            "annotations": [],
+            "id": "msg_abc",
+        }]
+        agent = _make_agent([
+            {"model": {"messages": [AIMessage(content=content)]}},
+        ])
+        events = [e async for e in agent.run_query("disk?")]
+        assert len(events) == 1
+        assert events[0].content.parts[0].text == "Disk free: 43Gi available"
+        assert events[0].content.parts[0].text.startswith("Disk free")
+        assert "type" not in events[0].content.parts[0].text
+
+    async def test_interrupt_yields_tool_confirmation_event(self):
+        from langgraph.types import Interrupt
+
+        hitl = {
+            "action_requests": [
+                {"name": "exec_command", "args": {"command": "df -h"}, "description": "run"},
+            ],
+            "review_configs": [
+                {"action_name": "exec_command", "allowed_decisions": ["approve", "reject"]},
+            ],
+        }
+        tool_call_msg = AIMessage(content="")
+        tool_call_msg.tool_calls = [
+            {"name": "exec_command", "args": {"command": "df -h"}, "id": "tc1"}
+        ]
+        agent = _make_agent([
+            {"model": {"messages": [tool_call_msg]}},
+            {"__interrupt__": (Interrupt(value=hitl, id="intr-1"),)},
+        ])
+        events = [e async for e in agent.run_query("disk space", session_id="sess-1")]
+        conf = [e for e in events if e.long_running_tool_ids]
+        assert len(conf) == 1
+        assert conf[0].actions.requested_tool_confirmations
+        part = conf[0].content.parts[0]
+        assert part.function_call is not None
+        assert part.function_call.args["originalFunctionCall"]["name"] == "exec_command"
+        assert agent._pending_hitl["sess-1"] == 1
+
+    async def test_tool_confirmation_resumes_with_command(self):
+        from langgraph.types import Command
+
+        agent = _make_agent([
+            {"model": {"messages": [AIMessage(content="Done after approval.")]}},
+        ])
+        agent._pending_hitl["sess-2"] = 1
+
+        seen_input = {}
+
+        async def _astream(input_data, config=None, stream_mode=None):
+            seen_input["value"] = input_data
+            for chunk in [{"model": {"messages": [AIMessage(content="Done after approval.")]}}]:
+                yield chunk
+
+        agent._graph.astream = _astream
+        events = [
+            e async for e in agent.tool_confirmation("ctx", "sess-2", yes=True)
+        ]
+        assert isinstance(seen_input["value"], Command)
+        assert seen_input["value"].resume == {"decisions": [{"type": "approve"}]}
+        assert any(e.is_final_response() for e in events)
+        assert "sess-2" not in agent._pending_hitl
+
+
+# ---------------------------------------------------------------------------
+# tools_approval_required → interrupt_on
+# ---------------------------------------------------------------------------
+
+class TestToolApprovalWiring:
+    def test_interrupt_on_passed_when_approval_required(self):
+        with (
+            patch(
+                "declarative_agent_sdk.langchain_ai_agent.create_deep_agent",
+                return_value=_graph_mock([]),
+            ) as mock_create,
+            patch(
+                "declarative_agent_sdk.langchain_ai_agent.read_from_file",
+                return_value="sys",
+            ),
+            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.register_built_in_tools"),
+            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.get_all", return_value=[]),
+        ):
+            def fake_tool(x: str) -> str:
+                """demo tool"""
+                return x
+
+            LangChainAIAgent(
+                name="a",
+                instruction_file="i.md",
+                tools=[fake_tool],
+                tools_approval_required=True,
+                model="claude-3-5-haiku-20241022",
+                provider="anthropic",
+                workspace_directory="/tmp",
+            )
+            kwargs = mock_create.call_args.kwargs
+            assert "interrupt_on" in kwargs
+            assert "fake_tool" in kwargs["interrupt_on"]
+            assert "execute" in kwargs["interrupt_on"]
+            assert kwargs["interrupt_on"]["fake_tool"]["allowed_decisions"] == [
+                "approve",
+                "reject",
+            ]
+
+    def test_no_interrupt_on_when_approval_disabled(self):
+        with (
+            patch(
+                "declarative_agent_sdk.langchain_ai_agent.create_deep_agent",
+                return_value=_graph_mock([]),
+            ) as mock_create,
+            patch(
+                "declarative_agent_sdk.langchain_ai_agent.read_from_file",
+                return_value="sys",
+            ),
+            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.register_built_in_tools"),
+            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.get_all", return_value=[]),
+        ):
+            LangChainAIAgent(
+                name="a",
+                instruction_file="i.md",
+                tools_approval_required=False,
+                model="claude-3-5-haiku-20241022",
+                provider="anthropic",
+                workspace_directory="/tmp",
+            )
+            kwargs = mock_create.call_args.kwargs
+            assert "interrupt_on" not in kwargs
 
 
 # ---------------------------------------------------------------------------

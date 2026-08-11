@@ -14,7 +14,8 @@ from declarative_agent_sdk.ai_graph_executor import AIWorkflowExecutor
 from declarative_agent_sdk.ai_agent_server import AIAgentServer
 from declarative_agent_sdk.ai_workflow_server import AIWorkflowServer
 from declarative_agent_sdk.discord_agent_server import DiscordAgentServer
-from declarative_agent_sdk.agent_factory import AgentFactory
+from declarative_agent_sdk.agent_event import AgentEvent, from_adk_event
+from declarative_agent_sdk.agent_factory import AgentFactory, resolve_agent_framework
 from declarative_agent_sdk.agent_registry import AgentRegistry
 from declarative_agent_sdk.model_factory import ModelFactory
 from declarative_agent_sdk.tool_registry import ToolRegistry
@@ -37,12 +38,15 @@ __all__ = [
     'AIAgent',
     'LangChainAIAgent',
     'LangChainEvent',
+    'AgentEvent',
+    'from_adk_event',
     'AIAgentExecutor',
     'AIWorkflowExecutor',
     'AIAgentServer',
     'AIWorkflowServer',
     'DiscordAgentServer',
     'AgentFactory',
+    'resolve_agent_framework',
     'AgentRegistry',
     'ModelFactory',
     'ToolRegistry',

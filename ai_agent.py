@@ -20,6 +20,7 @@ from a2a.server.agent_execution import RequestContext
 from a2a.types import Message
 
 from declarative_agent_sdk.a2a_utils import create_agent_card
+from declarative_agent_sdk.agent_event import AgentEvent, from_adk_event
 from declarative_agent_sdk.agent_logging import get_logger
 from declarative_agent_sdk.base_agent import BaseAgent
 from declarative_agent_sdk.constants import (
@@ -277,7 +278,8 @@ class AIAgent(BaseAgent):
         context_id: str,
         session_id: str,
         yes: bool,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncIterator[AgentEvent]:
+        """Resume after Discord/A2A tool approval (ADK FunctionResponse handshake)."""
         await self._get_or_create_session(session_id)
         content = types.Content(
             role="user",
@@ -296,9 +298,9 @@ class AIAgent(BaseAgent):
             session_id=session_id,
             new_message=content,
         ):
-            if event.content and event.content.parts:
-                logger.info(f"EVENT: {event.content.parts}")
-            yield event
+            mapped = from_adk_event(event)
+            if mapped is not None:
+                yield mapped
 
     # ------------------------------------------------------------------
     # BaseAgent interface
@@ -306,8 +308,8 @@ class AIAgent(BaseAgent):
 
     async def run_query(
         self, query: str, session_id: Optional[str] = None
-    ) -> AsyncIterator[Any]:
-        """Yield ADK events for a plain-text query."""
+    ) -> AsyncIterator[AgentEvent]:
+        """Yield AgentEvents for a plain-text query."""
         sid = session_id or str(uuid.uuid4())
         await self._get_or_create_session(sid)
         new_message = types.Content(role="user", parts=[types.Part(text=query)])
@@ -316,12 +318,12 @@ class AIAgent(BaseAgent):
             session_id=sid,
             new_message=new_message,
         ):
-            if event.content and event.content.parts:
-                logger.info(f"EVENT: {event.content.parts}")
-            yield event
+            mapped = from_adk_event(event)
+            if mapped is not None:
+                yield mapped
 
-    async def invoke(self, context: RequestContext) -> AsyncIterator[Any]:
-        """Yield ADK events for an A2A RequestContext."""
+    async def invoke(self, context: RequestContext) -> AsyncIterator[AgentEvent]:
+        """Yield AgentEvents for an A2A RequestContext."""
         assert context is not None, "Context is required"
         assert context.message is not None, "Context message is required"
         assert context.context_id is not None, "Context ID is required"
@@ -334,6 +336,6 @@ class AIAgent(BaseAgent):
             session_id=context.context_id,
             new_message=new_message,
         ):
-            if event.content and event.content.parts:
-                logger.info(f"EVENT: {event.content.parts}")
-            yield event
+            mapped = from_adk_event(event)
+            if mapped is not None:
+                yield mapped

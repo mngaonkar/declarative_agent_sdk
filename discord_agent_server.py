@@ -89,10 +89,140 @@ def _confirmation_request(event: Any) -> Optional[Dict[str, Any]]:
 # Message formatting
 # ---------------------------------------------------------------------------
 
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
+_HR_RE = re.compile(r"^(?:\s*[-*_]){3,}\s*$", re.MULTILINE)
+
+
+def _is_table_separator(line: str) -> bool:
+    """True for GFM header-separator rows like ``| --- | :---: |``."""
+    stripped = line.strip()
+    if not stripped or not stripped.replace("|", "").replace("-", "").replace(":", "").replace(" ", ""):
+        # only pipes/dashes/colons/spaces — but need at least one ---
+        return bool(_TABLE_SEP_RE.match(line)) or (
+            "|" in stripped and set(stripped) <= set("|-: ") and "---" in stripped.replace(" ", "")
+        )
+    return bool(_TABLE_SEP_RE.match(line))
+
+
+def _parse_table_row(line: str) -> List[str]:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return cells
+
+
+def _format_table_block(rows: List[List[str]]) -> str:
+    """Render a GFM table as a monospace block Discord will display cleanly."""
+    if not rows:
+        return ""
+    col_count = max(len(r) for r in rows)
+    normalized = [r + [""] * (col_count - len(r)) for r in rows]
+    widths = [
+        max(len(normalized[r][c]) for r in range(len(normalized)))
+        for c in range(col_count)
+    ]
+
+    def fmt(row: List[str]) -> str:
+        return " | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
+
+    lines = [fmt(normalized[0])]
+    lines.append("-+-".join("-" * w for w in widths))
+    for row in normalized[1:]:
+        lines.append(fmt(row))
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
+def to_discord_markdown(text: str) -> str:
+    """
+    Adapt common GitHub-flavored Markdown so Discord renders it cleanly.
+
+    Discord already supports **bold**, *italic*, ``code``, fences, lists,
+    quotes, spoilers, and (on modern clients) #/##/### headers.  What it does
+    **not** support is the main source of "broken" agent replies:
+
+    * pipe tables
+    * HTML tags
+    * image embeds (``![alt](url)``)
+    * thematic breaks (``---``)
+
+    Those are rewritten into Discord-friendly forms.  Native Discord markdown
+    is left intact.
+    """
+    if not text:
+        return text
+
+    # Images → linked text (Discord won't inline the image in a normal message)
+    text = _IMAGE_RE.sub(
+        lambda m: f"[{m.group(1) or m.group(2)}]({m.group(2)})" if m.group(1) else m.group(2),
+        text,
+    )
+
+    # Strip simple HTML tags agents sometimes emit
+    text = _HTML_TAG_RE.sub("", text)
+
+    # Horizontal rules → a light separator Discord will show as plain text
+    text = _HR_RE.sub("────────", text)
+
+    # Convert contiguous GFM tables into monospace blocks
+    lines = text.splitlines()
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _TABLE_ROW_RE.match(line):
+            table_lines = [line]
+            j = i + 1
+            while j < len(lines) and (
+                _TABLE_ROW_RE.match(lines[j]) or _is_table_separator(lines[j])
+            ):
+                table_lines.append(lines[j])
+                j += 1
+            # Need a real table: header + separator + ≥0 body rows
+            body_rows: List[List[str]] = []
+            header: Optional[List[str]] = None
+            saw_sep = False
+            for tl in table_lines:
+                if _is_table_separator(tl):
+                    saw_sep = True
+                    continue
+                cells = _parse_table_row(tl)
+                if header is None:
+                    header = cells
+                else:
+                    body_rows.append(cells)
+            if header is not None and (saw_sep or body_rows):
+                out.append(_format_table_block([header] + body_rows))
+                i = j
+                continue
+            # Not a table after all — emit lines as-is
+            out.extend(table_lines)
+            i = j
+            continue
+        out.append(line)
+        i += 1
+
+    # Collapse runs of blank lines left by stripped HTML / tables
+    cleaned: List[str] = []
+    blank = False
+    for line in out:
+        if line.strip() == "":
+            if not blank:
+                cleaned.append("")
+            blank = True
+        else:
+            cleaned.append(line)
+            blank = False
+    return "\n".join(cleaned).strip()
+
+
 def split_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> List[str]:
     """
     Split text into Discord-sized chunks, preferring line boundaries and
     falling back to word boundaries before cutting a word in half.
+
+    Avoids splitting in the middle of a fenced code block when a line break
+    outside the fence is available, so markdown fences stay balanced.
     """
     if not text:
         return []
@@ -104,16 +234,41 @@ def split_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> List[str]:
 
     while len(remaining) > limit:
         window = remaining[:limit]
-        split_at = window.rfind("\n")
-        if split_at <= 0:
-            split_at = window.rfind(" ")
-        if split_at <= 0:
-            split_at = limit
+        # Prefer a newline that keeps ``` fence parity even inside the chunk
+        last_safe_newline = -1
+        search_from = 0
+        while True:
+            nl = window.find("\n", search_from)
+            if nl < 0:
+                break
+            candidate = window[:nl]
+            fence_lines = sum(
+                1 for ln in candidate.splitlines() if ln.strip().startswith("```")
+            )
+            if fence_lines % 2 == 0:
+                last_safe_newline = nl
+            search_from = nl + 1
+
+        if last_safe_newline > 0:
+            split_at = last_safe_newline
+        else:
+            split_at = window.rfind("\n")
+            if split_at <= 0:
+                split_at = window.rfind(" ")
+            if split_at <= 0:
+                split_at = limit
 
         chunk = remaining[:split_at].rstrip()
+        # If we still leave an open fence, close it and reopen on the next chunk
+        fence_lines = sum(1 for ln in chunk.splitlines() if ln.strip().startswith("```"))
+        reopen = ""
+        if fence_lines % 2 == 1:
+            chunk = chunk + "\n```"
+            reopen = "```\n"
+
         if chunk:
             chunks.append(chunk)
-        remaining = remaining[split_at:].lstrip()
+        remaining = reopen + remaining[split_at:].lstrip()
 
     if remaining:
         chunks.append(remaining)
@@ -167,6 +322,8 @@ class DiscordAgentServer:
         show_working_updates: bool = True,
         tool_confirmation_timeout: float = 120.0,
         activity_status: Optional[str] = None,
+        format_markdown: bool = True,
+        reply_as_embed: bool = False,
     ) -> None:
         """
         Args:
@@ -187,6 +344,12 @@ class DiscordAgentServer:
             tool_confirmation_timeout: Seconds to wait for a reaction when the
                 agent asks to confirm a tool call.  A timeout denies the call.
             activity_status: Text shown as the bot's "Playing …" status.
+            format_markdown: Rewrite agent GFM (tables, HTML, images, ``---``)
+                into forms Discord renders cleanly.  Discord-native markdown
+                (bold, lists, fences, headers) is left alone.  Default True.
+            reply_as_embed: Post final answers as a Discord embed (description
+                field).  Often looks cleaner; limited to ~4096 chars per embed
+                chunk.  Default False (plain messages, 2000-char chunks).
 
         Raises:
             ValueError: If no token is supplied and DISCORD_BOT_TOKEN is unset,
@@ -213,6 +376,8 @@ class DiscordAgentServer:
         self._show_working_updates = show_working_updates
         self._tool_confirmation_timeout = tool_confirmation_timeout
         self._activity_status = activity_status
+        self._format_markdown = format_markdown
+        self._reply_as_embed = reply_as_embed
 
         self._client: Any = None
         self._session_locks: Dict[str, asyncio.Lock] = {}
@@ -384,8 +549,10 @@ class DiscordAgentServer:
                     text = remove_think_content(_event_text(event))
                     if not text:
                         continue
+                    if self._format_markdown:
+                        text = to_discord_markdown(text)
                     status_message = await self._clear_status(status_message)
-                    await self._send(channel, text)
+                    await self._send_reply(channel, text)
                     answered = True
                     continue
 
@@ -543,6 +710,27 @@ class DiscordAgentServer:
             except Exception as exc:
                 logger.warning(f"Failed to send Discord message: {exc}")
                 return None
+        return sent
+
+    async def _send_reply(self, channel: Any, text: str) -> Any:
+        """
+        Send a final agent answer.  Uses a Discord embed when
+        ``reply_as_embed`` is set; otherwise plain messages (with splitting).
+        """
+        if not self._reply_as_embed:
+            return await self._send(channel, text)
+
+        discord = self._import_discord()
+        # Embed description limit is 4096; split if needed
+        embed_limit = 4096
+        sent = None
+        for chunk in split_message(text, limit=embed_limit):
+            try:
+                embed = discord.Embed(description=chunk)
+                sent = await channel.send(embed=embed)
+            except Exception as exc:
+                logger.warning(f"Failed to send Discord embed reply, falling back to text: {exc}")
+                return await self._send(channel, text)
         return sent
 
     async def _update_status(self, channel: Any, status_message: Any, text: str) -> Any:

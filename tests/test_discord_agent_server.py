@@ -19,6 +19,7 @@ from declarative_agent_sdk.discord_agent_server import (
     _event_text,
     _is_final,
     split_message,
+    to_discord_markdown,
 )
 
 
@@ -139,6 +140,47 @@ def _mention(user_id="1"):
 
 
 # ---------------------------------------------------------------------------
+# to_discord_markdown
+# ---------------------------------------------------------------------------
+
+class TestToDiscordMarkdown:
+    def test_passthrough_simple_markdown(self):
+        text = "Here's **bold** and a list:\n- one\n- two"
+        assert to_discord_markdown(text) == text
+
+    def test_converts_gfm_table_to_code_block(self):
+        text = (
+            "Usage:\n"
+            "| Volume | Used |\n"
+            "| ------ | ---- |\n"
+            "| Root   | 22%  |\n"
+            "| Data   | 90%  |\n"
+            "Done."
+        )
+        out = to_discord_markdown(text)
+        assert "```" in out
+        assert "Volume" in out
+        assert "Root" in out
+        assert "90%" in out
+        assert "| ------ |" not in out
+        assert out.startswith("Usage:")
+        assert out.endswith("Done.")
+
+    def test_converts_images_to_links(self):
+        assert to_discord_markdown("See ![plot](https://x.test/a.png)") == (
+            "See [plot](https://x.test/a.png)"
+        )
+
+    def test_strips_html_tags(self):
+        assert to_discord_markdown("Hello <b>world</b>") == "Hello world"
+
+    def test_horizontal_rule(self):
+        out = to_discord_markdown("above\n---\nbelow")
+        assert "────────" in out
+        assert "above" in out and "below" in out
+
+
+# ---------------------------------------------------------------------------
 # split_message
 # ---------------------------------------------------------------------------
 
@@ -167,6 +209,16 @@ class TestSplitMessage:
     def test_no_content_is_lost(self):
         text = "line\n" * 900
         assert "".join(split_message(text)).replace("\n", "") == text.replace("\n", "")
+
+    def test_closes_open_code_fence_across_chunks(self):
+        # Long fenced block that must be split — each piece should be balanced.
+        body = "\n".join(f"line {i} " + ("x" * 40) for i in range(80))
+        text = f"```\n{body}\n```"
+        chunks = split_message(text)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            fences = sum(1 for ln in chunk.splitlines() if ln.strip().startswith("```"))
+            assert fences % 2 == 0, chunk[:80]
 
 
 # ---------------------------------------------------------------------------

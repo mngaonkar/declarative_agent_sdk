@@ -68,6 +68,7 @@ dependencies = [
     "httpx>=0.28.0",
     "term-image>=0.7.2",
     "vertexai>=1.71.1",
+    "langchain-openai>=1.4.3",
 ]
 
 # Optional dependency groups
