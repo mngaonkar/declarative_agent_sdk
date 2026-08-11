@@ -10,9 +10,13 @@ from declarative_agent_sdk.agent_factory import AgentFactory, resolve_agent_fram
 
 
 class TestResolveAgentFramework:
-    def test_defaults_to_adk(self):
-        assert resolve_agent_framework({}) == "adk"
-        assert resolve_agent_framework({"name": "x"}) == "adk"
+    def test_defaults_to_lean(self):
+        assert resolve_agent_framework({}) == "lean"
+        assert resolve_agent_framework({"name": "x"}) == "lean"
+
+    def test_agent_framework_lean_aliases(self):
+        for value in ("lean", "simple", "esp", "esp32", "native"):
+            assert resolve_agent_framework({"agent_framework": value}) == "lean"
 
     def test_agent_framework_adk_aliases(self):
         for value in ("adk", "ADK", "google_adk", "google-adk"):
@@ -26,6 +30,7 @@ class TestResolveAgentFramework:
         assert resolve_agent_framework({"backend": "adk"}) == "adk"
         assert resolve_agent_framework({"backend": "langchain"}) == "deepagent"
         assert resolve_agent_framework({"backend": "deepagents"}) == "deepagent"
+        assert resolve_agent_framework({"backend": "lean"}) == "lean"
 
     def test_agent_framework_wins_over_backend(self):
         assert resolve_agent_framework({

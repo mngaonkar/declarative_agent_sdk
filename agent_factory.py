@@ -2,8 +2,9 @@
 Agent Factory — create BaseAgent instances from YAML / dict configuration.
 
 The ``agent_framework`` key (alias: ``backend``) selects the implementation:
-  - ``adk`` (default)             → AIAgent  (Google ADK)
-  - ``deepagent`` / ``langchain`` → LangChainAIAgent  (deepagents + LangGraph)
+  - ``lean`` (default)            → LeanAIAgent  (ESP-style ReAct + skills)
+  - ``adk``                       → AIAgent  (Google ADK) — deprecated path
+  - ``deepagent`` / ``langchain`` → LangChainAIAgent — deprecated path
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from declarative_agent_sdk.tool_registry import ToolRegistry
 
 logger = get_logger(__name__)
 
+_LEAN_ALIASES = frozenset({"lean", "simple", "esp", "esp32", "native"})
 _ADK_ALIASES = frozenset({"adk", "google_adk", "google-adk"})
 _DEEPAGENT_ALIASES = frozenset({
     "deepagent",
@@ -28,27 +30,29 @@ _DEEPAGENT_ALIASES = frozenset({
     "langchain",
     "langgraph",
 })
-_SUPPORTED_FRAMEWORKS = sorted(_ADK_ALIASES | _DEEPAGENT_ALIASES)
+_SUPPORTED_FRAMEWORKS = sorted(_LEAN_ALIASES | _ADK_ALIASES | _DEEPAGENT_ALIASES)
 
 
 def resolve_agent_framework(config: Dict[str, Any]) -> str:
     """
     Read ``agent_framework`` (preferred) or legacy ``backend`` from *config*.
 
-    Returns ``"adk"`` or ``"deepagent"``. Defaults to ``"adk"``.
+    Returns ``"lean"`` (default), ``"adk"``, or ``"deepagent"``.
     """
     raw = config.get("agent_framework")
     if raw is None:
-        raw = config.get("backend", "adk")
+        raw = config.get("backend", "lean")
     value = str(raw).strip().lower()
 
+    if value in _LEAN_ALIASES:
+        return "lean"
     if value in _ADK_ALIASES:
         return "adk"
     if value in _DEEPAGENT_ALIASES:
         return "deepagent"
     raise ValueError(
         f"Unknown agent_framework '{raw}'. "
-        f"Supported values: {', '.join(_SUPPORTED_FRAMEWORKS)}."
+        f"Supported values: lean (default), adk, deepagent."
     )
 
 
@@ -87,7 +91,21 @@ class AgentFactory:
         framework = resolve_agent_framework(config)
         logger.info(f"Agent '{name}' agent_framework={framework}")
 
+        if framework == "lean":
+            common = parse_common_config(
+                config,
+                framework=framework,
+                default_model="gpt-4o-mini",
+                default_provider="openai",
+            )
+            common.tools = AgentFactory._resolve_tool_names(common.tools, name)
+            return AgentFactory._create_lean_agent(common)
+
         if framework == "adk":
+            logger.warning(
+                "agent_framework=adk is a legacy path; prefer 'lean' "
+                "(ESP-style runtime). ADK will be removed in a future release."
+            )
             common = parse_common_config(
                 config,
                 framework=framework,
@@ -97,6 +115,10 @@ class AgentFactory:
             common.tools = AgentFactory._resolve_tool_names(common.tools, name)
             return AgentFactory._create_adk_agent(common)
 
+        logger.warning(
+            "agent_framework=deepagent is a legacy path; prefer 'lean'. "
+            "deepagent/LangGraph will be removed in a future release."
+        )
         common = parse_common_config(
             config,
             framework=framework,
@@ -106,6 +128,37 @@ class AgentFactory:
         common.tools = AgentFactory._resolve_tool_names(common.tools, name)
         common.middleware = AgentFactory._resolve_middleware(common.middleware)
         return AgentFactory._create_langchain_agent(common)
+
+    @staticmethod
+    def _create_lean_agent(common: CommonAgentConfig) -> BaseAgent:
+        from declarative_agent_sdk.lean_ai_agent import LeanAIAgent
+
+        logger.info(
+            f"Creating lean agent '{common.name}' "
+            f"(provider={common.provider}, "
+            f"tools_approval_required={common.tools_approval_required})"
+        )
+        return LeanAIAgent(
+            name=common.name,
+            description=common.description,
+            instruction_file=common.instruction_file,
+            tools=common.tools,
+            tools_approval_required=common.tools_approval_required,
+            skills_directory=common.skills_directory,
+            workspace_directory=common.workspace_directory,
+            skills=common.skills,
+            model=common.model,
+            provider=common.provider or "openai",
+            max_output_tokens=common.max_tokens,
+            endpoint_url=common.endpoint_url,
+            temperature=common.temperature,
+            publish_url=common.publish_url,
+            output_key=common.output_key,
+            context_window=common.context_window,
+            enable_truncation=common.enable_truncation,
+            truncate_strategy=common.truncate_strategy,
+            safety_margin=common.safety_margin,
+        )
 
     # ------------------------------------------------------------------
     # Backend constructors (shared CommonAgentConfig)

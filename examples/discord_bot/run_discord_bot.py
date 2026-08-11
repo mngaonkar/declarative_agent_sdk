@@ -492,12 +492,11 @@ def load_dotenv_if_present() -> None:
 
 
 def _framework_from_config(config: dict) -> str:
-    """Canonical agent_framework from YAML (adk | deepagent). Falls back safely."""
+    """Canonical agent_framework from YAML (lean | adk | deepagent)."""
     try:
         from declarative_agent_sdk.agent_factory import resolve_agent_framework
         return resolve_agent_framework(config)
     except ValueError as exc:
-        # preflight reports this as a problem instead of raising
         return f"__invalid__:{exc}"
 
 
@@ -508,9 +507,14 @@ def preflight(config: dict) -> List[str]:
     framework = _framework_from_config(config)
     if framework.startswith("__invalid__:"):
         problems.append(framework.split(":", 1)[1])
-        framework = "adk"
+        framework = "lean"
 
-    default_provider = "anthropic" if framework == "deepagent" else "google"
+    if framework == "deepagent":
+        default_provider = "anthropic"
+    elif framework == "adk":
+        default_provider = "google"
+    else:
+        default_provider = "openai"
     provider = str(config.get("provider") or default_provider).lower()
     model = config.get("model", "<default>")
 

@@ -4,54 +4,33 @@
 #
 # selftest mode does not read this file — it uses a scripted stub agent.
 #
-# agent_framework selects the runtime:
-#   adk        → Google ADK (AIAgent) — default if omitted
-#   deepagent  → deepagents / LangGraph (LangChainAIAgent)
-#                aliases: deepagents | langchain | langgraph
-# Legacy key ``backend`` is still accepted with the same values.
+# agent_framework:
+#   lean (default)  → ESP-style ReAct + progressive skills  [recommended]
+#   adk             → Google ADK (legacy)
+#   deepagent       → deepagents / LangGraph (legacy)
 
 name: discord_news_agent
-description: Answers questions in Discord and searches the web when needed
+description: Answers questions in Discord with tools and progressive skills
 
-# ── framework ──────────────────────────────────────────────────────────
-# Switch to "adk" to exercise the Google ADK path instead.
-agent_framework: deepagent
+agent_framework: lean
 
 instruction_file: instructions.md
+skills_directory: skills
+workspace_directory: workspace
 
-# Provider / model. deepagent defaults to anthropic if provider is omitted;
-# adk defaults to google. Set keys that match your choice:
-#   openai     → OPENAI_API_KEY
-#   anthropic  → ANTHROPIC_API_KEY
-#   google     → GOOGLE_API_KEY or GEMINI_API_KEY
-#   vllm       → no key (local server)
+# OpenAI-compatible API (lean default). vLLM works the same with endpoint.url.
 provider: openai
-model: gpt-4o
+model: gpt-5.4
 endpoint:
   url: https://api.openai.com/v1
-#
-#   provider: anthropic
-#   model: claude-sonnet-4-6
-#
-#   provider: vllm
-#   model: Qwen/Qwen3-4B
-#   endpoint:
-#     url: http://localhost:8000/v1
-#
-#   provider: google
-#   model: gemini-2.5-flash-lite
 
-# Built-in tools. tavily_search needs TAVILY_API_KEY.
+# Extra tools beyond lean skill tools (Skill, list_skills, read/write/run_script).
+# tavily_search needs TAVILY_API_KEY.
 tools:
   - web_request
   - tavily_search
   - exec_command
-  - read_file
-  - write_file
 
-# Pause before tool execution and ask in Discord (✅ / ❌ or yes/no).
-# Works for both agent_framework: adk and deepagent (deepagents interrupt_on).
-# Set false for an unattended bot.
+# Pause before non-meta tools (exec, web, …). Skill / list_skills / read_file
+# auto-approve so progressive disclosure stays smooth.
 tools_approval_required: true
-
-workspace_directory: workspace

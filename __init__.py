@@ -8,6 +8,7 @@ from declarative_agent_sdk.__version__ import __version__
 from declarative_agent_sdk.plugins.context_updater import get_updated_context, AgentContext
 from declarative_agent_sdk.base_agent import BaseAgent
 from declarative_agent_sdk.ai_agent import AIAgent
+from declarative_agent_sdk.lean_ai_agent import LeanAIAgent
 from declarative_agent_sdk.langchain_ai_agent import LangChainAIAgent, LangChainEvent
 from declarative_agent_sdk.ai_agent_executor import AIAgentExecutor
 from declarative_agent_sdk.ai_graph_executor import AIWorkflowExecutor
@@ -36,6 +37,7 @@ __all__ = [
     '__version__',
     'BaseAgent',
     'AIAgent',
+    'LeanAIAgent',
     'LangChainAIAgent',
     'LangChainEvent',
     'AgentEvent',

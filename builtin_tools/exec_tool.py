@@ -82,6 +82,26 @@ def exec_command(
         'timed_out': False,
         'error': None
     }
+
+    # LLM tool args often arrive as strings — coerce common types.
+    if isinstance(shell, str):
+        shell = shell.strip().lower() in ("1", "true", "yes", "y")
+    else:
+        shell = bool(shell)
+    if isinstance(capture_output, str):
+        capture_output = capture_output.strip().lower() in ("1", "true", "yes", "y")
+    else:
+        capture_output = bool(capture_output)
+    if timeout is not None and timeout != "":
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            return {
+                **result,
+                'error': f"timeout must be a number or null, got {timeout!r}",
+            }
+    else:
+        timeout = None
     
     try:
         # Parse command if not using shell
