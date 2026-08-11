@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from declarative_agent_sdk.agent_event import AgentEvent, from_adk_event
+from declarative_agent_sdk.core.agent_event import AgentEvent, from_adk_event
 
 
 class TestAgentEvent:

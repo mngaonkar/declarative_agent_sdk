@@ -108,10 +108,26 @@ Documentation = "https://github.com/mngaonkar/google-adk-samples/tree/main/sdk#r
 Repository = "https://github.com/mngaonkar/google-adk-samples"
 "Bug Tracker" = "https://github.com/mngaonkar/google-adk-samples/issues"
 
-# Package discovery configuration
-# The package is called "declarative_agent_sdk" and source files are in the current directory
+# Package root maps to this directory; subpackages listed explicitly
 [tool.setuptools]
-packages = ["declarative_agent_sdk", "declarative_agent_sdk.plugins", "declarative_agent_sdk.builtin_tools"]
+packages = [
+    "declarative_agent_sdk",
+    "declarative_agent_sdk.core",
+    "declarative_agent_sdk.agents",
+    "declarative_agent_sdk.agents.lean",
+    "declarative_agent_sdk.agents.lean.runtime",
+    "declarative_agent_sdk.agents.adk",
+    "declarative_agent_sdk.agents.adk.plugins",
+    "declarative_agent_sdk.agents.deepagent",
+    "declarative_agent_sdk.tools",
+    "declarative_agent_sdk.tools.builtin",
+    "declarative_agent_sdk.models",
+    "declarative_agent_sdk.transports",
+    "declarative_agent_sdk.transports.discord",
+    "declarative_agent_sdk.transports.a2a",
+    "declarative_agent_sdk.transports.a2a.formatters",
+    "declarative_agent_sdk.workflows",
+]
 
 [tool.setuptools.package-dir]
 declarative_agent_sdk = "."

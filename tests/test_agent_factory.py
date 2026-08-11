@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from declarative_agent_sdk.agent_factory import AgentFactory, resolve_agent_framework
+from declarative_agent_sdk.core.agent_factory import AgentFactory, resolve_agent_framework
 
 
 class TestResolveAgentFramework:

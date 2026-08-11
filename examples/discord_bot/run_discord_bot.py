@@ -36,7 +36,7 @@ import sys
 from typing import Any, List, Optional
 
 from declarative_agent_sdk import DiscordAgentServer
-from declarative_agent_sdk.discord_agent_server import (
+from declarative_agent_sdk.transports.discord.server import (
     APPROVE_EMOJI,
     DENY_EMOJI,
     DISCORD_MESSAGE_LIMIT,
@@ -494,7 +494,7 @@ def load_dotenv_if_present() -> None:
 def _framework_from_config(config: dict) -> str:
     """Canonical agent_framework from YAML (lean | adk | deepagent)."""
     try:
-        from declarative_agent_sdk.agent_factory import resolve_agent_framework
+        from declarative_agent_sdk.core.agent_factory import resolve_agent_framework
         return resolve_agent_framework(config)
     except ValueError as exc:
         return f"__invalid__:{exc}"
@@ -563,7 +563,7 @@ def check_credentials(config_path: str) -> Optional[dict]:
 
 async def local(config_path: str) -> int:
     from declarative_agent_sdk import AgentFactory, AgentRegistry
-    from declarative_agent_sdk.agent_factory import resolve_agent_framework
+    from declarative_agent_sdk.core.agent_factory import resolve_agent_framework
 
     config = check_credentials(config_path)
     if config is None:
@@ -687,7 +687,7 @@ def connect() -> int:
 
 def live(config_path: str) -> int:
     from declarative_agent_sdk import AgentFactory, AgentRegistry
-    from declarative_agent_sdk.agent_factory import resolve_agent_framework
+    from declarative_agent_sdk.core.agent_factory import resolve_agent_framework
 
     config = check_credentials(config_path)
     if config is None:

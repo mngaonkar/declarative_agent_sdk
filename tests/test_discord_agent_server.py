@@ -10,7 +10,7 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock
 
-from declarative_agent_sdk.discord_agent_server import (
+from declarative_agent_sdk.transports.discord.server import (
     APPROVE_EMOJI,
     DENY_EMOJI,
     DISCORD_MESSAGE_LIMIT,
@@ -18,6 +18,8 @@ from declarative_agent_sdk.discord_agent_server import (
     _confirmation_request,
     _event_text,
     _is_final,
+    extract_image_refs,
+    resolve_image_files,
     split_message,
     to_discord_markdown,
 )
@@ -88,10 +90,15 @@ class FakeChannel:
         self.id = channel_id
         self.sent = []
         self.deleted = []
+        self.files_sent = []
 
-    async def send(self, content):
+    async def send(self, content=None, *, files=None, embed=None, **kwargs):
         msg = FakeMessage(content, self, message_id=f"sent-{len(self.sent)}")
+        msg.files = files or []
+        msg.embed = embed
         self.sent.append(msg)
+        if files:
+            self.files_sent.extend(files)
         return msg
 
 
@@ -143,6 +150,37 @@ def _mention(user_id="1"):
 # to_discord_markdown
 # ---------------------------------------------------------------------------
 
+class TestExtractImageRefs:
+    def test_markdown_image(self):
+        text, refs = extract_image_refs("See ![plot](workspace/out.png) above")
+        assert refs == ["workspace/out.png"]
+        assert "plot" in text
+        assert "![" not in text
+
+    def test_url_and_path(self, tmp_path):
+        img = tmp_path / "chart.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n")
+        text = f"http://example.com/a.jpg and {img}"
+        cleaned, refs = extract_image_refs(text)
+        assert "http://example.com/a.jpg" in refs
+        assert str(img) in refs or any(str(img) in r or r.endswith("chart.png") for r in refs)
+
+    def test_resolve_local_file(self, tmp_path):
+        img = tmp_path / "shot.png"
+        # Valid PNG signature so magic-byte check accepts it
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        paths, notes = resolve_image_files([str(img)])
+        assert paths == [str(img.resolve())]
+        assert notes == []
+
+    def test_rejects_html_masquerading_as_jpg(self, tmp_path):
+        fake = tmp_path / "page.jpg"
+        fake.write_text("<!DOCTYPE html><html>not an image</html>")
+        paths, notes = resolve_image_files([str(fake)])
+        assert paths == []
+        assert any("not a valid image" in n for n in notes)
+
+
 class TestToDiscordMarkdown:
     def test_passthrough_simple_markdown(self):
         text = "Here's **bold** and a list:\n- one\n- two"
@@ -166,9 +204,11 @@ class TestToDiscordMarkdown:
         assert out.startswith("Usage:")
         assert out.endswith("Done.")
 
-    def test_converts_images_to_links(self):
-        assert to_discord_markdown("See ![plot](https://x.test/a.png)") == (
-            "See [plot](https://x.test/a.png)"
+    def test_leaves_markdown_images_for_attachment_pass(self):
+        # Image markdown is handled by extract_image_refs / _send_reply,
+        # not rewritten to links (attachments render in-channel).
+        assert "![plot](https://x.test/a.png)" in to_discord_markdown(
+            "See ![plot](https://x.test/a.png)"
         )
 
     def test_strips_html_tags(self):

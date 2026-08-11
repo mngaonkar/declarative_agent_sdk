@@ -1,0 +1,48 @@
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.graph import StateGraph
+from typing import Dict
+from declarative_agent_sdk.transports.a2a.utils import create_agent_card
+from a2a.types import AgentSkill
+from declarative_agent_sdk.core.agent_logging import get_logger
+logger = get_logger(__name__)
+from declarative_agent_sdk.tools.skill_registry import SkillRegistry
+
+class AIWorkflow():
+    def __init__(self, name: str, description: str, graph: StateGraph, state: type):
+        self._name = name
+        self._description = description
+        self._graph = graph
+        self._state = state
+        self._agent_card = self._create_agent_card(name, description, None)
+
+    def compile(self) -> CompiledStateGraph:
+        """Compile the StateGraph into a CompiledStateGraph that can be executed by the AIWorkflowExecutor."""
+        compiled_graph = self._graph.compile()
+        
+        return compiled_graph
+    
+    def _create_agent_card(self, name: str, description: str, skills: Dict[str, str] | None):
+        skills_registry = type('InstanceSkillRegistry', (SkillRegistry,), {
+            '_skills': {},  # Instance-specific skills dict
+        })
+        skill_descriptions = skills_registry.get_all_skills_description()
+        logger.info(f"Creating agent card with skills: {skill_descriptions}")
+
+        agent_card = create_agent_card(
+            name=name,
+            description=description,
+            skills=skill_descriptions
+        )
+        return agent_card
+    
+    @property
+    def agent_card(self):
+        return self._agent_card
+    
+    @property
+    def graph(self):
+        return self._graph
+    
+    @property
+    def state(self):
+        return self._state

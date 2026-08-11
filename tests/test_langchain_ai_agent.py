@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 
-from declarative_agent_sdk.base_agent import BaseAgent
-from declarative_agent_sdk.langchain_ai_agent import (
+from declarative_agent_sdk.core.base_agent import BaseAgent
+from declarative_agent_sdk.agents.deepagent.agent import (
     LangChainAIAgent,
     LangChainEvent,
     _message_text,
@@ -52,15 +52,15 @@ def _make_agent(chunks: list | None = None, name: str = "test_agent") -> LangCha
 
     with (
         patch(
-            "declarative_agent_sdk.langchain_ai_agent.create_deep_agent",
+            "declarative_agent_sdk.agents.deepagent.agent.create_deep_agent",
             return_value=_graph_mock(chunks),
         ),
         patch(
-            "declarative_agent_sdk.langchain_ai_agent.read_from_file",
+            "declarative_agent_sdk.agents.deepagent.agent.read_from_file",
             return_value="You are a helpful assistant.",
         ),
-        patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.register_built_in_tools"),
-        patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.get_all", return_value=[]),
+        patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.register_built_in_tools"),
+        patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.get_all", return_value=[]),
     ):
         return LangChainAIAgent(
             name=name,
@@ -239,15 +239,15 @@ class TestLangChainAIAgentInit:
     def test_create_deep_agent_called_with_system_prompt(self):
         with (
             patch(
-                "declarative_agent_sdk.langchain_ai_agent.create_deep_agent",
+                "declarative_agent_sdk.agents.deepagent.agent.create_deep_agent",
                 return_value=_graph_mock([]),
             ) as mock_create,
             patch(
-                "declarative_agent_sdk.langchain_ai_agent.read_from_file",
+                "declarative_agent_sdk.agents.deepagent.agent.read_from_file",
                 return_value="System instruction.",
             ),
-            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.register_built_in_tools"),
-            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.get_all", return_value=[]),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.register_built_in_tools"),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.get_all", return_value=[]),
         ):
             LangChainAIAgent(
                 name="agent",
@@ -402,15 +402,15 @@ class TestToolApprovalWiring:
     def test_interrupt_on_passed_when_approval_required(self):
         with (
             patch(
-                "declarative_agent_sdk.langchain_ai_agent.create_deep_agent",
+                "declarative_agent_sdk.agents.deepagent.agent.create_deep_agent",
                 return_value=_graph_mock([]),
             ) as mock_create,
             patch(
-                "declarative_agent_sdk.langchain_ai_agent.read_from_file",
+                "declarative_agent_sdk.agents.deepagent.agent.read_from_file",
                 return_value="sys",
             ),
-            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.register_built_in_tools"),
-            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.get_all", return_value=[]),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.register_built_in_tools"),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.get_all", return_value=[]),
         ):
             def fake_tool(x: str) -> str:
                 """demo tool"""
@@ -437,15 +437,15 @@ class TestToolApprovalWiring:
     def test_no_interrupt_on_when_approval_disabled(self):
         with (
             patch(
-                "declarative_agent_sdk.langchain_ai_agent.create_deep_agent",
+                "declarative_agent_sdk.agents.deepagent.agent.create_deep_agent",
                 return_value=_graph_mock([]),
             ) as mock_create,
             patch(
-                "declarative_agent_sdk.langchain_ai_agent.read_from_file",
+                "declarative_agent_sdk.agents.deepagent.agent.read_from_file",
                 return_value="sys",
             ),
-            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.register_built_in_tools"),
-            patch("declarative_agent_sdk.langchain_ai_agent.ToolRegistry.get_all", return_value=[]),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.register_built_in_tools"),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.get_all", return_value=[]),
         ):
             LangChainAIAgent(
                 name="a",

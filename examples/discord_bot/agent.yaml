@@ -1,36 +1,30 @@
 # Sample agent for the Discord bot example.
-# Used by:  python run_discord_bot.py --mode local --config agent.yaml
-#           python run_discord_bot.py --mode live  --config agent.yaml
 #
-# selftest mode does not read this file — it uses a scripted stub agent.
-#
-# agent_framework:
-#   lean (default)  → ESP-style ReAct + progressive skills  [recommended]
-#   adk             → Google ADK (legacy)
-#   deepagent       → deepagents / LangGraph (legacy)
+# agent_framework picks ONE end-to-end loop (no mixing):
+#   lean      → native ReAct + progressive skills  (default)
+#   adk       → Google ADK Runner
+#   deepagent → deepagents / LangGraph
 
 name: discord_news_agent
 description: Answers questions in Discord with tools and progressive skills
 
-agent_framework: lean
+agent_framework: deepagent 
 
 instruction_file: instructions.md
 skills_directory: skills
 workspace_directory: workspace
 
-# OpenAI-compatible API (lean default). vLLM works the same with endpoint.url.
 provider: openai
 model: gpt-5.4
 endpoint:
   url: https://api.openai.com/v1
 
-# Extra tools beyond lean skill tools (Skill, list_skills, read/write/run_script).
+# Built-in tools (lean also has Skill / list_skills / read_file / write_file / run_script).
 # tavily_search needs TAVILY_API_KEY.
 tools:
   - web_request
   - tavily_search
   - exec_command
 
-# Pause before non-meta tools (exec, web, …). Skill / list_skills / read_file
-# auto-approve so progressive disclosure stays smooth.
+# Pause before non-meta tools (exec, web, …). Meta skill tools auto-approve on lean.
 tools_approval_required: true

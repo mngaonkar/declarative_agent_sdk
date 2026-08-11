@@ -5,10 +5,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from declarative_agent_sdk.runtime.loop import LeanLoop, LoopEvent
-from declarative_agent_sdk.runtime.skills import SkillRegistry, parse_frontmatter
-from declarative_agent_sdk.runtime.tools import LeanToolRegistry
-from declarative_agent_sdk.agent_factory import resolve_agent_framework, AgentFactory
+from declarative_agent_sdk.agents.lean.runtime.loop import LeanLoop, LoopEvent
+from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry, parse_frontmatter
+from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
+from declarative_agent_sdk.core.agent_factory import resolve_agent_framework, AgentFactory
 from unittest.mock import patch
 
 

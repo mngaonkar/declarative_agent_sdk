@@ -20,26 +20,20 @@ python run_discord_bot.py --mode local --config agent.yaml
 
 `local` and `live` check credentials before starting and tell you exactly what to export if something is missing, rather than failing on the first model call. Keys are read from the environment, or from a `.env` file next to this example or at the repo root.
 
-The shipped `agent.yaml` uses **`agent_framework: lean`** — the ESP-style ReAct loop with progressive skills (no ADK / LangGraph). OpenAI-compatible by default.
+The shipped `agent.yaml` uses **`agent_framework: lean`**. Pick **one** framework; each owns its loop end-to-end (no nesting):
 
 ```yaml
-agent_framework: lean   # default if omitted; also: simple | esp
+agent_framework: lean       # native ReAct + progressive skills (default)
+# agent_framework: adk      # Google ADK Runner
+# agent_framework: deepagent  # deepagents / LangGraph
 provider: openai
-model: gpt-4o-mini
+model: gpt-5.4
 skills_directory: skills
-```
-
-Legacy frameworks (still work, will be removed later):
-
-```yaml
-agent_framework: adk        # Google ADK
-# or
-agent_framework: deepagent  # deepagents / LangGraph
 ```
 
 Switch `model` / `provider` / `endpoint` to match the API key you have (OpenAI, Anthropic, Google, or local vLLM).
 
-Gives you a terminal REPL. Everything you type is wrapped as a Discord message mentioning the bot and pushed through `DiscordAgentServer.handle_message`, so you see exactly what the bot would post — including status updates and tool-approval prompts (ADK only), which you answer with `y`/`n` at the prompt instead of reactions. Use this to check prompt and formatting behaviour before involving Discord.
+Gives you a terminal REPL. Everything you type is wrapped as a Discord message mentioning the bot and pushed through `DiscordAgentServer.handle_message`, so you see exactly what the bot would post — including status updates and tool-approval prompts, which you answer with `y`/`n` at the prompt instead of reactions. Use this to check prompt and formatting behaviour before involving Discord.
 
 ## 3. `connect` — real Discord, no agent
 
@@ -109,15 +103,18 @@ Then `--mode connect` to confirm, and `--mode live` to serve.
 | `agent.yaml` | Sample agent config (`agent_framework`, provider, tools) — `local` / `live` only |
 | `instructions.md` | System instructions for the sample agent |
 
-### Choosing a runtime
+### Choosing a runtime (peers — pick one)
 
-| `agent_framework` | Class | Notes |
+| `agent_framework` | Class | Owns the loop |
 |---|---|---|
-| **`lean` (default)** | `LeanAIAgent` | ESP-style ReAct + progressive skills; recommended |
-| `adk` | `AIAgent` | Legacy Google ADK path |
-| `deepagent` | `LangChainAIAgent` | Legacy deepagents / LangGraph path |
+| **`lean` (default)** | `LeanAIAgent` | Native ReAct + progressive skills |
+| `adk` | `AIAgent` | Google ADK Runner |
+| `deepagent` | `LangChainAIAgent` | deepagents / LangGraph |
 
-Progressive skills live under `skills/<name>/SKILL.md` (see `skills/disk-space/`). Meta tools (`Skill`, `list_skills`, `read_file`) auto-approve; other tools respect `tools_approval_required`.
+Shared across all three: YAML config shape, `AgentEvent` stream, Discord/A2A transports.  
+**Do not mix frameworks** (no ADK/deepagent nested under lean).
+
+Progressive skills (`skills/<name>/SKILL.md`) are a lean feature. Meta tools (`Skill`, `list_skills`, `read_file`) auto-approve on lean; other tools respect `tools_approval_required`.
 
 ### Markdown on Discord
 
