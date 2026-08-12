@@ -36,6 +36,23 @@ _PHASE_RE = re.compile(
     r"\[\[\s*phase\s*:\s*(plan|act|reflect|done|ask)\s*\]\]",
     re.IGNORECASE,
 )
+# Common reasoning wrappers (Qwen/DeepSeek-style and generic).
+_THINK_RE = re.compile(
+    r"<think>(.*?)</think>",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINK_ALT_RE = re.compile(
+    r"<thinking>(.*?)</thinking>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_PHASE_LABELS = {
+    "plan": "Planning",
+    "act": "Acting",
+    "reflect": "Reflecting",
+    "done": "Finishing",
+    "ask": "Asking",
+}
 
 _BASE_PROMPT = """You are a careful, iterative AI agent with tools and skills.
 
@@ -196,9 +213,17 @@ class LeanLoop:
         if len(history) <= self.history_limit:
             return history
         cut = len(history) - self.history_limit
+        # Never start mid tool-response block.
         while cut < len(history) and history[cut].get("role") == "tool":
             cut += 1
-        return history[cut:]
+        # Walk cut earlier until the kept suffix has a valid tool-call chain
+        # (no orphan tools, no assistant.tool_calls without responses).
+        while cut > 0 and not _tool_chain_valid(history[cut:]):
+            cut -= 1
+        trimmed = history[cut:]
+        # Last resort: fill any remaining holes rather than send an invalid list.
+        _close_open_tool_calls(trimmed, reason="Dropped by history trim.")
+        return trimmed
 
     def _needs_approval(self, tool_name: str) -> bool:
         if not self.tools_approval_required:
@@ -206,10 +231,27 @@ class LeanLoop:
         return tool_name not in self.auto_approve
 
     def run(self, query: str, session_id: str) -> Iterator[LoopEvent]:
-        if session_id in self._pending:
-            self._pending.pop(session_id, None)
+        abandoned = self._pending.pop(session_id, None)
 
         history = self._history.setdefault(session_id, [])
+        # A new user message abandons any mid-batch approval. OpenAI-compatible
+        # APIs require every assistant tool_call_id to have a tool response
+        # before the next non-tool message — close the batch first.
+        if abandoned is not None:
+            _fill_missing_tool_responses(
+                history,
+                abandoned.tool_calls,
+                reason=(
+                    "User sent a new message before tool approval completed; "
+                    "this tool was not executed."
+                ),
+            )
+        else:
+            _close_open_tool_calls(
+                history,
+                reason="Incomplete tool batch left from a previous turn.",
+            )
+
         history.append({"role": "user", "content": query})
         history[:] = self._trim(history)
 
@@ -243,19 +285,16 @@ class LeanLoop:
             tools_used_this_turn=pending.tools_used_this_turn,
         )
 
+        stop_batch = False
         if i < len(tool_calls):
             failed = yield from self._execute_one(
                 messages, history, tool_calls[i], approved, turn
             )
             if failed and turn.consecutive_failures >= self.max_step_retries:
-                self._inject_system(
-                    messages,
-                    history,
-                    _FORCE_ASK_NUDGE % {"n": turn.consecutive_failures},
-                )
+                stop_batch = True
             i += 1
 
-        while i < len(tool_calls):
+        while i < len(tool_calls) and not stop_batch:
             call = tool_calls[i]
             name = (call.get("function") or {}).get("name") or ""
             if self._needs_approval(name):
@@ -275,13 +314,26 @@ class LeanLoop:
                 messages, history, call, approved=True, turn=turn
             )
             if failed and turn.consecutive_failures >= self.max_step_retries:
-                self._inject_system(
-                    messages,
-                    history,
-                    _FORCE_ASK_NUDGE % {"n": turn.consecutive_failures},
-                )
+                stop_batch = True
                 break
             i += 1
+
+        if stop_batch:
+            # Must answer every tool_call_id before the next chat/user message.
+            _fill_missing_tool_responses(
+                messages,
+                tool_calls,
+                history=history,
+                reason=(
+                    f"Skipped after {turn.consecutive_failures} consecutive "
+                    "tool failures; ask the user or change approach."
+                ),
+            )
+            self._inject_system(
+                messages,
+                history,
+                _FORCE_ASK_NUDGE % {"n": turn.consecutive_failures},
+            )
 
         yield from self._drive(session_id, messages, history, rounds_left, turn)
 
@@ -291,6 +343,12 @@ class LeanLoop:
         history: List[Dict[str, Any]],
         text: str,
     ) -> None:
+        # Never insert a user/system turn while assistant tool_calls are open.
+        _close_open_tool_calls(
+            messages,
+            history=history,
+            reason="Closed before runtime nudge.",
+        )
         # Use role=user so OpenAI-compatible APIs always accept the nudge
         # (some providers restrict multiple system messages).
         msg = {
@@ -314,6 +372,13 @@ class LeanLoop:
             if rounds_left <= 1:
                 self._inject_system(messages, history, _BUDGET_NUDGE)
 
+            # Safety net: OpenAI-compatible APIs reject incomplete tool batches.
+            _close_open_tool_calls(
+                messages,
+                history=history,
+                reason="Closed incomplete tool batch before model call.",
+            )
+
             try:
                 message = self.client.chat(messages, tools=self.tools.schemas())
             except LLMError as exc:
@@ -322,7 +387,8 @@ class LeanLoop:
 
             tool_calls = message.get("tool_calls") or []
             content = _content_to_text(message.get("content"))
-            visible, decision, phase = _parse_control_tags(content)
+            think_text, without_think = _extract_think_blocks(content)
+            visible, decision, phase = _parse_control_tags(without_think)
 
             assistant_msg: Dict[str, Any] = {
                 "role": "assistant",
@@ -333,19 +399,41 @@ class LeanLoop:
             messages.append(assistant_msg)
             history.append(assistant_msg)
 
+            # Surface model deliberation (think blocks + plan/reason text).
+            # Skip when the only content is the final answer (avoids Discord
+            # posting the same text as both "thinking" and the reply).
+            is_terminal = not tool_calls and (
+                decision in ("done", "ask") or phase in ("done", "ask")
+            )
+            if think_text:
+                yield LoopEvent(
+                    kind="status",
+                    text=_compose_thinking(think_text, "" if is_terminal else visible, phase),
+                )
+            elif visible and not is_terminal:
+                yield LoopEvent(
+                    kind="status",
+                    text=_compose_thinking("", visible, phase),
+                )
+
             # ── No tools this round: deliberative continue or exit ────
             if not tool_calls:
-                if visible:
-                    yield LoopEvent(kind="status", text=visible)
-
                 # Explicit terminal decisions
                 if decision in ("done", "ask") or phase in ("done", "ask"):
                     history[:] = self._trim(history)
-                    final = visible or content or (
+                    final = visible or (
                         "I need your help to proceed."
                         if decision == "ask" or phase == "ask"
                         else "(done)"
                     )
+                    # If the only content was a think block, fall back to a
+                    # short default rather than dumping raw tags.
+                    if not visible and think_text:
+                        final = (
+                            "I need your help to proceed."
+                            if decision == "ask" or phase == "ask"
+                            else "Done."
+                        )
                     yield LoopEvent(kind="final", text=final)
                     return
 
@@ -368,7 +456,6 @@ class LeanLoop:
                     yield LoopEvent(
                         kind="final",
                         text=visible
-                        or content
                         or (
                             "Stopping after several reasoning-only turns without "
                             "a clear done/ask decision. Please restate the goal "
@@ -390,12 +477,12 @@ class LeanLoop:
             names = [
                 (c.get("function") or {}).get("name", "?") for c in tool_calls
             ]
-            status = f"Calling tools: {', '.join(names)}"
-            if visible:
-                status = f"{visible}\n{status}"
-            yield LoopEvent(kind="status", text=status)
+            yield LoopEvent(
+                kind="status", text=f"Calling tools: {', '.join(names)}"
+            )
 
             i = 0
+            stop_batch = False
             while i < len(tool_calls):
                 call = tool_calls[i]
                 name = (call.get("function") or {}).get("name") or ""
@@ -417,14 +504,26 @@ class LeanLoop:
                     messages, history, call, approved=True, turn=turn
                 )
                 if failed and turn.consecutive_failures >= self.max_step_retries:
-                    self._inject_system(
-                        messages,
-                        history,
-                        _FORCE_ASK_NUDGE % {"n": turn.consecutive_failures},
-                    )
-                    # Let the model produce an ask on the next round
+                    stop_batch = True
                     break
                 i += 1
+
+            if stop_batch:
+                # Answer remaining tool_call_ids so the next model call is valid.
+                _fill_missing_tool_responses(
+                    messages,
+                    tool_calls,
+                    history=history,
+                    reason=(
+                        f"Skipped after {turn.consecutive_failures} consecutive "
+                        "tool failures; ask the user or change approach."
+                    ),
+                )
+                self._inject_system(
+                    messages,
+                    history,
+                    _FORCE_ASK_NUDGE % {"n": turn.consecutive_failures},
+                )
             # next model round (reflect / next step)
 
         history[:] = self._trim(history)
@@ -479,6 +578,10 @@ class LeanLoop:
             parsed = {"value": parsed}
         call_id = call.get("id") or str(uuid.uuid4())
 
+        # Ensure the assistant tool_calls entry uses this same id.
+        if not call.get("id"):
+            call["id"] = call_id
+
         if approved:
             yield LoopEvent(kind="status", text=f"Running tool: {name}")
             output = self.tools.invoke(name, parsed)
@@ -512,6 +615,190 @@ class LeanLoop:
         messages.append(result_msg)
         history.append(result_msg)
         return failed
+
+
+def _tool_call_id(call: Dict[str, Any]) -> str:
+    cid = call.get("id")
+    if cid:
+        return str(cid)
+    cid = str(uuid.uuid4())
+    call["id"] = cid
+    return cid
+
+
+def _answered_tool_ids(messages: List[Dict[str, Any]]) -> set:
+    return {
+        m.get("tool_call_id")
+        for m in messages
+        if m.get("role") == "tool" and m.get("tool_call_id")
+    }
+
+
+def _fill_missing_tool_responses(
+    messages: List[Dict[str, Any]],
+    tool_calls: List[Dict[str, Any]],
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    reason: str,
+) -> None:
+    """Append synthetic tool messages for any tool_call_id not yet answered."""
+    answered = _answered_tool_ids(messages)
+    if history is not None:
+        answered |= _answered_tool_ids(history)
+    for call in tool_calls:
+        call_id = _tool_call_id(call)
+        if call_id in answered:
+            continue
+        name = (call.get("function") or {}).get("name") or "unknown"
+        msg = {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": f"Error: tool `{name}` was not executed. {reason}",
+        }
+        messages.append(msg)
+        if history is not None and history is not messages:
+            history.append(msg)
+        answered.add(call_id)
+
+
+def _close_open_tool_calls(
+    messages: List[Dict[str, Any]],
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    reason: str,
+) -> None:
+    """
+    Ensure every assistant message with tool_calls is followed by a tool
+    response for each tool_call_id before any later non-tool message.
+    """
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") != "assistant":
+            i += 1
+            continue
+        tool_calls = msg.get("tool_calls") or []
+        if not tool_calls:
+            i += 1
+            continue
+
+        needed: List[Tuple[str, str]] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            cid = _tool_call_id(call)
+            name = (call.get("function") or {}).get("name") or "unknown"
+            needed.append((cid, name))
+
+        j = i + 1
+        answered: set = set()
+        while j < len(messages) and messages[j].get("role") == "tool":
+            tid = messages[j].get("tool_call_id")
+            if tid:
+                answered.add(tid)
+            j += 1
+
+        inserts = [
+            {
+                "role": "tool",
+                "tool_call_id": cid,
+                "content": f"Error: tool `{name}` was not executed. {reason}",
+            }
+            for cid, name in needed
+            if cid not in answered
+        ]
+        if inserts:
+            messages[j:j] = inserts
+            if history is not None and history is not messages:
+                # Mirror inserts into history if this assistant msg is shared.
+                _mirror_tool_inserts(history, msg, inserts)
+            j += len(inserts)
+        i = j
+
+
+def _mirror_tool_inserts(
+    history: List[Dict[str, Any]],
+    assistant_msg: Dict[str, Any],
+    inserts: List[Dict[str, Any]],
+) -> None:
+    """Insert the same synthetic tool msgs after assistant_msg in history."""
+    try:
+        idx = history.index(assistant_msg)
+    except ValueError:
+        # History may hold a copy; fall back to full sanitize on history alone.
+        _close_open_tool_calls(history, reason=inserts[0]["content"] if inserts else "")
+        return
+    j = idx + 1
+    answered = set()
+    while j < len(history) and history[j].get("role") == "tool":
+        tid = history[j].get("tool_call_id")
+        if tid:
+            answered.add(tid)
+        j += 1
+    extra = [m for m in inserts if m.get("tool_call_id") not in answered]
+    if extra:
+        history[j:j] = extra
+
+
+def _tool_chain_valid(messages: List[Dict[str, Any]]) -> bool:
+    """True if messages form a valid OpenAI-style tool-call chain."""
+    if messages and messages[0].get("role") == "tool":
+        return False
+    open_ids: set = set()
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant":
+            if open_ids:
+                return False
+            tool_calls = msg.get("tool_calls") or []
+            open_ids = set()
+            for call in tool_calls:
+                if isinstance(call, dict) and call.get("id"):
+                    open_ids.add(call["id"])
+        elif role == "tool":
+            tid = msg.get("tool_call_id")
+            if not tid or tid not in open_ids:
+                return False
+            open_ids.discard(tid)
+        else:
+            if open_ids:
+                return False
+    return not open_ids
+
+
+def _extract_think_blocks(content: str) -> Tuple[str, str]:
+    """Return (think_text, content_with_think_blocks_removed)."""
+    if not content:
+        return "", ""
+    thinks: List[str] = []
+    for pattern in (_THINK_RE, _THINK_ALT_RE):
+        thinks.extend(m.strip() for m in pattern.findall(content) if m and m.strip())
+        content = pattern.sub("", content)
+    think_text = "\n\n".join(thinks).strip()
+    rest = re.sub(r"\n{3,}", "\n\n", content).strip()
+    return think_text, rest
+
+
+def _compose_thinking(
+    think_text: str,
+    visible: str,
+    phase: Optional[str],
+) -> str:
+    """Build a user-visible thinking/status string (no control tags)."""
+    parts: List[str] = []
+    if think_text:
+        parts.append(think_text)
+    if visible:
+        # Skip if visible is already fully covered by think_text
+        if not think_text or visible not in think_text:
+            parts.append(visible)
+    body = "\n\n".join(p for p in parts if p).strip()
+    if not body:
+        return ""
+    label = _PHASE_LABELS.get(phase or "", "")
+    if label:
+        return f"[{label}] {body}"
+    return body
 
 
 def _parse_control_tags(content: str) -> Tuple[str, Optional[str], Optional[str]]:

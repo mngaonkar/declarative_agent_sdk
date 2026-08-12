@@ -5,7 +5,10 @@ from unittest.mock import MagicMock, patch
 
 from declarative_agent_sdk.agents.lean.runtime.loop import (
     LeanLoop,
+    _close_open_tool_calls,
+    _fill_missing_tool_responses,
     _parse_control_tags,
+    _tool_chain_valid,
     _tool_result_failed,
 )
 from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry, parse_frontmatter
@@ -114,6 +117,36 @@ class TestLeanLoop:
         assert client.chat.call_count == 2
         assert any(e.kind == "status" and "plan" in e.text.lower() for e in events)
         assert any(e.kind == "final" and "Hello after" in e.text for e in events)
+
+    def test_think_blocks_and_phase_surface_as_status(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.side_effect = [
+            {
+                "role": "assistant",
+                "content": (
+                    "<think>Need disk free space first.</think>\n"
+                    "[[phase:plan]] Check df then summarize.\n"
+                    "[[decision:continue]]"
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "<think>Have enough info.</think>\n"
+                    "Root is 22% used.\n[[decision:done]]"
+                ),
+            },
+        ]
+        loop = self._loop(tmp_path, client, approval=False)
+        events = list(loop.run("disk?", "think1"))
+        status_texts = [e.text for e in events if e.kind == "status"]
+        assert any("Need disk free space" in t for t in status_texts)
+        assert any("[Planning]" in t for t in status_texts)
+        # Terminal <think> is shown; final is user-facing only
+        assert any("Have enough info" in t for t in status_texts)
+        finals = [e for e in events if e.kind == "final"]
+        assert finals and "Root is 22%" in finals[0].text
+        assert "<think>" not in finals[0].text
 
     def test_tool_approval_pause_and_resume(self, tmp_path: Path):
         client = MagicMock()
@@ -234,6 +267,144 @@ class TestLeanLoop:
         events = list(loop.run("do boom", "s3"))
         assert any(e.kind == "final" and "help" in e.text.lower() for e in events)
         assert any("Step failed" in (e.text or "") for e in events if e.kind == "status")
+
+    def test_partial_tool_batch_is_closed_before_next_chat(self, tmp_path: Path):
+        """
+        If a multi-tool batch stops early (max step retries), remaining
+        tool_call_ids must still get tool messages before the next model call.
+        """
+        client = MagicMock()
+        skills = SkillRegistry(root=str(tmp_path / "skills"))
+        (tmp_path / "skills").mkdir(exist_ok=True)
+        tools = LeanToolRegistry(skills, workspace=str(tmp_path / "ws"))
+
+        def boom(**kwargs):
+            return "Error: always fails"
+
+        tools.add("boom", "Always fails", {}, [], lambda a: boom())
+        tools.add("second", "Would run second", {}, [], lambda a: "ok")
+
+        # One assistant turn with TWO tool calls; first fails and hits
+        # max_step_retries=1 so the second must be synthetically closed.
+        multi = {
+            "role": "assistant",
+            "content": "[[phase:act]]",
+            "tool_calls": [
+                {
+                    "id": "call_AXIbSl0R4zsQ2Ci7BKO601VS",
+                    "function": {"name": "boom", "arguments": "{}"},
+                },
+                {
+                    "id": "call_SECOND_TOOL_ID_0001",
+                    "function": {"name": "second", "arguments": "{}"},
+                },
+            ],
+        }
+        client.chat.side_effect = [
+            multi,
+            {
+                "role": "assistant",
+                "content": "I need help after failures.\n[[decision:ask]]",
+            },
+        ]
+        loop = LeanLoop(
+            client=client,
+            tools=tools,
+            skills=skills,
+            tools_approval_required=False,
+            max_tool_iterations=5,
+            max_step_retries=1,
+        )
+        events = list(loop.run("do things", "batch1"))
+        assert client.chat.call_count == 2
+        # Second chat request must include tool responses for BOTH ids.
+        second_msgs = client.chat.call_args_list[1].kwargs.get("messages")
+        if second_msgs is None:
+            second_msgs = client.chat.call_args_list[1].args[0]
+        tool_ids = {
+            m.get("tool_call_id")
+            for m in second_msgs
+            if m.get("role") == "tool"
+        }
+        assert "call_AXIbSl0R4zsQ2Ci7BKO601VS" in tool_ids
+        assert "call_SECOND_TOOL_ID_0001" in tool_ids
+        assert _tool_chain_valid([m for m in second_msgs if m.get("role") != "system"])
+        assert any(e.kind == "final" for e in events)
+
+    def test_abandoned_approval_closes_tool_ids(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.side_effect = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_pending_1",
+                        "function": {
+                            "name": "add",
+                            "arguments": '{"x": 1, "y": 2}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "Fresh turn.\n[[decision:done]]",
+            },
+        ]
+        loop = self._loop(tmp_path, client, approval=True)
+        events = list(loop.run("add", "ab1"))
+        assert any(e.kind == "tool_approval" for e in events)
+        # User ignores approval and sends a new message.
+        events2 = list(loop.run("never mind, just say hi", "ab1"))
+        assert any(e.kind == "final" and "Fresh" in e.text for e in events2)
+        second_msgs = client.chat.call_args_list[1].kwargs.get("messages")
+        if second_msgs is None:
+            second_msgs = client.chat.call_args_list[1].args[0]
+        tool_ids = {
+            m.get("tool_call_id")
+            for m in second_msgs
+            if m.get("role") == "tool"
+        }
+        assert "call_pending_1" in tool_ids
+
+
+class TestToolChainHelpers:
+    def test_fill_missing(self):
+        msgs = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "t1", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "t2", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ok"},
+        ]
+        _fill_missing_tool_responses(
+            msgs,
+            msgs[0]["tool_calls"],
+            reason="skipped",
+        )
+        assert [m.get("tool_call_id") for m in msgs if m.get("role") == "tool"] == [
+            "a",
+            "b",
+        ]
+        assert _tool_chain_valid(msgs)
+
+    def test_close_open_before_user(self):
+        msgs = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "x", "function": {"name": "t", "arguments": "{}"}},
+                ],
+            },
+        ]
+        _close_open_tool_calls(msgs, reason="fix")
+        msgs.append({"role": "user", "content": "nudge"})
+        assert _tool_chain_valid(msgs)
 
 
 class TestFactoryLean:

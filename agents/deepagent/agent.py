@@ -94,7 +94,11 @@ def _resolve_model(
 
 
 def _message_text(content: Any) -> str:
-    """Normalize AIMessage.content (str or content-block list) to plain text."""
+    """Normalize AIMessage.content (str or content-block list) to plain text.
+
+    Reasoning / thinking blocks are excluded here so they can be emitted as
+    separate status events via ``_message_thinking``.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -109,6 +113,8 @@ def _message_text(content: Any) -> str:
                 continue
             if isinstance(block, dict):
                 block_type = block.get("type")
+                if block_type in ("thinking", "reasoning", "redacted_thinking"):
+                    continue
                 if block_type in (None, "text", "output_text", "input_text"):
                     text = block.get("text")
                     if isinstance(text, str) and text:
@@ -118,11 +124,13 @@ def _message_text(content: Any) -> str:
                         if isinstance(value, str) and value:
                             parts.append(value)
                 continue
+            block_type = getattr(block, "type", None)
+            if block_type in ("thinking", "reasoning", "redacted_thinking"):
+                continue
             text = getattr(block, "text", None)
             if isinstance(text, str) and text:
                 parts.append(text)
                 continue
-            block_type = getattr(block, "type", None)
             if block_type in (None, "text", "output_text") and hasattr(block, "content"):
                 nested = _message_text(getattr(block, "content", None))
                 if nested:
@@ -132,6 +140,41 @@ def _message_text(content: Any) -> str:
     if isinstance(text, str):
         return text
     return str(content)
+
+
+def _message_thinking(content: Any) -> str:
+    """Extract model reasoning / thinking blocks from AIMessage.content."""
+    if content is None or isinstance(content, str):
+        return ""
+    if not isinstance(content, list):
+        return ""
+    parts: List[str] = []
+    for block in content:
+        if block is None:
+            continue
+        if isinstance(block, dict):
+            block_type = block.get("type")
+            if block_type in ("thinking", "reasoning"):
+                text = (
+                    block.get("thinking")
+                    or block.get("reasoning")
+                    or block.get("text")
+                    or ""
+                )
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            continue
+        block_type = getattr(block, "type", None)
+        if block_type in ("thinking", "reasoning"):
+            text = (
+                getattr(block, "thinking", None)
+                or getattr(block, "reasoning", None)
+                or getattr(block, "text", None)
+                or ""
+            )
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n\n".join(parts).strip()
 
 
 def _to_lc_tool(fn: Any) -> BaseTool:
@@ -199,6 +242,9 @@ def events_from_stream_chunk(
             if not isinstance(msg, AIMessage):
                 continue
             tool_calls = getattr(msg, "tool_calls", None) or []
+            thinking = _message_thinking(msg.content)
+            if thinking:
+                events.append(AgentEvent.status(thinking))
             if tool_calls:
                 names = [
                     tc.get("name", "?") if isinstance(tc, dict) else getattr(tc, "name", "?")

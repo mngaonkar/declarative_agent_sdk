@@ -157,6 +157,16 @@ class TestMessageText:
         ]
         assert _message_text(content) == "Visible answer"
 
+    def test_message_thinking_extracts_reasoning_blocks(self):
+        from declarative_agent_sdk.agents.deepagent.agent import _message_thinking
+
+        content = [
+            {"type": "thinking", "thinking": "secret plan"},
+            {"type": "text", "text": "Visible answer"},
+        ]
+        assert _message_thinking(content) == "secret plan"
+        assert _message_text(content) == "Visible answer"
+
     def test_mixed_strings_and_blocks(self):
         content = ["Prefix", {"type": "text", "text": "body"}]
         assert _message_text(content) == "Prefix\nbody"

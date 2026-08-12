@@ -342,15 +342,21 @@ DiscordAgentServer.handle_message
     │
     └─► agent.run_query(query, session_id)
             │
-            ├─ status            → "⏳ …" status message (edit in place)
-            ├─ tool_approval     → ✅/❌ or yes/no → tool_confirmation
+            ├─ status (thinking) → "💭 Thinking…" (blockquote, edit in place)
+            ├─ status (tools)    → "⏳ Calling tools: …" / "Running tool: …"
+            ├─ tool_approval     → freeze thought process → ✅/❌ or yes/no
             │
             └─ final
                     ├─ remove_think_content
+                    ├─ freeze "💭 Thought process" (keep_thinking=True) or delete
                     ├─ to_discord_markdown   (tables → code blocks, strip HTML)
                     ├─ image pipeline (below)
                     └─ channel.send(content=…, files=…)
 ```
+
+`show_thinking` (default True) surfaces intermediate plan/reason text and
+`<think>` / provider thinking blocks. `keep_thinking` (default True) leaves
+the last thought process message in the channel when the answer arrives.
 
 ### Image attachments
 

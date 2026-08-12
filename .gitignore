@@ -26,3 +26,4 @@ ENV/
 # Node
 node_modules/
 .wireit/
+attachments/

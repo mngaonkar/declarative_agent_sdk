@@ -117,6 +117,71 @@ def _confirmation_request(event: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+# Tool/runtime status lines (not free-form model reasoning).
+_TOOL_STATUS_PREFIXES = (
+    "Calling tools:",
+    "Running tool:",
+    "Denied tool:",
+    "Step failed",
+    "Working…",
+    "Working...",
+)
+
+
+def _is_tool_status(text: str) -> bool:
+    """True when the status text is a tool/runtime progress line."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    return any(stripped.startswith(p) for p in _TOOL_STATUS_PREFIXES)
+
+
+def _blockquote(text: str) -> str:
+    """Discord blockquote every non-empty line."""
+    lines = (text or "").splitlines() or [""]
+    return "\n".join(f"> {line}" if line.strip() else ">" for line in lines)
+
+
+def format_working_status(
+    *,
+    thinking_parts: List[str],
+    tool_status: Optional[str] = None,
+    permanent: bool = False,
+    limit: int = DISCORD_MESSAGE_LIMIT,
+) -> str:
+    """
+    Build the live (or frozen) working-status message.
+
+    Thinking uses 💭; tool progress uses ⏳. Combined when both exist.
+    """
+    chunks: List[str] = []
+    cleaned = [p.strip() for p in thinking_parts if p and p.strip()]
+    # Dedupe consecutive identical snippets
+    deduped: List[str] = []
+    for part in cleaned:
+        if not deduped or deduped[-1] != part:
+            deduped.append(part)
+
+    if deduped:
+        header = "💭 **Thought process**" if permanent else "💭 **Thinking…**"
+        body = "\n\n".join(deduped)
+        chunks.append(f"{header}\n{_blockquote(body)}")
+
+    if tool_status and not permanent:
+        chunks.append(f"⏳ {tool_status.strip()}")
+
+    if not chunks:
+        return "⏳ Working…"
+
+    text = "\n\n".join(chunks)
+    if len(text) <= limit:
+        return text
+    # Prefer keeping the end of the latest thinking (most recent reasoning).
+    suffix = "\n> …"
+    budget = max(0, limit - len(suffix))
+    return text[:budget].rstrip() + suffix
+
+
 # ---------------------------------------------------------------------------
 # Message formatting
 # ---------------------------------------------------------------------------
@@ -490,6 +555,79 @@ def resolve_attachable_files(
 resolve_image_files = resolve_attachable_files
 
 
+def strip_attached_refs_from_text(text: str, refs: List[str]) -> str:
+    """
+    Remove path/URL mentions for files we already uploaded as attachments.
+
+    Prevents Discord from showing the same image twice (attachment + link embed,
+    or attachment + leftover path / markdown).
+    """
+    if not text or not refs:
+        return text
+
+    cleaned = text
+    # Longest first so longer paths win over prefixes
+    for ref in sorted({r for r in refs if r}, key=len, reverse=True):
+        escaped = re.escape(ref)
+        # markdown images / links pointing at this ref
+        cleaned = re.sub(
+            rf"!\[[^\]]*\]\({escaped}\)",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(
+            rf"\[[^\]]*\]\({escaped}\)",
+            "",
+            cleaned,
+        )
+        # bare ref (optional backticks/quotes/angle brackets)
+        cleaned = re.sub(
+            rf"[`\"'<\[]?{escaped}[`\"'>\]]?",
+            "",
+            cleaned,
+        )
+        # basename only (e.g. crab_nebula.jpg left after path strip)
+        base = Path(ref.split("?", 1)[0]).name
+        if base and len(base) > 3:
+            cleaned = re.sub(
+                rf"(?<![\w./-]){re.escape(base)}(?![\w./-])",
+                "",
+                cleaned,
+            )
+
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def dedupe_paths_by_content(paths: List[str]) -> List[str]:
+    """Drop duplicate files (same resolved path or identical content hash)."""
+    import hashlib
+
+    out: List[str] = []
+    seen_path: Set[str] = set()
+    seen_hash: Set[str] = set()
+    for path in paths:
+        try:
+            key = str(Path(path).resolve())
+        except OSError:
+            key = path
+        if key in seen_path:
+            continue
+        try:
+            data = Path(path).read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+        except OSError:
+            digest = key
+        if digest in seen_hash:
+            continue
+        seen_path.add(key)
+        seen_hash.add(digest)
+        out.append(path)
+    return out
+
+
 def _download_file(url: str, dest_dir: str, *, max_bytes: int) -> Optional[str]:
     """Download *url* into *dest_dir*; return local path or None."""
     try:
@@ -728,6 +866,8 @@ class DiscordAgentServer:
         allowed_channels: Optional[Iterable[Any]] = None,
         session_scope: str = "channel",
         show_working_updates: bool = True,
+        show_thinking: bool = True,
+        keep_thinking: bool = True,
         tool_confirmation_timeout: float = 120.0,
         activity_status: Optional[str] = None,
         format_markdown: bool = True,
@@ -749,6 +889,11 @@ class DiscordAgentServer:
                 (default), "user", or "global".
             show_working_updates: Post/edit a status message while the agent
                 works (tool calls, intermediate steps).
+            show_thinking: Include model deliberation / plan text in the status
+                message (💭).  Requires show_working_updates.  Default True.
+            keep_thinking: When the final answer arrives, leave a frozen
+                "Thought process" message in the channel instead of deleting
+                it.  Default True.
             tool_confirmation_timeout: Seconds to wait for a reaction when the
                 agent asks to confirm a tool call.  A timeout denies the call.
             activity_status: Text shown as the bot's "Playing …" status.
@@ -782,6 +927,8 @@ class DiscordAgentServer:
         self._allowed_channels = {str(c) for c in allowed_channels} if allowed_channels else None
         self._session_scope = session_scope
         self._show_working_updates = show_working_updates
+        self._show_thinking = show_thinking and show_working_updates
+        self._keep_thinking = keep_thinking
         self._tool_confirmation_timeout = tool_confirmation_timeout
         self._activity_status = activity_status
         self._format_markdown = format_markdown
@@ -947,6 +1094,8 @@ class DiscordAgentServer:
         channel = message.channel
         status_message: Any = None
         answered = False
+        thinking_parts: List[str] = []
+        tool_status: Optional[str] = None
         # File refs harvested from the whole turn + dirs snapshotted for new files
         # (tool stdout is not streamed, so path-only tool results would be missed).
         turn_file_refs: List[str] = []
@@ -959,6 +1108,18 @@ class DiscordAgentServer:
             for ref in refs:
                 if ref not in turn_file_refs:
                     turn_file_refs.append(ref)
+
+        async def _refresh_status() -> Any:
+            if not self._show_working_updates:
+                return status_message
+            display_thinking = thinking_parts if self._show_thinking else []
+            if not display_thinking and not tool_status:
+                return status_message
+            text = format_working_status(
+                thinking_parts=display_thinking,
+                tool_status=tool_status,
+            )
+            return await self._update_status(channel, status_message, text)
 
         stream = self._agent.run_query(query, session_id)
         while stream is not None:
@@ -977,11 +1138,38 @@ class DiscordAgentServer:
                         continue
                     if self._format_markdown and text:
                         text = to_discord_markdown(text)
-                    status_message = await self._clear_status(status_message)
+
+                    # Drop thinking that is identical to the final answer so we
+                    # do not post the same text twice.
+                    final_cmp = (text or "").strip()
+                    if final_cmp:
+                        thinking_parts[:] = [
+                            p for p in thinking_parts if p.strip() != final_cmp
+                        ]
+
+                    if (
+                        self._show_thinking
+                        and self._keep_thinking
+                        and thinking_parts
+                        and status_message is not None
+                    ):
+                        frozen = format_working_status(
+                            thinking_parts=thinking_parts,
+                            permanent=True,
+                        )
+                        status_message = await self._update_status(
+                            channel, status_message, frozen
+                        )
+                        status_message = None  # leave it in the channel
+                    else:
+                        status_message = await self._clear_status(status_message)
+
                     await self._send_reply(
                         channel, text or "", extra_file_refs=turn_file_refs
                     )
                     answered = True
+                    thinking_parts.clear()
+                    tool_status = None
                     continue
 
                 confirmation = _confirmation_request(event)
@@ -993,15 +1181,31 @@ class DiscordAgentServer:
                     pending_confirmation = confirmation
                     continue
 
-                if self._show_working_updates:
-                    if event_text:
-                        status_message = await self._update_status(
-                            channel, status_message, f"⏳ {event_text}"
-                        )
+                if self._show_working_updates and event_text:
+                    if _is_tool_status(event_text):
+                        tool_status = event_text
+                    elif self._show_thinking:
+                        if not thinking_parts or thinking_parts[-1] != event_text:
+                            thinking_parts.append(event_text)
+                    else:
+                        tool_status = event_text
+                    status_message = await _refresh_status()
 
             stream = None
             if pending_confirmation:
-                status_message = await self._clear_status(status_message)
+                # Keep thought process visible across the approval prompt.
+                if not (self._show_thinking and thinking_parts):
+                    status_message = await self._clear_status(status_message)
+                else:
+                    frozen = format_working_status(
+                        thinking_parts=thinking_parts,
+                        permanent=True,
+                    )
+                    status_message = await self._update_status(
+                        channel, status_message, frozen
+                    )
+                    # New live status after approval
+                    status_message = None
                 approved = await self._ask_tool_confirmation(message, pending_confirmation)
                 resume = getattr(self._agent, "tool_confirmation", None)
                 if resume is None:
@@ -1155,38 +1359,44 @@ class DiscordAgentServer:
             if chunk:
                 kwargs["content"] = chunk
             if i == 0 and files:
-                # Prefer files= list; also works with a single File
                 kwargs["files"] = files
+                # Avoid Discord link-unfurl showing the same image beside the attachment
+                kwargs["suppress_embeds"] = True
             if not kwargs:
                 continue
             try:
                 sent = await channel.send(**kwargs)
             except TypeError:
-                # Older/mock clients may only accept content=
+                # Older clients: drop suppress_embeds, then try file= for single file
+                kwargs.pop("suppress_embeds", None)
                 try:
-                    if i == 0 and files and len(files) == 1:
-                        sent = await channel.send(
-                            content=kwargs.get("content"), file=files[0]
-                        )
-                    else:
-                        raise
-                except Exception as exc:
-                    logger.error(f"Failed to send Discord message: {exc}", exc_info=True)
-                    if i == 0 and files:
-                        try:
-                            await channel.send(
-                                content=(
-                                    (kwargs.get("content") or "")
-                                    + "\n⚠️ Could not upload attachment(s). "
-                                    "Check bot **Attach Files** permission and file size."
-                                ).strip()
+                    sent = await channel.send(**kwargs)
+                except TypeError:
+                    try:
+                        if i == 0 and files and len(files) == 1:
+                            sent = await channel.send(
+                                content=kwargs.get("content"), file=files[0]
                             )
-                        except Exception:
-                            pass
-                    return None
+                        else:
+                            raise
+                    except Exception as exc:
+                        logger.error(
+                            f"Failed to send Discord message: {exc}", exc_info=True
+                        )
+                        if i == 0 and files:
+                            try:
+                                await channel.send(
+                                    content=(
+                                        (kwargs.get("content") or "")
+                                        + "\n⚠️ Could not upload attachment(s). "
+                                        "Check bot **Attach Files** permission."
+                                    ).strip()
+                                )
+                            except Exception:
+                                pass
+                        return None
             except Exception as exc:
                 logger.error(f"Failed to send Discord message: {exc}", exc_info=True)
-                # Retry text without files if attachment upload failed
                 if i == 0 and files:
                     err = str(exc)
                     hint = ""
@@ -1203,7 +1413,9 @@ class DiscordAgentServer:
                                 + f"\n⚠️ Attachment upload failed: {exc}.{hint}"
                             ).strip()
                         )
-                        logger.warning("Sent text without attachments after upload failure")
+                        logger.warning(
+                            "Sent text without attachments after upload failure"
+                        )
                     except Exception as exc2:
                         logger.error(f"Fallback text send also failed: {exc2}")
                         return None
@@ -1232,6 +1444,7 @@ class DiscordAgentServer:
         local_paths, notes = (
             resolve_attachable_files(refs) if refs else ([], [])
         )
+        local_paths = dedupe_paths_by_content(local_paths)
         if local_paths:
             logger.info(f"Resolved files for Discord upload: {local_paths}")
         if notes:
@@ -1239,18 +1452,47 @@ class DiscordAgentServer:
             note_block = "\n".join(f"_{n}_" for n in notes)
             cleaned = (cleaned + "\n\n" + note_block).strip() if cleaned else note_block
 
+        # Refs that successfully became uploads — strip from text so Discord
+        # does not also unfurl/link-embed the same image next to the attachment.
+        attached_refs: List[str] = []
+        if local_paths:
+            attached_refs.extend(local_paths)
+            for ref in refs:
+                resolved = (
+                    resolve_local_file_path(ref)
+                    if not ref.startswith(("http://", "https://"))
+                    else None
+                )
+                if resolved and str(resolved) in local_paths:
+                    attached_refs.append(ref)
+                elif ref.startswith(("http://", "https://")):
+                    # URL was downloaded into one of local_paths (by basename)
+                    base = Path(urlparse(ref).path).name
+                    if any(Path(p).name == base for p in local_paths):
+                        attached_refs.append(ref)
+
+        if attached_refs:
+            cleaned = strip_attached_refs_from_text(cleaned, attached_refs)
+
         discord_files: List[Any] = []
         if local_paths:
             discord = self._import_discord()
+            used_names: Set[str] = set()
             for path in local_paths:
                 try:
-                    # Copy into BytesIO so discord.py never depends on open handles
                     data = Path(path).read_bytes()
                     buf = io.BytesIO(data)
                     buf.seek(0)
-                    discord_files.append(
-                        discord.File(buf, filename=Path(path).name)
-                    )
+                    name = Path(path).name
+                    # unique filenames if two paths share a name
+                    if name in used_names:
+                        stem, ext = Path(name).stem, Path(name).suffix
+                        n = 2
+                        while f"{stem}_{n}{ext}" in used_names:
+                            n += 1
+                        name = f"{stem}_{n}{ext}"
+                    used_names.add(name)
+                    discord_files.append(discord.File(buf, filename=name))
                 except Exception as exc:
                     logger.warning(
                         f"Could not prepare file for Discord upload ({path}): {exc}"
@@ -1258,7 +1500,7 @@ class DiscordAgentServer:
             if discord_files:
                 logger.info(
                     f"Attaching {len(discord_files)} file(s) to Discord reply: "
-                    f"{[Path(p).name for p in local_paths[: len(discord_files)]]}"
+                    f"{list(used_names)}"
                 )
             else:
                 logger.warning(
@@ -1266,6 +1508,7 @@ class DiscordAgentServer:
                     f"paths={local_paths}"
                 )
 
+        # Never use embed image URL when we already attach files (that doubles).
         if self._reply_as_embed and not discord_files:
             discord = self._import_discord()
             embed_limit = 4096
@@ -1273,7 +1516,13 @@ class DiscordAgentServer:
             for chunk in split_message(cleaned, limit=embed_limit) or [""]:
                 try:
                     embed = discord.Embed(description=chunk or None)
-                    if refs and len(refs) == 1 and refs[0].startswith("http"):
+                    # Only set embed image when we did NOT attach a file
+                    if (
+                        refs
+                        and len(refs) == 1
+                        and refs[0].startswith("http")
+                        and not discord_files
+                    ):
                         embed.set_image(url=refs[0])
                     sent = await channel.send(embed=embed)
                 except Exception as exc:

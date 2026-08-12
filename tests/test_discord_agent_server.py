@@ -18,9 +18,13 @@ from declarative_agent_sdk.transports.discord.server import (
     _confirmation_request,
     _event_text,
     _is_final,
+    _is_tool_status,
+    dedupe_paths_by_content,
     extract_image_refs,
+    format_working_status,
     resolve_image_files,
     split_message,
+    strip_attached_refs_from_text,
     to_discord_markdown,
 )
 
@@ -187,6 +191,27 @@ class TestExtractImageRefs:
         assert paths == []
         assert any("not a valid image" in n for n in notes)
 
+    def test_strip_attached_refs_removes_url_and_path(self):
+        text = (
+            "See ![x](https://cdn.example.com/a.png) and "
+            "attachments/a.png https://cdn.example.com/a.png done"
+        )
+        out = strip_attached_refs_from_text(
+            text,
+            ["https://cdn.example.com/a.png", "attachments/a.png"],
+        )
+        assert "cdn.example.com" not in out
+        assert "attachments/a.png" not in out
+        assert "done" in out
+
+    def test_dedupe_same_content(self, tmp_path):
+        a = tmp_path / "a.png"
+        b = tmp_path / "b.png"
+        data = b"\x89PNG\r\n\x1a\n" + b"\x01" * 20
+        a.write_bytes(data)
+        b.write_bytes(data)
+        assert dedupe_paths_by_content([str(a), str(b)]) == [str(a)]
+
 
 class TestToDiscordMarkdown:
     def test_passthrough_simple_markdown(self):
@@ -225,6 +250,44 @@ class TestToDiscordMarkdown:
         out = to_discord_markdown("above\n---\nbelow")
         assert "────────" in out
         assert "above" in out and "below" in out
+
+
+# ---------------------------------------------------------------------------
+# format_working_status / thinking
+# ---------------------------------------------------------------------------
+
+class TestFormatWorkingStatus:
+    def test_tool_only(self):
+        text = format_working_status(
+            thinking_parts=[], tool_status="Calling tools: search"
+        )
+        assert text == "⏳ Calling tools: search"
+
+    def test_thinking_only(self):
+        text = format_working_status(thinking_parts=["Plan step 1"])
+        assert "💭" in text
+        assert "Thinking" in text
+        assert "> Plan step 1" in text
+
+    def test_combined(self):
+        text = format_working_status(
+            thinking_parts=["I will call search"],
+            tool_status="Calling tools: search",
+        )
+        assert "💭" in text
+        assert "⏳ Calling tools: search" in text
+
+    def test_permanent_header(self):
+        text = format_working_status(
+            thinking_parts=["reasoned"], permanent=True
+        )
+        assert "Thought process" in text
+        assert "Calling tools" not in text
+
+    def test_is_tool_status(self):
+        assert _is_tool_status("Calling tools: foo")
+        assert _is_tool_status("Running tool: bar")
+        assert not _is_tool_status("I will plan next")
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +508,27 @@ class TestHandleMessage:
         assert channel.sent[0].content == "⏳ Calling tools: search"
         assert channel.sent[0] in channel.deleted
         assert channel.sent[1].content == "Final answer."
+
+    async def test_model_thinking_is_shown_and_kept(self):
+        agent = FakeAgent([[
+            FakeEvent(text="I will search then summarize."),
+            FakeEvent(text="Calling tools: search"),
+            FakeEvent(text="Here is the summary.", is_final=True),
+        ]])
+        server = _make_server(agent)
+        channel = FakeChannel()
+        await server.handle_message(
+            FakeMessage("<@1> go", channel, mentions=[_mention("1")])
+        )
+        # Live status was edited in place: final freeze + answer
+        contents = [m.content for m in channel.sent]
+        assert any("💭" in (c or "") and "I will search" in (c or "") for c in contents)
+        assert any("Thought process" in (c or "") for c in contents)
+        assert contents[-1] == "Here is the summary."
+        # Frozen thinking is NOT deleted
+        thinking_msgs = [m for m in channel.sent if m.content and "Thought process" in m.content]
+        assert thinking_msgs
+        assert thinking_msgs[0] not in channel.deleted
 
     async def test_working_updates_suppressed_when_disabled(self):
         agent = FakeAgent([[
