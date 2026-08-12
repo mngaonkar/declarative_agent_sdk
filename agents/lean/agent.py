@@ -86,7 +86,9 @@ class LeanAIAgent(BaseAgent):
         endpoint_url: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: Optional[float] = 0.7,
-        max_tool_iterations: int = 24,
+        max_tool_iterations: int = 32,
+        max_step_retries: int = 3,
+        max_no_tool_continues: int = 4,
         publish_url: Optional[str] = None,
         # accepted for factory parity; unused
         output_key: Optional[str] = None,
@@ -154,6 +156,8 @@ class LeanAIAgent(BaseAgent):
             skills=self._skills,
             instruction=instruction,
             max_tool_iterations=max_tool_iterations,
+            max_step_retries=max_step_retries,
+            max_no_tool_continues=max_no_tool_continues,
             tools_approval_required=tools_approval_required,
         )
 

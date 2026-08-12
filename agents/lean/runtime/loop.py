@@ -1,14 +1,23 @@
-"""Lean ReAct agent loop (from esp32s3-ai-agent), CPython host edition.
+"""Lean deliberative agent loop (plan → act → reflect → retry).
 
-Supports pausing for tool approval so Discord / A2A can gate dangerous tools.
+Unlike a bare ReAct “exit when no tool calls” loop, this runtime:
+
+1. Deliberates (pros/cons, clarifying questions, plan).
+2. Executes the plan step by step via tools.
+3. On step failure, reasons and retries up to N times, then asks the user.
+4. When the model returns no tool call, re-reasons over progress and only
+   exits on explicit done/ask (or budget exhaustion).
+
+Tool approval (Discord/A2A) still pauses mid-batch when required.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.agents.lean.runtime.chat_backend import ChatBackend
@@ -18,31 +27,87 @@ from declarative_agent_sdk.agents.lean.runtime.tools import AUTO_APPROVE_TOOLS, 
 
 logger = get_logger(__name__)
 
-_BASE_PROMPT = """You are a helpful AI agent with tools and skills.
+# Explicit control tags the model should emit (parsed out of user-facing text).
+_DECISION_RE = re.compile(
+    r"\[\[\s*decision\s*:\s*(done|ask|continue)\s*\]\]",
+    re.IGNORECASE,
+)
+_PHASE_RE = re.compile(
+    r"\[\[\s*phase\s*:\s*(plan|act|reflect|done|ask)\s*\]\]",
+    re.IGNORECASE,
+)
 
-Be concise unless the user asks for detail.
+_BASE_PROMPT = """You are a careful, iterative AI agent with tools and skills.
 
-You are extended through SKILLS. Each skill below is listed with only its name \
-and description; the instructions themselves are not loaded yet.
+# Operating protocol (mandatory)
 
-RULE: if a request matches a skill's description, your FIRST action must be to \
-call the Skill tool with that name. Do not call other tools for that task until \
-you have read the skill. Only skip this when no skill covers the request.
+Work in cycles. Do **not** stop just because you have text and no tool call.
 
-Skills hold procedure and calibration you cannot invent. A plausible-looking \
-direct tool call is the most common way to get things wrong.
+## 1. Deliberate (every new user request, and whenever stuck)
+- Restate the goal in one sentence.
+- Note uncertainties, risks, and missing information.
+- If the request is ambiguous or unsafe without more info, ask clarifying \
+questions and end with [[decision:ask]].
+- Otherwise produce a short ordered **plan** (numbered steps). Prefer \
+loading a matching skill before acting.
 
-CREATING SKILLS: you can grow the skill list by writing \
-skills/<name>/SKILL.md (load write-skill if present for format). Prefer \
-editing a close existing skill over duplicating it.
+## 2. Execute one step at a time
+- Call tools for the **next** plan step only (batch small).
+- After each tool result, reflect: did the step succeed? What changed?
 
-ERRORS: do not give up after the first tool failure. Read the error, change \
-something concrete, and retry within the tool-round budget.
+## 3. On failure
+- Reason about the error; change approach (different args, tool, or skill).
+- Retry the step; the runtime allows up to %(max_step_retries)s consecutive \
+tool failures before you must stop and ask the user for help with \
+[[decision:ask]].
+
+## 4. When you have no tool call
+You must still reason over everything so far, then choose **exactly one**:
+- [[decision:continue]] — more work remains (plan next step; usually call tools next)
+- [[decision:done]] — goal achieved; give the user a clear final answer
+- [[decision:ask]] — blocked or unsure; ask a specific clarifying / help question
+
+Optional phase tag (helpful): [[phase:plan|act|reflect|done|ask]]
+
+**Only exit the task with [[decision:done]] or [[decision:ask]].**  
+If you omit a decision tag after producing only reasoning, the runtime will \
+nudge you to continue iterating.
+
+# Skills
+You are extended through SKILLS. Each is listed with name + description only \
+until loaded.
+
+RULE: if a request matches a skill description, call the Skill tool with that \
+name before other tools for that task (unless no skill applies).
 
 Available skills:
-%s
+%(skills)s
 
-Report what actually happened. If a tool fails after retries, say so."""
+# Style
+- Be concise with the user; put deep reasoning in short bullets.
+- Report what actually happened. Never invent tool success.
+- Always include a [[decision:…]] tag when you are not calling tools.
+"""
+
+_CONTINUE_NUDGE = (
+    "[runtime] You produced a reply without tools and without finishing. "
+    "Reflect on progress vs the plan. Then either: (1) call tools for the next "
+    "step, or (2) end with [[decision:done]] and the user-facing answer, or "
+    "(3) end with [[decision:ask]] and a specific question if blocked. "
+    "Prefer continuing work over stopping early."
+)
+
+_FORCE_ASK_NUDGE = (
+    "[runtime] This step failed %(n)s times in a row. Stop retrying the same "
+    "approach. Explain briefly what failed and ask the user for help or "
+    "clarification. End with [[decision:ask]]."
+)
+
+_BUDGET_NUDGE = (
+    "[runtime] Iteration budget is nearly exhausted. Summarize progress, "
+    "deliver the best answer you can, and end with [[decision:done]] or "
+    "[[decision:ask]] if you need the user."
+)
 
 
 @dataclass
@@ -54,6 +119,9 @@ class PendingApproval:
     tool_calls: List[Dict[str, Any]]
     index: int
     rounds_left: int
+    consecutive_failures: int = 0
+    no_tool_continues: int = 0
+    tools_used_this_turn: bool = False
 
 
 @dataclass
@@ -67,16 +135,19 @@ class LoopEvent:
     tool_args: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class _TurnState:
+    consecutive_failures: int = 0
+    no_tool_continues: int = 0
+    tools_used_this_turn: bool = False
+
+
 class LeanLoop:
     """
-    Multi-session ReAct loop for the lean agent_framework.
+    Deliberative multi-session agent loop for agent_framework=lean.
 
-    Owns the full execution path for lean: history, trim, skills catalog,
-    tool dispatch, human approval. Peer of ADK Runner and deepagents graphs
-    — not a host for those frameworks.
-
-    ``run(query, session_id)`` yields LoopEvents until a final answer or a
-    tool-approval pause. Resume with ``resume(session_id, approved=...)``.
+    ``run(query, session_id)`` yields LoopEvents until a final answer, user
+    ask, or tool-approval pause. Resume with ``resume(session_id, approved)``.
     """
 
     def __init__(
@@ -86,8 +157,10 @@ class LeanLoop:
         skills: SkillRegistry,
         *,
         instruction: str = "",
-        max_tool_iterations: int = 24,
-        history_limit: int = 40,
+        max_tool_iterations: int = 32,
+        max_step_retries: int = 3,
+        max_no_tool_continues: int = 4,
+        history_limit: int = 48,
         tools_approval_required: bool = True,
         auto_approve: Optional[set] = None,
     ) -> None:
@@ -96,6 +169,8 @@ class LeanLoop:
         self.skills = skills
         self.instruction = instruction
         self.max_tool_iterations = max_tool_iterations
+        self.max_step_retries = max(1, max_step_retries)
+        self.max_no_tool_continues = max(1, max_no_tool_continues)
         self.history_limit = history_limit
         self.tools_approval_required = tools_approval_required
         self.auto_approve = set(auto_approve or AUTO_APPROVE_TOOLS)
@@ -104,8 +179,11 @@ class LeanLoop:
         self._pending: Dict[str, PendingApproval] = {}
 
     def system_prompt(self) -> str:
+        prompt = _BASE_PROMPT % {
+            "skills": self.skills.catalog(),
+            "max_step_retries": self.max_step_retries,
+        }
         extra = self.instruction.strip()
-        prompt = _BASE_PROMPT % self.skills.catalog()
         if extra:
             prompt = prompt + "\n\n# Additional instructions\n\n" + extra
         return prompt
@@ -140,7 +218,10 @@ class LeanLoop:
         ]
         messages.extend(history)
 
-        yield from self._drive(session_id, messages, history, self.max_tool_iterations)
+        turn = _TurnState()
+        yield from self._drive(
+            session_id, messages, history, self.max_tool_iterations, turn
+        )
 
     def resume(self, session_id: str, approved: bool) -> Iterator[LoopEvent]:
         pending = self._pending.pop(session_id, None)
@@ -156,12 +237,24 @@ class LeanLoop:
         tool_calls = pending.tool_calls
         i = pending.index
         rounds_left = pending.rounds_left
+        turn = _TurnState(
+            consecutive_failures=pending.consecutive_failures,
+            no_tool_continues=pending.no_tool_continues,
+            tools_used_this_turn=pending.tools_used_this_turn,
+        )
 
         if i < len(tool_calls):
-            yield from self._execute_one(messages, history, tool_calls[i], approved)
+            failed = yield from self._execute_one(
+                messages, history, tool_calls[i], approved, turn
+            )
+            if failed and turn.consecutive_failures >= self.max_step_retries:
+                self._inject_system(
+                    messages,
+                    history,
+                    _FORCE_ASK_NUDGE % {"n": turn.consecutive_failures},
+                )
             i += 1
 
-        # Remaining tools in the same assistant batch
         while i < len(tool_calls):
             call = tool_calls[i]
             name = (call.get("function") or {}).get("name") or ""
@@ -172,14 +265,40 @@ class LeanLoop:
                     tool_calls=tool_calls,
                     index=i,
                     rounds_left=rounds_left,
+                    consecutive_failures=turn.consecutive_failures,
+                    no_tool_continues=turn.no_tool_continues,
+                    tools_used_this_turn=turn.tools_used_this_turn,
                 )
                 yield from self._approval_event(call)
                 return
-            yield from self._execute_one(messages, history, call, approved=True)
+            failed = yield from self._execute_one(
+                messages, history, call, approved=True, turn=turn
+            )
+            if failed and turn.consecutive_failures >= self.max_step_retries:
+                self._inject_system(
+                    messages,
+                    history,
+                    _FORCE_ASK_NUDGE % {"n": turn.consecutive_failures},
+                )
+                break
             i += 1
 
-        # Batch complete — continue model rounds
-        yield from self._drive(session_id, messages, history, rounds_left)
+        yield from self._drive(session_id, messages, history, rounds_left, turn)
+
+    def _inject_system(
+        self,
+        messages: List[Dict[str, Any]],
+        history: List[Dict[str, Any]],
+        text: str,
+    ) -> None:
+        # Use role=user so OpenAI-compatible APIs always accept the nudge
+        # (some providers restrict multiple system messages).
+        msg = {
+            "role": "user",
+            "content": text,
+        }
+        messages.append(msg)
+        history.append(msg)
 
     def _drive(
         self,
@@ -187,9 +306,14 @@ class LeanLoop:
         messages: List[Dict[str, Any]],
         history: List[Dict[str, Any]],
         rounds_left: int,
+        turn: _TurnState,
     ) -> Iterator[LoopEvent]:
         while rounds_left > 0:
             rounds_left -= 1
+
+            if rounds_left <= 1:
+                self._inject_system(messages, history, _BUDGET_NUDGE)
+
             try:
                 message = self.client.chat(messages, tools=self.tools.schemas())
             except LLMError as exc:
@@ -198,6 +322,7 @@ class LeanLoop:
 
             tool_calls = message.get("tool_calls") or []
             content = _content_to_text(message.get("content"))
+            visible, decision, phase = _parse_control_tags(content)
 
             assistant_msg: Dict[str, Any] = {
                 "role": "assistant",
@@ -208,17 +333,67 @@ class LeanLoop:
             messages.append(assistant_msg)
             history.append(assistant_msg)
 
+            # ── No tools this round: deliberative continue or exit ────
             if not tool_calls:
-                history[:] = self._trim(history)
-                yield LoopEvent(kind="final", text=content or "(no reply)")
-                return
+                if visible:
+                    yield LoopEvent(kind="status", text=visible)
 
+                # Explicit terminal decisions
+                if decision in ("done", "ask") or phase in ("done", "ask"):
+                    history[:] = self._trim(history)
+                    final = visible or content or (
+                        "I need your help to proceed."
+                        if decision == "ask" or phase == "ask"
+                        else "(done)"
+                    )
+                    yield LoopEvent(kind="final", text=final)
+                    return
+
+                # Forced ask after too many step failures
+                if turn.consecutive_failures >= self.max_step_retries:
+                    history[:] = self._trim(history)
+                    final = visible or (
+                        "I hit repeated failures and need your help to continue. "
+                        "Please clarify the goal or constraints."
+                    )
+                    if "[[decision:ask]]" not in (content or "").lower():
+                        final = final.rstrip() + "\n\n(What should I try next?)"
+                    yield LoopEvent(kind="final", text=final)
+                    return
+
+                # Keep iterating: reason more / execute next step
+                turn.no_tool_continues += 1
+                if turn.no_tool_continues >= self.max_no_tool_continues:
+                    history[:] = self._trim(history)
+                    yield LoopEvent(
+                        kind="final",
+                        text=visible
+                        or content
+                        or (
+                            "Stopping after several reasoning-only turns without "
+                            "a clear done/ask decision. Please restate the goal "
+                            "or say how to proceed."
+                        ),
+                    )
+                    return
+
+                logger.info(
+                    f"[{session_id}] no-tool continue "
+                    f"#{turn.no_tool_continues} decision={decision!r} phase={phase!r}"
+                )
+                self._inject_system(messages, history, _CONTINUE_NUDGE)
+                continue
+
+            # ── Tools requested ───────────────────────────────────────
+            turn.no_tool_continues = 0
+            turn.tools_used_this_turn = True
             names = [
                 (c.get("function") or {}).get("name", "?") for c in tool_calls
             ]
-            yield LoopEvent(
-                kind="status", text=f"Calling tools: {', '.join(names)}"
-            )
+            status = f"Calling tools: {', '.join(names)}"
+            if visible:
+                status = f"{visible}\n{status}"
+            yield LoopEvent(kind="status", text=status)
 
             i = 0
             while i < len(tool_calls):
@@ -231,19 +406,34 @@ class LeanLoop:
                         tool_calls=tool_calls,
                         index=i,
                         rounds_left=rounds_left,
+                        consecutive_failures=turn.consecutive_failures,
+                        no_tool_continues=turn.no_tool_continues,
+                        tools_used_this_turn=turn.tools_used_this_turn,
                     )
                     yield from self._approval_event(call)
                     return
-                yield from self._execute_one(messages, history, call, approved=True)
+
+                failed = yield from self._execute_one(
+                    messages, history, call, approved=True, turn=turn
+                )
+                if failed and turn.consecutive_failures >= self.max_step_retries:
+                    self._inject_system(
+                        messages,
+                        history,
+                        _FORCE_ASK_NUDGE % {"n": turn.consecutive_failures},
+                    )
+                    # Let the model produce an ask on the next round
+                    break
                 i += 1
-            # all tools ran — next model round
+            # next model round (reflect / next step)
 
         history[:] = self._trim(history)
         yield LoopEvent(
             kind="final",
             text=(
-                f"Stopped after {self.max_tool_iterations} tool rounds without "
-                "a final answer. Continue with a short follow-up if needed."
+                f"Stopped after {self.max_tool_iterations} iterations without "
+                "[[decision:done]] / [[decision:ask]]. Please continue with a "
+                "follow-up or clarify the goal."
             ),
         )
 
@@ -272,7 +462,12 @@ class LeanLoop:
         history: List[Dict[str, Any]],
         call: Dict[str, Any],
         approved: bool,
-    ) -> Iterator[LoopEvent]:
+        turn: _TurnState,
+    ):
+        """
+        Execute one tool call. Yields status LoopEvents.
+        Generator return value: True if the tool result looks like a failure.
+        """
         fn = call.get("function") or {}
         name = fn.get("name") or ""
         raw_args = fn.get("arguments") or "{}"
@@ -294,6 +489,19 @@ class LeanLoop:
             )
             yield LoopEvent(kind="status", text=f"Denied tool: {name}")
 
+        failed = _tool_result_failed(output) if approved else False
+        if failed:
+            turn.consecutive_failures += 1
+            yield LoopEvent(
+                kind="status",
+                text=(
+                    f"Step failed ({turn.consecutive_failures}/"
+                    f"{self.max_step_retries}): {name}"
+                ),
+            )
+        elif approved:
+            turn.consecutive_failures = 0
+
         if len(output) > 12000:
             output = output[:12000] + "\n...[truncated]"
         result_msg = {
@@ -303,6 +511,42 @@ class LeanLoop:
         }
         messages.append(result_msg)
         history.append(result_msg)
+        return failed
+
+
+def _parse_control_tags(content: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """Return (visible_text, decision, phase)."""
+    if not content:
+        return "", None, None
+    decision = None
+    phase = None
+    m = _DECISION_RE.search(content)
+    if m:
+        decision = m.group(1).lower()
+    m = _PHASE_RE.search(content)
+    if m:
+        phase = m.group(1).lower()
+    visible = _DECISION_RE.sub("", content)
+    visible = _PHASE_RE.sub("", visible)
+    visible = re.sub(r"\n{3,}", "\n\n", visible).strip()
+    return visible, decision, phase
+
+
+def _tool_result_failed(output: str) -> bool:
+    if not output:
+        return True
+    lower = output.strip().lower()
+    if lower.startswith("error"):
+        return True
+    if '"success": false' in lower or "'success': false" in lower:
+        return True
+    if "traceback (most recent call last)" in lower:
+        return True
+    if "command not found" in lower:
+        return True
+    if "permission denied" in lower and "error" in lower:
+        return True
+    return False
 
 
 def _content_to_text(content: Any) -> str:
