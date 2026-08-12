@@ -199,8 +199,25 @@ class LeanAIAgent(BaseAgent):
     async def invoke(
         self, context: RequestContext
     ) -> AsyncGenerator[AgentEvent, None]:
+        """A2A entry: plain text queries or tool-approval resume messages."""
         assert context is not None and context.message is not None
         assert context.context_id is not None
+
+        # A2A clients (see AIAgentClient.send_tool_confirmation) resume HITL
+        # with a data part: {function_response: {id, name, response:{confirmed}}}
+        confirmation = _a2a_tool_confirmation(context.message)
+        if confirmation is not None:
+            call_id, approved = confirmation
+            logger.info(
+                f"[{self.name}] A2A tool confirmation call_id={call_id} "
+                f"approved={approved} session={context.context_id}"
+            )
+            async for event in self.tool_confirmation(
+                call_id, context.context_id, approved
+            ):
+                yield event
+            return
+
         text_parts: List[str] = []
         for part in context.message.parts:
             which = part.WhichOneof("content")
@@ -211,3 +228,45 @@ class LeanAIAgent(BaseAgent):
             raise ValueError("No text content found in A2A message")
         async for event in self.run_query(query, session_id=context.context_id):
             yield event
+
+
+def _a2a_tool_confirmation(message: Any) -> Optional[tuple]:
+    """
+    Return (function_id, approved) when the A2A message is a tool-approval
+    resume, else None.
+    """
+    parts = getattr(message, "parts", None) or []
+    for part in parts:
+        which = None
+        try:
+            which = part.WhichOneof("content")
+        except Exception:
+            which = None
+        data = None
+        if which == "data":
+            raw = getattr(part, "data", None)
+            if raw is None:
+                continue
+            try:
+                from google.protobuf.json_format import MessageToDict
+
+                data = MessageToDict(raw)
+            except Exception:
+                data = raw if isinstance(raw, dict) else None
+        elif isinstance(getattr(part, "data", None), dict):
+            data = part.data
+        if not isinstance(data, dict):
+            continue
+        fn_resp = data.get("function_response") or data.get("functionResponse")
+        if not isinstance(fn_resp, dict):
+            continue
+        response = fn_resp.get("response") or {}
+        if not isinstance(response, dict):
+            continue
+        if "confirmed" not in response and "approved" not in response:
+            # Not a confirmation payload (might be another data shape).
+            continue
+        approved = bool(response.get("confirmed", response.get("approved", False)))
+        call_id = str(fn_resp.get("id") or "unknown")
+        return call_id, approved
+    return None

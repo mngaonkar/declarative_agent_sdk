@@ -342,6 +342,16 @@ AgentRegistry.register(agent, category="api")
 AIAgentServer(agent, host="0.0.0.0", port=8000).run()
 ```
 
+Lean end-to-end example (server + interactive client + tool approval):
+
+```bash
+cd examples/a2a_lean
+export OPENAI_API_KEY=sk-...
+python run_server.py          # terminal 1
+python run_client.py          # terminal 2
+pytest ../../tests/test_lean_a2a.py -q   # mock LLM, no API key
+```
+
 ---
 
 ## Workflows

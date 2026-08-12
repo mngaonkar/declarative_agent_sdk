@@ -1,0 +1,31 @@
+# Lean agent served over A2A (JSON-RPC).
+#
+# Start:
+#   cd examples/a2a_lean
+#   python run_server.py
+#
+# Client (another terminal):
+#   python run_client.py
+#   # or: python -m tests.test_ai_agent_client   (if pointed at this URL)
+
+name: lean_a2a_agent
+description: Lean deliberative agent over A2A for local testing
+
+agent_framework: lean
+
+instruction_file: instructions.md
+skills_directory: skills
+workspace_directory: workspace
+
+provider: openai
+model: gpt-4o-mini
+endpoint:
+  url: https://api.openai.com/v1
+
+# Optional — needs keys in the environment for search.
+tools:
+  - web_request
+  - exec_command
+
+# Pause before non-meta tools so the A2A client can approve (y/n).
+tools_approval_required: true
