@@ -134,6 +134,18 @@ class AgentFactory:
             f"(provider={common.provider}, "
             f"tools_approval_required={common.tools_approval_required})"
         )
+        # Only forward loop budgets the YAML actually set, so LeanAIAgent's
+        # own defaults stay authoritative.
+        lean_kwargs = {
+            key: value
+            for key, value in (
+                ("max_tool_iterations", common.max_tool_iterations),
+                ("max_step_retries", common.max_step_retries),
+                ("max_no_tool_continues", common.max_no_tool_continues),
+                ("history_limit", common.history_limit),
+            )
+            if value is not None
+        }
         return LeanAIAgent(
             name=common.name,
             description=common.description,
@@ -154,6 +166,7 @@ class AgentFactory:
             enable_truncation=common.enable_truncation,
             truncate_strategy=common.truncate_strategy,
             safety_margin=common.safety_margin,
+            **lean_kwargs,
         )
 
     @staticmethod

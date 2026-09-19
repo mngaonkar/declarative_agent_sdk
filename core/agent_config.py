@@ -36,6 +36,11 @@ class CommonAgentConfig:
     workspace_directory: str = WORKSPACE_DIRECTORY
     output_key: Optional[str] = None
     publish_url: Optional[str] = None
+    # lean-only loop budgets (ignored by ADK/deepagent); None → runtime default
+    max_tool_iterations: Optional[int] = None
+    max_step_retries: Optional[int] = None
+    max_no_tool_continues: Optional[int] = None
+    history_limit: Optional[int] = None
     context_window: Optional[int] = None
     enable_truncation: bool = False
     truncate_strategy: str = "end"
@@ -81,6 +86,10 @@ def parse_common_config(
         workspace_directory=config.get("workspace_directory", WORKSPACE_DIRECTORY),
         output_key=config.get("output_key"),
         publish_url=config.get("publish_url"),
+        max_tool_iterations=config.get("max_tool_iterations"),
+        max_step_retries=config.get("max_step_retries"),
+        max_no_tool_continues=config.get("max_no_tool_continues"),
+        history_limit=config.get("history_limit"),
         context_window=config.get("context_window"),
         enable_truncation=config.get("enable_truncation", False),
         truncate_strategy=config.get("truncate_strategy", "end"),

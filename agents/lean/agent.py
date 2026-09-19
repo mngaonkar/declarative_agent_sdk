@@ -89,6 +89,7 @@ class LeanAIAgent(BaseAgent):
         max_tool_iterations: int = 32,
         max_step_retries: int = 3,
         max_no_tool_continues: int = 4,
+        history_limit: Optional[int] = None,
         publish_url: Optional[str] = None,
         # accepted for factory parity; unused
         output_key: Optional[str] = None,
@@ -159,6 +160,7 @@ class LeanAIAgent(BaseAgent):
             max_step_retries=max_step_retries,
             max_no_tool_continues=max_no_tool_continues,
             tools_approval_required=tools_approval_required,
+            **({} if history_limit is None else {"history_limit": history_limit}),
         )
 
         skill_descs = {
