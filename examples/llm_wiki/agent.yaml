@@ -1,0 +1,64 @@
+# LLM-as-Wiki on the lean runtime.
+#
+#   cd examples/llm_wiki
+#   export OPENAI_API_KEY=...
+#   python run_wiki.py ingest raw/journal-2026-08-14.md
+#   python run_wiki.py ask "what actually improves their sleep?"
+#   python run_wiki.py lint
+#
+# See README.md for the Anthropic / local-model options.
+
+name: wiki_maintainer
+description: Compiles sources into a persistent, interlinked personal wiki
+
+agent_framework: lean
+
+# Conventions only. The ingest / query / lint workflows are skills, so each
+# loads its playbook on demand instead of sitting in every prompt.
+instruction_file: instructions.md
+skills_directory: skills
+
+# Where the wiki lives and where its sources come from. Both are relative to
+# this file's directory, so the defaults below mean "beside agent.yaml"; give
+# an absolute path to put either one elsewhere, or to share one wiki between
+# several agents.
+#
+# The wiki has to be the workspace: lean only permits writes under the
+# workspace, the skills tree and attachments, so that is what makes the wiki
+# writable — and makes raw_directory read-only by construction rather than by
+# asking the model nicely. `wiki_directory` is accepted as an alias if you
+# prefer to spell it that way; run_wiki.py keeps the two in sync.
+workspace_directory: /Users/mahadevgaonkar/Documents/Obsidian
+raw_directory: raw
+
+provider: openai
+model: gpt-4o
+endpoint:
+  url: https://api.openai.com/v1
+  max_tokens: 8192
+
+# edit_page and search_wiki are registered by run_wiki.py before the agent is
+# built (see wiki_tools.py), log_note by wiki_log.py. The rest are lean
+# built-ins. Note that log_note only records the *why* — the transaction log
+# itself is written by code from a before/after snapshot, so it stays honest
+# whether or not the model remembers to say anything.
+tools:
+  - edit_page
+  - search_wiki
+  - log_note
+
+# One ingest touches 10-15 pages, which is 30-60 tool rounds — well past the
+# lean defaults of 32 rounds and 48 messages of history. The history limit is
+# the dangerous one: at 48 the source read in step 1 gets trimmed away while
+# it is still being filed.
+max_tool_iterations: 120
+history_limit: 400
+
+# edit_page misses (old_text not found) are normal and self-correcting; do not
+# force an ask after three of them.
+max_step_retries: 6
+
+# Every write would otherwise need a y/n. Flip to true to review each page
+# before it lands — worth doing on a wiki you care about, once you have seen
+# how many writes one ingest makes.
+tools_approval_required: false

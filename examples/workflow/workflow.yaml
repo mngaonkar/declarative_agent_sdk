@@ -1,0 +1,22 @@
+# Declarative Multi-Agent Workflow
+# Uses LangGraph StateGraph configured via YAML
+name: research_and_summary_workflow
+description: Two-step workflow that plans research points and synthesizes a summary
+
+nodes:
+  - name: planner
+    function: plan_topics
+  - name: researcher
+    function: research_topics
+  - name: synthesizer
+    function: synthesize_summary
+
+edges:
+  - from: START
+    to: planner
+  - from: planner
+    to: researcher
+  - from: researcher
+    to: synthesizer
+  - from: synthesizer
+    to: END

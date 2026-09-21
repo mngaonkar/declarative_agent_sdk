@@ -1,0 +1,22 @@
+services:
+  agent:
+    image: declarative-agent:latest
+    container_name: declarative_agent_server
+    ports:
+      - "8000:8000"   # A2A / JSON-RPC server
+      - "5173:5173"   # A2UI frontend
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      # Mount agent configuration and workspace
+      - ../simple_agent/agent.yaml:/app/agent.yaml:ro
+      - ../simple_agent/instructions.md:/app/instructions.md:ro
+      - ../simple_agent/skills:/app/skills:ro
+      - ./workspace:/app/workspace
+    restart: unless-stopped

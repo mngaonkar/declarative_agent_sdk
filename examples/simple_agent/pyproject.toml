@@ -1,0 +1,15 @@
+[project]
+name = "simple-agent"
+version = "0.1.0"
+description = "Simple agent example using declarative-agent-sdk"
+requires-python = ">=3.14"
+dependencies = [
+    "declarative-agent-sdk",
+]
+
+[tool.uv.sources]
+declarative-agent-sdk = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
