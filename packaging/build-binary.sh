@@ -67,8 +67,31 @@ echo "    $WHEEL_NAME (version $VERSION)"
 # The `cargo install pyapp` route cannot cross compile and cannot take local
 # embedded paths, so build from the pinned source archive instead.
 echo "==> fetching pyapp source"
-curl -sSL "https://github.com/ofek/pyapp/releases/download/v${PYAPP_VERSION}/source.tar.gz" \
-  -o "$WORK/pyapp.tar.gz"
+
+fetch_pyapp() {
+  # --fail is essential: without it curl writes HTTP error bodies (e.g. a 504
+  # HTML page) straight into the output file and still exits 0. The failure then
+  # surfaces much later as a baffling "tar: unrecognized archive format".
+  curl --fail --location --silent --show-error \
+       --retry 5 --retry-all-errors --retry-delay 3 \
+       "$1" -o "$WORK/pyapp.tar.gz"
+}
+
+# Release assets and codeload archives are served by different backends, so
+# when one has an outage the other usually still works. Both unpack to a
+# pyapp-* directory.
+if ! fetch_pyapp "https://github.com/ofek/pyapp/releases/download/v${PYAPP_VERSION}/source.tar.gz"; then
+  echo "    release asset unavailable; falling back to the tag archive"
+  fetch_pyapp "https://github.com/ofek/pyapp/archive/refs/tags/v${PYAPP_VERSION}.tar.gz"
+fi
+
+if ! gzip -t "$WORK/pyapp.tar.gz" 2>/dev/null; then
+  echo "downloaded pyapp archive is not valid gzip; first bytes:" >&2
+  head -c 200 "$WORK/pyapp.tar.gz" >&2
+  echo >&2
+  exit 1
+fi
+
 tar -xzf "$WORK/pyapp.tar.gz" -C "$WORK"
 PYAPP_DIR="$(find "$WORK" -maxdepth 1 -type d -name 'pyapp-*' | head -1)"
 [ -n "$PYAPP_DIR" ] || { echo "could not find unpacked pyapp dir" >&2; exit 1; }
@@ -97,6 +120,31 @@ cargo build --release --target "$TARGET"
 # --- 6. collect -----------------------------------------------------------
 BUILT="$PYAPP_DIR/target/$TARGET/release/pyapp"
 [ -f "$BUILT" ] || { echo "expected binary not found: $BUILT" >&2; exit 1; }
+
+# PyApp's build.rs downloads the CPython distribution to embed it, from the same
+# GitHub release-asset endpoint that occasionally 504s. On failure it can embed
+# the HTML error page instead and still report a successful build, yielding a
+# ~3MB binary that dies at runtime with "failed to iterate over archive".
+# An embedded distribution is tens of MB, so a small binary means no distribution.
+MIN_EMBED_BYTES=15000000
+SIZE=$(wc -c < "$BUILT" | tr -d ' ')
+if [ "${PYAPP_DISTRIBUTION_EMBED:-0}" = "1" ] && [ "$SIZE" -lt "$MIN_EMBED_BYTES" ]; then
+  echo >&2
+  echo "ERROR: binary is only $SIZE bytes — the embedded Python distribution is missing." >&2
+  echo "       PYAPP_DISTRIBUTION_EMBED=1 was set, so this build is broken." >&2
+  echo "       Usually a transient GitHub release-asset outage; retry shortly." >&2
+  exit 1
+fi
+
+# Only meaningful when building for the host; a cross-built binary cannot run here.
+if [ "$TARGET" = "$(rustc -vV | awk '/^host:/ {print $2}')" ]; then
+  echo "==> verifying the binary runs"
+  if ! "$BUILT" version >/dev/null 2>&1; then
+    echo "ERROR: the built binary failed to run '$BUILT version'" >&2
+    "$BUILT" version >&2 || true
+    exit 1
+  fi
+fi
 
 STAGE="$OUT/${BIN_NAME}-${VERSION}-${TARGET}"
 clean_tree "$STAGE"
