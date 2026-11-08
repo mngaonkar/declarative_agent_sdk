@@ -99,6 +99,29 @@ python run_bot.py              # serve the agent on Discord
 something is missing. `--config` picks a different agent YAML, `--log-level DEBUG`
 turns up SDK logging.
 
+Once installed, the same thing is available as a command:
+
+```bash
+declarative-agent discord --config agent.yaml --check
+declarative-agent discord --config agent.yaml
+declarative-agent version
+```
+
+### 4. Standalone binary (no Python needed)
+
+```bash
+./packaging/build-binary.sh                            # host target
+./packaging/build-binary.sh x86_64-unknown-linux-gnu   # explicit target
+```
+
+Produces `dist/declarative-agent-<version>-<target>.tar.gz` — a
+[PyApp](https://ofek.dev/pyapp/) executable with an embedded CPython 3.14, plus
+`agent.yaml`, `instructions.md` and `skills/` beside it. Unpack and run from
+anywhere; config paths resolve relative to the YAML. Dependencies install on
+first run (~20-45s, a few hundred MB), then startup is immediate.
+Targets built in CI: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`.
+See [packaging/README-dist.md](packaging/README-dist.md).
+
 Full setup notes: [examples/discord_bot/README.md](examples/discord_bot/README.md).
 
 Also see external samples: [declarative_agent_sdk_examples](https://github.com/mngaonkar/declarative_agent_sdk_examples).
@@ -149,6 +172,7 @@ YAML ──► AgentFactory ──► LeanAIAgent | ADKAIAgent | LangChainAIAgen
 ### Package layout
 
 ```
+cli/                  # declarative-agent console entry point
 core/                 # factory, events, BaseAgent, registries
 agents/
   lean/               # LeanAIAgent + runtime/ (loop, skills, tools, llm)
@@ -160,6 +184,7 @@ transports/
   discord/            # DiscordAgentServer
   a2a/                # A2A server, client, executor, formatters
 workflows/            # multi-agent YAML graphs
+packaging/            # PyApp build script + distributed README
 examples/discord_bot/
 ```
 

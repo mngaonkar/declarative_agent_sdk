@@ -17,9 +17,21 @@ Then, in a channel the bot can see: `@YourBot what is the weather in Pune?`, or 
 |---|---|
 | `--check` | Log in, report servers and postable channels, log out. No agent, no LLM key. |
 | `--config PATH` | A different agent YAML (default: `agent.yaml` beside the script) |
-| `--log-level LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR` (default `INFO`) |
+| `--log-level LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (default `INFO`) |
+| `--env-file PATH` | Explicit `.env` to load |
+| `--embed` | Post answers as an embed card instead of plain messages |
 
-`run_bot.py` checks credentials before connecting and tells you exactly what to export if something is missing, rather than failing on the first model call. Keys are read from the environment, or from a `.env` file next to this example or at the repo root.
+`run_bot.py` checks credentials before connecting and tells you exactly what to export if something is missing, rather than failing on the first model call. Keys are read from the environment, or from a `.env` beside the agent config, or `./.env`. Use `--env-file` to point elsewhere.
+
+`run_bot.py` is a wrapper around the packaged CLI, so once the SDK is installed these are the same:
+
+```bash
+python run_bot.py --check
+declarative-agent discord --config agent.yaml --check
+```
+
+A standalone binary with no Python dependency is also available — see
+[packaging/README-dist.md](../../packaging/README-dist.md).
 
 To test the transport's behaviour without a token, an API key, or a network, run its test suite instead — it covers mention/DM/prefix routing, working-status updates, `<think>` stripping, 2000-character splitting, per-channel sessions, the ✅/❌ tool-approval round trip (approve, deny, timeout), and error reporting:
 
@@ -100,7 +112,7 @@ The bot shows as **online in Discord only while `run_bot.py` is running** — it
 
 | File | Purpose |
 |---|---|
-| `run_bot.py` | Entry point — serves the agent, or `--check` for a Discord-side preflight |
+| `run_bot.py` | Entry point — a thin wrapper over `declarative-agent discord` |
 | `agent.yaml` | Sample agent config (`agent_framework`, provider, tools) |
 | `instructions.md` | System instructions for the sample agent |
 
@@ -124,11 +136,9 @@ Discord only supports a **subset** of Markdown. Agent replies are passed through
 Discord can show (e.g. tables → monospace code blocks). Bold, lists, and code
 fences already render natively.
 
-In `run_bot.py` you can also set:
+Pass `--embed` to put answers in an embed card instead (often cleaner for long
+answers; ~4096 characters per embed chunk):
 
-```python
-DiscordAgentServer(..., format_markdown=True, reply_as_embed=True)
+```bash
+python run_bot.py --embed
 ```
-
-`reply_as_embed=True` puts the answer in an embed card (often cleaner for long
-answers; ~4096 characters per embed chunk).

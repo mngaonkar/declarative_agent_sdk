@@ -295,16 +295,23 @@ def _is_real_image_file(path: str) -> bool:
         return False
 
 
-def _search_bases() -> List[Path]:
-    """Directories to search when resolving relative image paths."""
+def _search_bases(workspace_dir: Optional[Path] = None) -> List[Path]:
+    """Directories to search when resolving relative image paths.
+
+    ``workspace_dir`` (the agent's configured workspace, already resolved) is
+    searched first so a deployed binary finds agent-written files regardless of
+    the working directory.  The cwd is kept as a fallback for callers that do
+    not configure one.
+    """
+    bases: List[Path] = []
+    if workspace_dir is not None:
+        ws = Path(workspace_dir)
+        bases += [ws, ws / "attachments", ws / "output", ws.parent]
     cwd = Path.cwd()
-    bases = [
+    bases += [
         cwd,
         cwd / "attachments",
         cwd / "workspace",
-        cwd / "examples" / "discord_bot",
-        cwd / "examples" / "discord_bot" / "attachments",
-        cwd / "examples" / "discord_bot" / "workspace",
     ]
     # Deduplicate while preserving order
     out: List[Path] = []
@@ -320,10 +327,10 @@ def _search_bases() -> List[Path]:
     return out
 
 
-def _image_watch_dirs() -> List[Path]:
+def _image_watch_dirs(workspace_dir: Optional[Path] = None) -> List[Path]:
     """Folders where agents commonly write images during a turn."""
     dirs: List[Path] = []
-    for base in _search_bases():
+    for base in _search_bases(workspace_dir):
         for name in ("attachments", "workspace", "photos", "output", "outputs", "images"):
             dirs.append(base / name if base.name != name else base)
         # also watch base itself if it is one of those names
@@ -342,10 +349,14 @@ def _image_watch_dirs() -> List[Path]:
     return out
 
 
-def snapshot_attachable_files(dirs: Optional[List[Path]] = None) -> Dict[str, float]:
+def snapshot_attachable_files(
+    dirs: Optional[List[Path]] = None,
+    *,
+    workspace_dir: Optional[Path] = None,
+) -> Dict[str, float]:
     """Map absolute attachable file path → mtime (shallow + one level)."""
     snap: Dict[str, float] = {}
-    for d in dirs or _image_watch_dirs():
+    for d in dirs or _image_watch_dirs(workspace_dir):
         if not d.is_dir():
             continue
         try:
@@ -370,10 +381,13 @@ snapshot_image_files = snapshot_attachable_files
 
 
 def new_files_since(
-    before: Dict[str, float], after: Optional[Dict[str, float]] = None
+    before: Dict[str, float],
+    after: Optional[Dict[str, float]] = None,
+    *,
+    workspace_dir: Optional[Path] = None,
 ) -> List[str]:
     """Return attachable paths that are new or updated after *before*."""
-    after = after if after is not None else snapshot_attachable_files()
+    after = after if after is not None else snapshot_attachable_files(workspace_dir=workspace_dir)
     out: List[str] = []
     for path, mtime in after.items():
         prev = before.get(path)
@@ -448,8 +462,8 @@ def extract_file_refs(text: str) -> Tuple[str, List[str]]:
 extract_image_refs = extract_file_refs
 
 
-def resolve_local_file_path(ref: str) -> Optional[Path]:
-    """Resolve a local file ref against cwd and common project dirs."""
+def resolve_local_file_path(ref: str, workspace_dir: Optional[Path] = None) -> Optional[Path]:
+    """Resolve a local file ref against the workspace, cwd and common dirs."""
     raw = os.path.expanduser((ref or "").strip())
     if not raw or raw.startswith(("http://", "https://")):
         return None
@@ -459,7 +473,7 @@ def resolve_local_file_path(ref: str) -> Optional[Path]:
     if p.is_absolute():
         candidates.append(p)
     else:
-        for base in _search_bases():
+        for base in _search_bases(workspace_dir):
             candidates.append(base / raw)
             candidates.append(base / "attachments" / Path(raw).name)
             candidates.append(base / "workspace" / Path(raw).name)
@@ -483,6 +497,7 @@ def resolve_attachable_files(
     *,
     max_files: int = DISCORD_MAX_FILES_PER_MESSAGE,
     max_bytes: int = DISCORD_FILE_MAX_BYTES,
+    workspace_dir: Optional[Path] = None,
 ) -> Tuple[List[str], List[str]]:
     """
     Resolve refs to local paths ready for ``discord.File``.
@@ -520,7 +535,7 @@ def resolve_attachable_files(
                 notes.append(f"Could not fetch file: {ref}")
             continue
 
-        candidate = resolve_local_file_path(ref)
+        candidate = resolve_local_file_path(ref, workspace_dir)
         if candidate is None:
             notes.append(f"File not found: {ref}")
             continue
@@ -872,6 +887,7 @@ class DiscordAgentServer:
         activity_status: Optional[str] = None,
         format_markdown: bool = True,
         reply_as_embed: bool = False,
+        workspace_dir: Optional[str] = None,
     ) -> None:
         """
         Args:
@@ -903,6 +919,10 @@ class DiscordAgentServer:
             reply_as_embed: Post final answers as a Discord embed (description
                 field).  Often looks cleaner; limited to ~4096 chars per embed
                 chunk.  Default False (plain messages, 2000-char chunks).
+            workspace_dir: The agent's workspace directory, used to find files
+                the agent writes during a turn.  Without it the search falls
+                back to the working directory, which only works when the bot is
+                started from the agent's own directory.
 
         Raises:
             ValueError: If no token is supplied and DISCORD_BOT_TOKEN is unset,
@@ -920,6 +940,7 @@ class DiscordAgentServer:
                 "A Discord bot token is required — pass token=... or set DISCORD_BOT_TOKEN"
             )
 
+        self._workspace_dir = Path(workspace_dir) if workspace_dir else None
         self._respond_to_mentions = respond_to_mentions
         self._respond_to_dms = respond_to_dms
         self._respond_to_all_messages = respond_to_all_messages
@@ -1104,7 +1125,7 @@ class DiscordAgentServer:
         # File refs harvested from the whole turn + dirs snapshotted for new files
         # (tool stdout is not streamed, so path-only tool results would be missed).
         turn_file_refs: List[str] = []
-        files_before = snapshot_attachable_files()
+        files_before = snapshot_attachable_files(workspace_dir=self._workspace_dir)
 
         def _harvest_files(raw: str) -> None:
             if not raw:
@@ -1136,7 +1157,7 @@ class DiscordAgentServer:
 
                 if _is_final(event):
                     text = remove_think_content(event_text)
-                    for path in new_files_since(files_before):
+                    for path in new_files_since(files_before, workspace_dir=self._workspace_dir):
                         if path not in turn_file_refs:
                             turn_file_refs.append(path)
                     if not text and not turn_file_refs:
@@ -1447,7 +1468,8 @@ class DiscordAgentServer:
 
         logger.info(f"Discord file refs for reply: {refs or '(none)'}")
         local_paths, notes = (
-            resolve_attachable_files(refs) if refs else ([], [])
+            resolve_attachable_files(refs, workspace_dir=self._workspace_dir)
+            if refs else ([], [])
         )
         local_paths = dedupe_paths_by_content(local_paths)
         if local_paths:
@@ -1464,7 +1486,7 @@ class DiscordAgentServer:
             attached_refs.extend(local_paths)
             for ref in refs:
                 resolved = (
-                    resolve_local_file_path(ref)
+                    resolve_local_file_path(ref, self._workspace_dir)
                     if not ref.startswith(("http://", "https://"))
                     else None
                 )

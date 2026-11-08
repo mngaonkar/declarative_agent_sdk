@@ -51,6 +51,10 @@ declarative_agent_sdk/                 # repo root == package root
 ├── __init__.py                        # public re-exports
 ├── __version__.py
 │
+├── cli/                               # `declarative-agent` console script
+│   ├── main.py                        # argparse subcommands; main() / run()
+│   └── __main__.py                    # python -m declarative_agent_sdk.cli
+│
 ├── core/                              # shared, framework-agnostic
 │   ├── base_agent.py                  # BaseAgent ABC
 │   ├── agent_event.py                 # AgentEvent (+ ADK adapter)

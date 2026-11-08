@@ -67,8 +67,13 @@ class AgentFactory:
     """Create a BaseAgent; framework choice is exclusive end-to-end."""
 
     @staticmethod
-    def from_yaml_file(yaml_file_path: str) -> BaseAgent:
-        """Load YAML; resolve relative paths against the file's directory."""
+    def load_config(yaml_file_path: str) -> Dict[str, Any]:
+        """Read a YAML config, resolving relative paths against its directory.
+
+        Exposed separately from :meth:`from_yaml_file` so callers that need the
+        resolved paths (e.g. a transport that must know the workspace location)
+        apply exactly the same rules instead of re-deriving them.
+        """
         yaml_path = Path(yaml_file_path).resolve()
         if not yaml_path.exists():
             raise FileNotFoundError(f"YAML file not found: {yaml_file_path}")
@@ -79,7 +84,12 @@ class AgentFactory:
             value = config.get(key)
             if isinstance(value, str) and value and not Path(value).is_absolute():
                 config[key] = str((base_dir / value).resolve())
-        return AgentFactory.from_dict(config)
+        return config
+
+    @staticmethod
+    def from_yaml_file(yaml_file_path: str) -> BaseAgent:
+        """Load YAML; resolve relative paths against the file's directory."""
+        return AgentFactory.from_dict(AgentFactory.load_config(yaml_file_path))
 
     @staticmethod
     def from_yaml_string(yaml_string: str) -> BaseAgent:

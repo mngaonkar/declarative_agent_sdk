@@ -1,0 +1,118 @@
+name: Build binaries
+
+# Tag push publishes a release; manual runs just produce artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Run the test suite
+        run: |
+          uv sync --extra discord --extra dev
+          uv run pytest tests/ -q
+
+  # The wheel is py3-none-any, so build it exactly once. Producing it in both
+  # matrix jobs would upload two identical files that collide on merge.
+  wheel:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Wheel only: an sdist would land as declarative_agent_sdk-<v>.tar.gz,
+      # easily confused with the declarative-agent-<v>-<target>.tar.gz binary
+      # bundles in the same release. Add --sdist here if you want one.
+      - name: Build wheel
+        run: uv build --package declarative-agent-sdk --wheel --out-dir dist
+      - name: Check the wheel carries no repo junk
+        run: |
+          set -euo pipefail
+          if unzip -l dist/*.whl | grep -E 'uv\.lock|build\.log|Dockerfile|\.env'; then
+            echo "wheel contains files that should not ship" >&2
+            exit 1
+          fi
+          unzip -l dist/*.whl | grep -q 'declarative_agent_sdk/cli/main.py'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14            # Apple Silicon
+            target: aarch64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Both targets build natively on their own runner, so no cross-compilation.
+      - name: Build binary
+        run: ./packaging/build-binary.sh ${{ matrix.target }}
+
+      # The binary installs its dependencies on first run, so this smoke test
+      # exercises the real cold path: embedded Python unpack + dependency
+      # install + our entry point.
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          STAGE=$(echo dist/declarative-agent-*-${{ matrix.target }}/)
+          cd "$STAGE"
+          ./declarative-agent version
+          ./declarative-agent --help
+          ./declarative-agent discord --help
+          # No token here, so --check must fail cleanly rather than hang or crash.
+          if ./declarative-agent discord --check; then
+            echo "expected --check to fail without DISCORD_BOT_TOKEN" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: declarative-agent-${{ matrix.target }}
+          path: dist/declarative-agent-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [build, wheel]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.whl
+            artifacts/SHA256SUMS
+          generate_release_notes: true

@@ -28,3 +28,6 @@ ENV/
 node_modules/
 .wireit/
 attachments/
+
+# PyApp build workspace
+.pyapp-build/

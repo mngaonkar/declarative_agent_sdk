@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 from declarative_agent_sdk.transports.discord.server import (
     APPROVE_EMOJI,
+    _search_bases,
     DENY_EMOJI,
     DISCORD_MESSAGE_LIMIT,
     DiscordAgentServer,
@@ -379,6 +380,51 @@ class TestInit:
     def test_invalid_session_scope_raises(self):
         with pytest.raises(ValueError, match="session_scope"):
             DiscordAgentServer(FakeAgent([]), token="t", session_scope="planet")
+
+
+# ---------------------------------------------------------------------------
+# _search_bases — where agent-written files are looked for
+# ---------------------------------------------------------------------------
+
+class TestSearchBases:
+    def test_workspace_is_searched_first(self, tmp_path):
+        bases = _search_bases(tmp_path / "ws")
+        assert bases[0] == tmp_path / "ws"
+
+    def test_workspace_children_included(self, tmp_path):
+        bases = [str(b) for b in _search_bases(tmp_path / "ws")]
+        assert str(tmp_path / "ws" / "attachments") in bases
+        assert str(tmp_path / "ws" / "output") in bases
+
+    def test_cwd_remains_a_fallback(self, tmp_path):
+        from pathlib import Path as _P
+
+        bases = _search_bases(tmp_path / "ws")
+        assert _P.cwd() in bases
+
+    def test_no_workspace_still_searches_cwd(self):
+        from pathlib import Path as _P
+
+        bases = _search_bases()
+        assert bases[0] == _P.cwd()
+
+    def test_repo_specific_example_paths_are_gone(self):
+        # These were hardcoded and are meaningless in a deployed binary.
+        joined = " ".join(str(b) for b in _search_bases())
+        assert "examples/discord_bot" not in joined
+
+    def test_no_duplicates(self, tmp_path):
+        bases = _search_bases(tmp_path)
+        assert len(bases) == len({str(b) for b in bases})
+
+
+class TestServerWorkspaceWiring:
+    def test_workspace_dir_is_stored_as_path(self, tmp_path):
+        server = _make_server(workspace_dir=str(tmp_path))
+        assert server._workspace_dir == tmp_path
+
+    def test_defaults_to_none(self):
+        assert _make_server()._workspace_dir is None
 
 
 # ---------------------------------------------------------------------------
