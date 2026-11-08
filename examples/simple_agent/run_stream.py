@@ -38,18 +38,39 @@ async def process_turn(agent: BaseAgent, query: str, session_id: str):
     """Execute a single query, handling streaming events and tool confirmations."""
     print(f"\nUser: {query}\n" + "-" * 50)
 
-    pending_confirmation = False
+    stream = agent.run_query(query, session_id=session_id)
+    while stream is not None:
+        pending_approval = None
+        async for event in stream:
+            # 1. Tool approval pause
+            if event.long_running_tool_ids or event.kind == "tool_approval":
+                pending_approval = event
+                break
 
-    async for event in agent.run_query(query, session_id=session_id):
-        # 1. Tool approval pause
-        if event.long_running_tool_ids or event.kind == "tool_approval":
+            # 2. Intermediate status or thinking
+            elif event.kind == "status":
+                print(f"    💭 {event.text}")
+
+            elif event.kind == "error":
+                print(f"    ⚠️  [error] {event.text}")
+
+            # 3. Final response
+            elif event.is_final_response():
+                text = (
+                    event.content.parts[0].text
+                    if event.content and event.content.parts
+                    else event.text
+                )
+                print(f"\nAssistant:\n{text}\n")
+
+        if pending_approval is not None:
             call_id = (
-                event.long_running_tool_ids[0]
-                if event.long_running_tool_ids
-                else (event.tool_call_id or "unknown")
+                pending_approval.long_running_tool_ids[0]
+                if pending_approval.long_running_tool_ids
+                else (pending_approval.tool_call_id or "unknown")
             )
-            name = event.tool_name or "tool"
-            args = event.tool_args or {}
+            name = pending_approval.tool_name or "tool"
+            args = pending_approval.tool_args or {}
 
             print(f"\n⚠️  [TOOL APPROVAL REQUIRED]")
             print(f"    Tool: {name}")
@@ -61,32 +82,9 @@ async def process_turn(agent: BaseAgent, query: str, session_id: str):
             print(f"    Decision: {'Approved ✅' if approved else 'Denied ❌'}")
             print("    Resuming agent...\n")
 
-            # Resume the agent loop
-            async for resume_ev in agent.tool_confirmation(call_id, session_id, yes=approved):
-                if resume_ev.kind == "status":
-                    print(f"    [status] {resume_ev.text}")
-                elif resume_ev.is_final_response():
-                    text = (
-                        resume_ev.content.parts[0].text
-                        if resume_ev.content and resume_ev.content.parts
-                        else resume_ev.text
-                    )
-                    print(f"\nAssistant:\n{text}\n")
-            pending_confirmation = True
-            break
-
-        # 2. Intermediate status or thinking
-        elif event.kind == "status":
-            print(f"    💭 {event.text}")
-
-        # 3. Final response
-        elif event.is_final_response():
-            text = (
-                event.content.parts[0].text
-                if event.content and event.content.parts
-                else event.text
-            )
-            print(f"\nAssistant:\n{text}\n")
+            stream = agent.tool_confirmation(call_id, session_id, yes=approved)
+        else:
+            stream = None
 
 
 async def main():

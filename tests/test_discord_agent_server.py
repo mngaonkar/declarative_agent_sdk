@@ -382,6 +382,83 @@ class TestInit:
 
 
 # ---------------------------------------------------------------------------
+# build_client / on_ready — presence
+# ---------------------------------------------------------------------------
+
+class FakeDiscordModule:
+    """Just enough of the discord module for build_client() to wire itself up."""
+
+    class Status:
+        online = "online"
+
+    class Game:
+        def __init__(self, name):
+            self.name = name
+
+    class Intents:
+        def __init__(self):
+            self.message_content = False
+
+        @classmethod
+        def default(cls):
+            return cls()
+
+    class Client:
+        def __init__(self, intents=None):
+            self.intents = intents
+            self.user = None
+            self.events = {}
+            self.presence_calls = []
+
+        def event(self, func):            # the @client.event decorator
+            self.events[func.__name__] = func
+            return func
+
+        async def change_presence(self, *, status=None, activity=None):
+            self.presence_calls.append((status, activity))
+
+
+def _ready_client(**kwargs):
+    """build_client() against the fake module, then fire on_ready."""
+    server = DiscordAgentServer(FakeAgent([]), token="t", **kwargs)
+    server._import_discord = staticmethod(lambda: FakeDiscordModule)
+    client = server.build_client()
+    asyncio.run(client.events["on_ready"]())
+    return client
+
+
+class TestPresence:
+    def test_message_content_intent_is_requested(self):
+        assert _ready_client().intents.message_content is True
+
+    def test_explicit_online_with_activity(self):
+        client = _ready_client(activity_status="agent | mention me")
+        assert len(client.presence_calls) == 1
+        status, activity = client.presence_calls[0]
+        assert status == FakeDiscordModule.Status.online
+        assert activity.name == "agent | mention me"
+
+    def test_explicit_online_without_activity(self):
+        # Presence is still announced when no activity_status is configured.
+        client = _ready_client()
+        assert len(client.presence_calls) == 1
+        status, activity = client.presence_calls[0]
+        assert status == FakeDiscordModule.Status.online
+        assert activity is None
+
+    def test_presence_failure_does_not_break_ready(self):
+        server = DiscordAgentServer(FakeAgent([]), token="t", activity_status="x")
+        server._import_discord = staticmethod(lambda: FakeDiscordModule)
+        client = server.build_client()
+
+        async def boom(**_kwargs):
+            raise RuntimeError("discord said no")
+
+        client.change_presence = boom
+        asyncio.run(client.events["on_ready"]())      # must not raise
+
+
+# ---------------------------------------------------------------------------
 # extract_query — when should the bot answer?
 # ---------------------------------------------------------------------------
 

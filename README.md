@@ -88,14 +88,16 @@ server.run()
 ```bash
 cd examples/discord_bot
 export OPENAI_API_KEY=...
-export DISCORD_BOT_TOKEN=...   # for live mode
+export DISCORD_BOT_TOKEN=...
 export TAVILY_API_KEY=...      # optional
 
-python run_discord_bot.py                    # selftest (no keys)
-python run_discord_bot.py --mode local       # real agent, fake Discord
-python run_discord_bot.py --mode connect    # token + permissions check
-python run_discord_bot.py --mode live       # real Discord
+python run_bot.py --check      # token, intent + channel permissions, then exit
+python run_bot.py              # serve the agent on Discord
 ```
+
+`run_bot.py` verifies credentials before connecting and names what to export if
+something is missing. `--config` picks a different agent YAML, `--log-level DEBUG`
+turns up SDK logging.
 
 Full setup notes: [examples/discord_bot/README.md](examples/discord_bot/README.md).
 
@@ -368,9 +370,9 @@ Multi-agent LangGraph workflows are configured in YAML and built with `WorkflowF
 | `ANTHROPIC_API_KEY` | deepagent default |
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | ADK / Google |
 | `TAVILY_API_KEY` | `tavily_search` tool |
-| `DISCORD_BOT_TOKEN` | Discord live mode |
+| `DISCORD_BOT_TOKEN` | Discord bot |
 
-`.env` next to the example or repo root is loaded when using `run_discord_bot.py`.
+`.env` next to the example or repo root is loaded when using `run_bot.py`.
 
 ---
 
@@ -380,7 +382,7 @@ Multi-agent LangGraph workflows are configured in YAML and built with `WorkflowF
 uv sync
 source .venv/bin/activate
 pytest tests/ -q
-python examples/discord_bot/run_discord_bot.py --mode selftest
+pytest tests/test_discord_agent_server.py -q    # Discord transport only
 ```
 
 ---

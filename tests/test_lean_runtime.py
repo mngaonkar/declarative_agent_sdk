@@ -368,6 +368,68 @@ class TestLeanLoop:
         }
         assert "call_pending_1" in tool_ids
 
+    def test_tool_failure_surfaces_reflection_and_retries(self, tmp_path: Path):
+        client = MagicMock()
+        skills = SkillRegistry(root=str(tmp_path / "skills"))
+        (tmp_path / "skills").mkdir(exist_ok=True)
+        tools = LeanToolRegistry(skills, workspace=str(tmp_path / "ws"))
+
+        def slow_cmd() -> str:
+            return "Error: Command timed out after 30 seconds"
+
+        def fast_cmd() -> str:
+            return "success: folder sizes 10G, 5G, 2G"
+
+        tools.add_callable(slow_cmd)
+        tools.add_callable(fast_cmd)
+
+        client.chat.side_effect = [
+            {
+                "role": "assistant",
+                "content": "Executing slow command to check sizes.",
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "function": {"name": "slow_cmd", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "The previous command timed out. Retrying with faster command.",
+                "tool_calls": [
+                    {
+                        "id": "tc2",
+                        "function": {"name": "fast_cmd", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "Here are the top 3 folders: 10G, 5G, 2G.",
+            },
+        ]
+
+        loop = LeanLoop(
+            client=client,
+            tools=tools,
+            skills=skills,
+            tools_approval_required=True,
+            max_step_retries=3,
+        )
+
+        events1 = list(loop.run("check disk", "s_fail"))
+        assert any(e.kind == "tool_approval" and e.tool_name == "slow_cmd" for e in events1)
+
+        events2 = list(loop.resume("s_fail", approved=True))
+        status_texts = [e.text for e in events2 if e.kind == "status"]
+        assert any("Step failed" in t and "Command timed out" in t for t in status_texts)
+        assert any("previous command timed out" in t for t in status_texts)
+        assert any(e.kind == "tool_approval" and e.tool_name == "fast_cmd" for e in events2)
+
+        events3 = list(loop.resume("s_fail", approved=True))
+        assert any(e.kind == "final" and "10G, 5G, 2G" in e.text for e in events3)
+
 
 class TestToolChainHelpers:
     def test_fill_missing(self):

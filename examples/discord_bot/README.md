@@ -1,24 +1,33 @@
 # Discord Bot Example
 
-Test program for `DiscordAgentServer`. Three modes, in increasing order of what they need.
-
-## 1. `selftest` — no token, no API key, no network
+Serves an agent defined in `agent.yaml` as a Discord bot, via `DiscordAgentServer`.
 
 ```bash
-python run_discord_bot.py
-```
-
-Runs a scripted stub agent behind a fake Discord channel and asserts the server's behaviour: mention/DM/prefix routing, working-status updates, `<think>` stripping, 2000-character splitting, per-channel sessions, the ✅/❌ tool-approval round trip (approve, deny, timeout), and error reporting. Prints a pass/fail report and exits non-zero on failure, so it works as a smoke test in CI.
-
-## 2. `local` — your real agent, fake Discord
-
-```bash
-export GOOGLE_API_KEY=...      # whatever your agent.yaml provider needs
+export DISCORD_BOT_TOKEN=...   # see "Discord bot setup" below
+export OPENAI_API_KEY=...      # whatever your agent.yaml provider needs
 export TAVILY_API_KEY=...      # only if the config keeps the tavily_search tool
-python run_discord_bot.py --mode local --config agent.yaml
+
+python run_bot.py --check      # verify the Discord side, then exit
+python run_bot.py              # serve the agent
 ```
 
-`local` and `live` check credentials before starting and tell you exactly what to export if something is missing, rather than failing on the first model call. Keys are read from the environment, or from a `.env` file next to this example or at the repo root.
+Then, in a channel the bot can see: `@YourBot what is the weather in Pune?`, or DM it, or use the `!ask ` prefix this example configures. Ctrl-C stops the bot; it also shuts down cleanly on `SIGTERM`.
+
+| Flag | Purpose |
+|---|---|
+| `--check` | Log in, report servers and postable channels, log out. No agent, no LLM key. |
+| `--config PATH` | A different agent YAML (default: `agent.yaml` beside the script) |
+| `--log-level LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR` (default `INFO`) |
+
+`run_bot.py` checks credentials before connecting and tells you exactly what to export if something is missing, rather than failing on the first model call. Keys are read from the environment, or from a `.env` file next to this example or at the repo root.
+
+To test the transport's behaviour without a token, an API key, or a network, run its test suite instead — it covers mention/DM/prefix routing, working-status updates, `<think>` stripping, 2000-character splitting, per-channel sessions, the ✅/❌ tool-approval round trip (approve, deny, timeout), and error reporting:
+
+```bash
+pytest tests/test_discord_agent_server.py -q
+```
+
+## The agent config
 
 The shipped `agent.yaml` uses **`agent_framework: lean`**. Pick **one** framework; each owns its loop end-to-end (no nesting):
 
@@ -33,15 +42,13 @@ skills_directory: skills
 
 Switch `model` / `provider` / `endpoint` to match the API key you have (OpenAI, Anthropic, Google, or local vLLM).
 
-Gives you a terminal REPL. Everything you type is wrapped as a Discord message mentioning the bot and pushed through `DiscordAgentServer.handle_message`, so you see exactly what the bot would post — including status updates and tool-approval prompts, which you answer with `y`/`n` at the prompt instead of reactions. Use this to check prompt and formatting behaviour before involving Discord.
-
-## 3. `connect` — real Discord, no agent
+## Checking the Discord side first
 
 Once you have a bot token (setup below), check it before involving the agent:
 
 ```bash
 export DISCORD_BOT_TOKEN=...
-python run_discord_bot.py --mode connect
+python run_bot.py --check
 ```
 
 It logs in, prints the bot's identity, every server it joined and which channels it can actually post in, then logs out. Failures are named rather than dumped as tracebacks — a rejected token, or the MESSAGE CONTENT intent still switched off in the developer portal.
@@ -53,18 +60,10 @@ connected as newsbot#4821  (id 1319…)
     can post in #general
     can post in #bot-testing
 
-  mention it as <@1319…> in any channel above, once you start live mode.
+  mention it as <@1319…> in any channel above, or DM it, once you start the bot.
 ```
 
-## 4. `live` — real Discord, real agent
-
-```bash
-export DISCORD_BOT_TOKEN=...
-export GOOGLE_API_KEY=...
-python run_discord_bot.py --mode live --config agent.yaml
-```
-
-Then, in a channel the bot can see: `@YourBot what is the weather in Pune?`, or DM it, or use the `!ask ` prefix this example configures. Ctrl-C stops the bot.
+Channels where the bot cannot add reactions are flagged, since that is what the ✅/❌ tool-approval flow uses.
 
 ---
 
@@ -84,7 +83,9 @@ One-time, in the [Discord developer portal](https://discord.com/developers/appli
    `68672` = View Channels + Send Messages + Read Message History + Add Reactions. Reactions are what the ✅/❌ tool approval flow uses; drop it only if you set `tools_approval_required: false`.
 5. Install the dependency if you have not: `pip install "declarative-agent-sdk[discord]"`.
 
-Then `--mode connect` to confirm, and `--mode live` to serve.
+Then `python run_bot.py --check` to confirm, and `python run_bot.py` to serve.
+
+The bot shows as **online in Discord only while `run_bot.py` is running** — it goes offline the moment you stop the process. For an always-on bot, run it under a supervisor (`systemd`, `docker compose` with `restart: unless-stopped`, etc.); see `examples/docker/`.
 
 ### If the bot connects but stays silent
 
@@ -99,8 +100,8 @@ Then `--mode connect` to confirm, and `--mode live` to serve.
 
 | File | Purpose |
 |---|---|
-| `run_discord_bot.py` | The test program (all four modes) |
-| `agent.yaml` | Sample agent config (`agent_framework`, provider, tools) — `local` / `live` only |
+| `run_bot.py` | Entry point — serves the agent, or `--check` for a Discord-side preflight |
+| `agent.yaml` | Sample agent config (`agent_framework`, provider, tools) |
 | `instructions.md` | System instructions for the sample agent |
 
 ### Choosing a runtime (peers — pick one)
@@ -123,7 +124,7 @@ Discord only supports a **subset** of Markdown. Agent replies are passed through
 Discord can show (e.g. tables → monospace code blocks). Bold, lists, and code
 fences already render natively.
 
-In `run_discord_bot.py` live mode you can also set:
+In `run_bot.py` you can also set:
 
 ```python
 DiscordAgentServer(..., format_markdown=True, reply_as_embed=True)

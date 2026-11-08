@@ -1,0 +1,21 @@
+# Google ADK Agent Configuration
+#
+# The ADK runtime delegates execution to the Google ADK Runner,
+# providing native Gemini integration and ADK-managed session state.
+
+name: adk_assistant
+description: Demonstrates the Google ADK runtime powered by Gemini
+agent_framework: adk
+
+instruction_file: instructions.md
+workspace_directory: workspace
+
+provider: google
+model: gemini-2.5-flash
+
+tools:
+  - web_request
+  - exec_command
+
+# Require human approval before running tools
+tools_approval_required: true

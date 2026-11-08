@@ -441,16 +441,20 @@ examples/discord_bot/
 │   └── disk-space/SKILL.md
 ├── attachments/            # agent-written images (auto-uploaded if new)
 ├── workspace/
-└── run_discord_bot.py      # selftest | local | connect | live
+└── run_bot.py              # serve the agent (--check for a dry preflight)
 ```
 
 ```bash
-# smoke (no network)
-python run_discord_bot.py --mode selftest
+# transport behaviour (no network, no keys)
+pytest tests/test_discord_agent_server.py -q
 
-# lean + OpenAI
+# token, intent and channel permissions — no agent, no LLM key
+export DISCORD_BOT_TOKEN=...
+python run_bot.py --check
+
+# lean + OpenAI, live on Discord
 export OPENAI_API_KEY=...
-python run_discord_bot.py --mode local --config agent.yaml
+python run_bot.py --config agent.yaml
 ```
 
 ---

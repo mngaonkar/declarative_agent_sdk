@@ -9,6 +9,7 @@ output/
 workspace/
 .vscode/
 *.lock
+.claude/*
 
 # Python packaging
 build/

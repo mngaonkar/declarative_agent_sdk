@@ -399,77 +399,59 @@ class LeanLoop:
             messages.append(assistant_msg)
             history.append(assistant_msg)
 
-            # Surface model deliberation (think blocks + plan/reason text).
-            # Skip when the only content is the final answer (avoids Discord
-            # posting the same text as both "thinking" and the reply).
-            is_terminal = not tool_calls and (
-                decision in ("done", "ask") or phase in ("done", "ask")
-            )
-            if think_text:
-                yield LoopEvent(
-                    kind="status",
-                    text=_compose_thinking(think_text, "" if is_terminal else visible, phase),
-                )
-            elif visible and not is_terminal:
-                yield LoopEvent(
-                    kind="status",
-                    text=_compose_thinking("", visible, phase),
-                )
-
-            # ── No tools this round: deliberative continue or exit ────
-            if not tool_calls:
-                # Explicit terminal decisions
-                if decision in ("done", "ask") or phase in ("done", "ask"):
-                    history[:] = self._trim(history)
-                    final = visible or (
-                        "I need your help to proceed."
-                        if decision == "ask" or phase == "ask"
-                        else "(done)"
-                    )
-                    # If the only content was a think block, fall back to a
-                    # short default rather than dumping raw tags.
-                    if not visible and think_text:
-                        final = (
-                            "I need your help to proceed."
-                            if decision == "ask" or phase == "ask"
-                            else "Done."
-                        )
-                    yield LoopEvent(kind="final", text=final)
-                    return
-
-                # Forced ask after too many step failures
-                if turn.consecutive_failures >= self.max_step_retries:
-                    history[:] = self._trim(history)
-                    final = visible or (
-                        "I hit repeated failures and need your help to continue. "
-                        "Please clarify the goal or constraints."
-                    )
-                    if "[[decision:ask]]" not in (content or "").lower():
-                        final = final.rstrip() + "\n\n(What should I try next?)"
-                    yield LoopEvent(kind="final", text=final)
-                    return
-
-                # Keep iterating: reason more / execute next step
-                turn.no_tool_continues += 1
-                if turn.no_tool_continues >= self.max_no_tool_continues:
-                    history[:] = self._trim(history)
+            # Surface model deliberation (think blocks + plan/reason text) before tools
+            if tool_calls:
+                if think_text:
                     yield LoopEvent(
-                        kind="final",
-                        text=visible
-                        or (
-                            "Stopping after several reasoning-only turns without "
-                            "a clear done/ask decision. Please restate the goal "
-                            "or say how to proceed."
+                        kind="status",
+                        text=_compose_thinking(think_text, visible, phase),
+                    )
+                elif visible:
+                    yield LoopEvent(
+                        kind="status",
+                        text=_compose_thinking("", visible, phase),
+                    )
+
+            # ── No tools this round: task is completed or model is asking/answering user ────
+            if not tool_calls:
+                if think_text:
+                    yield LoopEvent(
+                        kind="status",
+                        text=_compose_thinking(
+                            think_text,
+                            visible if decision == "continue" else "",
+                            phase,
                         ),
                     )
-                    return
 
-                logger.info(
-                    f"[{session_id}] no-tool continue "
-                    f"#{turn.no_tool_continues} decision={decision!r} phase={phase!r}"
+                # Continue if model requested continue or produced an initial plan without tools/decisions
+                should_continue = (
+                    decision == "continue"
+                    or (
+                        decision not in ("done", "ask")
+                        and phase not in ("done", "ask")
+                        and "plan" in visible.lower()
+                        and not turn.tools_used_this_turn
+                        and turn.no_tool_continues == 0
+                    )
                 )
-                self._inject_system(messages, history, _CONTINUE_NUDGE)
-                continue
+
+                if should_continue:
+                    if visible and not think_text:
+                        yield LoopEvent(kind="status", text=visible)
+                    turn.no_tool_continues += 1
+                    if turn.no_tool_continues < self.max_no_tool_continues:
+                        self._inject_system(messages, history, _CONTINUE_NUDGE)
+                        continue
+
+                history[:] = self._trim(history)
+                final = visible or (
+                    "I need your help to proceed."
+                    if decision == "ask" or phase == "ask"
+                    else (think_text or "(done)")
+                )
+                yield LoopEvent(kind="final", text=final)
+                return
 
             # ── Tools requested ───────────────────────────────────────
             turn.no_tool_continues = 0
@@ -595,11 +577,19 @@ class LeanLoop:
         failed = _tool_result_failed(output) if approved else False
         if failed:
             turn.consecutive_failures += 1
+            err_msg = ""
+            if "timed out" in output.lower():
+                err_msg = "Command timed out"
+            elif output.strip():
+                first = output.strip().splitlines()[0]
+                if len(first) < 100 and any(w in first.lower() for w in ("error", "failed", "denied", "not found")):
+                    err_msg = first
+            detail = f" — {err_msg}" if err_msg else ""
             yield LoopEvent(
                 kind="status",
                 text=(
                     f"Step failed ({turn.consecutive_failures}/"
-                    f"{self.max_step_retries}): {name}"
+                    f"{self.max_step_retries}): {name}{detail}"
                 ),
             )
         elif approved:
@@ -830,6 +820,8 @@ def _tool_result_failed(output: str) -> bool:
     if "traceback (most recent call last)" in lower:
         return True
     if "command not found" in lower:
+        return True
+    if "command timed out" in lower or "timed out" in lower:
         return True
     if "permission denied" in lower and "error" in lower:
         return True

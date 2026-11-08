@@ -965,11 +965,16 @@ class DiscordAgentServer:
         @client.event
         async def on_ready() -> None:
             logger.info(f"Discord bot connected as {client.user} — serving agent '{self._agent.name}'")
-            if self._activity_status:
-                try:
-                    await client.change_presence(activity=discord.Game(name=self._activity_status))
-                except Exception as exc:
-                    logger.warning(f"Failed to set Discord presence: {exc}")
+            # Announce presence on every ready, including after a reconnect, and
+            # whether or not an activity is configured — so the bot is explicitly
+            # online rather than relying on the gateway default.
+            try:
+                await client.change_presence(
+                    status=discord.Status.online,
+                    activity=discord.Game(name=self._activity_status) if self._activity_status else None,
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to set Discord presence: {exc}")
 
         @client.event
         async def on_message(message: Any) -> None:
