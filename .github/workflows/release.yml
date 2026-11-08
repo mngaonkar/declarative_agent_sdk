@@ -17,7 +17,12 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Run the test suite
         run: |
+          # The interpreter comes from .python-version (3.14). Without that pin,
+          # requires-python = ">=3.14" lets uv pick 3.15, where several
+          # dependencies have no wheels yet and fall back to source builds that
+          # fail. Printed below so the log shows what actually ran.
           uv sync --extra discord --extra dev
+          uv run python -V
           uv run pytest tests/ -q
 
   # The wheel is py3-none-any, so build it exactly once. Producing it in both

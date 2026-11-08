@@ -63,7 +63,6 @@ dependencies = [
     "jsonschema>=4.25.0",
     "rich>=14.0.0",
     "httpx>=0.28.0",
-    "term-image>=0.7.2",
     "vertexai>=1.71.1",
     "langchain-openai>=1.4.3",
 ]
