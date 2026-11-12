@@ -1,13 +1,22 @@
-name: Release
+name: Build and release
 
-# Tag push publishes a release; manual runs just produce artifacts.
+# Every push and PR builds and tests, so a downloadable wheel exists for any
+# commit. Publishing a GitHub release is the only tag-gated part.
 on:
   push:
+    branches: [master]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
+# Read-only by default; only the release job gets write access.
 permissions:
-  contents: write
+  contents: read
+
+# A newer push to the same branch makes an in-flight run redundant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -40,9 +49,57 @@ jobs:
           # uv.lock is gitignored, so key the cache on pyproject.toml
           # instead; the default glob matches nothing and never invalidates.
           cache-dependency-glob: pyproject.toml
-      # Wheel only. Add --sdist here if a source distribution is ever wanted.
-      - name: Build wheel
-        run: uv build --package declarative-agent-sdk --wheel --out-dir dist
+
+      # Wheel and sdist. The sdist used to be left out because its filename
+      # looked like the PyApp binary bundles that shared the release; those are
+      # gone, so a release can now carry a proper source distribution too.
+      - name: Build wheel and sdist
+        run: |
+          set -euo pipefail
+          # --package: the repo root is a uv workspace whose member
+          # examples/simple_agent is also buildable.
+          uv build --package declarative-agent-sdk --wheel --sdist --out-dir dist
+          # pyproject pins a static version, so the filename alone does not say
+          # which commit a download came from. Put both in the run summary.
+          {
+            echo "### Build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| wheel | \`$(basename dist/*.whl)\` |"
+            echo "| sdist | \`$(basename dist/*.tar.gz)\` |"
+            echo "| artifact | \`wheel-${{ github.sha }}\` |"
+            echo "| commit | \`${{ github.sha }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The version is typed in two files, so they can drift apart silently:
+      # the wheel would say one thing and `declarative-agent version` another.
+      - name: pyproject and __version__.py agree
+        run: |
+          set -euo pipefail
+          pyproject="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
+          module="$(grep -m1 '^__version__ = ' __version__.py | cut -d'"' -f2)"
+          echo "pyproject.toml=$pyproject  __version__.py=$module"
+          if [ "$pyproject" != "$module" ]; then
+            echo "::error::version mismatch: pyproject.toml says $pyproject, __version__.py says $module" >&2
+            exit 1
+          fi
+
+      # Without this, tagging v0.9.2 on a tree still pinned to 0.9.1 publishes
+      # a release whose assets all claim 0.9.1 — and the mistake is only
+      # visible to whoever downloads them.
+      - name: Tag matches the built version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          built="$(basename dist/*.whl | cut -d- -f2)"
+          echo "tag=$GITHUB_REF_NAME ($tag)  built=$built"
+          if [ "$tag" != "$built" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the built version $built — bump version in pyproject.toml and __version__.py, or move the tag" >&2
+            exit 1
+          fi
+
       - name: Check the wheel carries no repo junk
         run: |
           set -euo pipefail
@@ -52,6 +109,17 @@ jobs:
           fi
           unzip -l dist/*.whl | grep -q 'declarative_agent_sdk/cli/main.py'
 
+      # Catches the mistake the junk check cannot: a wheel that installs but
+      # whose console script or discord transport is broken.
+      - name: Install the wheel and smoke-test it
+        run: |
+          set -euo pipefail
+          uv venv --python 3.14 /tmp/wheelcheck
+          uv pip install --python /tmp/wheelcheck/bin/python "$(echo dist/*.whl)[discord]"
+          /tmp/wheelcheck/bin/declarative-agent version
+          /tmp/wheelcheck/bin/declarative-agent discord --help > /dev/null
+          /tmp/wheelcheck/bin/python -c "import declarative_agent_sdk, discord; print('import ok')"
+
       # The deploy scripts are what users run on a host, so a syntax error in
       # them breaks installs without failing any Python test.
       - name: Check the deploy scripts parse
@@ -60,29 +128,57 @@ jobs:
           bash -n packaging/deploy/install.sh
           bash -n packaging/deploy/uninstall.sh
 
+      # pyproject pins a static version, so every commit's wheel has the same
+      # filename. The run id and sha in the artifact name keep downloads from
+      # different commits distinguishable.
       - uses: actions/upload-artifact@v4
         with:
-          name: python-package
-          path: dist/*.whl
+          name: wheel-${{ github.sha }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
           if-no-files-found: error
+          retention-days: 30
 
   release:
     needs: wheel
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+
       - name: Checksums
         run: |
+          set -euo pipefail
           cd artifacts
-          sha256sum * > SHA256SUMS
+          sha256sum ./*.whl ./*.tar.gz > SHA256SUMS
           cat SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/*.whl
+            artifacts/*.tar.gz
             artifacts/SHA256SUMS
+          # Default is false, which would happily publish a release with no
+          # assets attached if a path stopped matching.
+          fail_on_unmatched_files: true
           generate_release_notes: true
+
+      - name: Where the assets are
+        run: |
+          set -euo pipefail
+          base="${{ github.server_url }}/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+          wheel="$(basename artifacts/*.whl)"
+          {
+            echo "### Released ${GITHUB_REF_NAME}"
+            echo ""
+            echo '```bash'
+            echo "pip install \"declarative-agent-sdk[discord] @ $base/$wheel\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
