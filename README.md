@@ -24,23 +24,44 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed flows and package layout.
 
 ## Install
 
-Not published to PyPI yet, so install from this repo, from git, or from a
-release artifact.
+Not published to PyPI yet. Install from a published release, from git, or from a
+checkout. Releases are at
+[/releases](https://github.com/mngaonkar/declarative_agent_sdk/releases) and
+carry a wheel, an sdist and `SHA256SUMS`.
+
+**Use `uv`, not `pip`.** This is ~30 direct dependencies with loose lower
+bounds, and pip's resolver does not finish: it backtracks for several minutes
+and exits with `error: resolution-too-deep` (reproduced on Arch with Python
+3.14.7 and pip 26.3). uv resolves the same graph in seconds, and it fetches
+Python 3.14 itself if the host does not have it.
 
 ```bash
+# From a published release — no checkout, nothing to download by hand
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python \
+  "declarative-agent-sdk[discord] @ https://github.com/mngaonkar/declarative_agent_sdk/releases/download/v0.9.2/declarative_agent_sdk-0.9.2-py3-none-any.whl"
+.venv/bin/declarative-agent version
+
+# From a wheel already on disk — one wheel works on every platform (py3-none-any)
+uv pip install --python .venv/bin/python "./declarative_agent_sdk-0.9.2-py3-none-any.whl[discord]"
+
+# From git, pinned to a tag
+uv pip install --python .venv/bin/python \
+  "declarative-agent-sdk[discord] @ git+https://github.com/mngaonkar/declarative_agent_sdk.git@v0.9.2"
+
 # From a checkout (development)
 uv sync --extra discord --extra dev
-# or
-pip install -e ".[discord]"
-
-# From git, no checkout needed
-pip install "declarative-agent-sdk[discord] @ git+https://github.com/mngaonkar/declarative_agent_sdk.git"
-
-# From a release wheel — one wheel works on every platform (py3-none-any)
-pip install "declarative_agent_sdk-<version>-py3-none-any.whl[discord]"
 ```
 
 Extras: `discord` (Discord bot), `tools` (Tavily), `dev` (pytest, ruff, mypy).
+
+The wheel carries the SDK only — `examples/` is not packaged. To run an example
+against an installed wheel, take its directory from the matching tag:
+
+```bash
+curl -sSL https://github.com/mngaonkar/declarative_agent_sdk/archive/refs/tags/v0.9.2.tar.gz \
+  | tar -xz --strip-components=2 declarative_agent_sdk-0.9.2/examples/a2a_lean
+```
 
 **Python 3.14 exactly** for now. `requires-python = ">=3.14"` would also accept
 3.15, but several dependencies have no 3.15 wheels yet and fall back to source

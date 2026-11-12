@@ -5,10 +5,13 @@ Run the **lean** deliberative loop behind the shared A2A transport (`AIAgentServ
 ## Prerequisites
 
 ```bash
-# from repo root
-pip install -e ".[a2a]"   # or your venv that already has a2a + uvicorn
+# from repo root — a2a-sdk and uvicorn are core dependencies, no extra needed
+uv sync
 export OPENAI_API_KEY=sk-...
 ```
+
+Installing from a release wheel instead? See [Install](../../README.md#install);
+`examples/` is not packaged, so take this directory from the matching tag.
 
 ## Start the server
 

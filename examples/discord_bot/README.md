@@ -94,7 +94,9 @@ One-time, in the [Discord developer portal](https://discord.com/developers/appli
    ```
 
    `68672` = View Channels + Send Messages + Read Message History + Add Reactions. Reactions are what the ✅/❌ tool approval flow uses; drop it only if you set `tools_approval_required: false`.
-5. Install the dependency if you have not: `pip install "declarative-agent-sdk[discord]"`.
+5. Install the dependency if you have not: `uv sync --extra discord` from a
+   checkout, or the `discord` extra of a release wheel — see
+   [Install](../../README.md#install).
 
 Then `python run_bot.py --check` to confirm, and `python run_bot.py` to serve.
 
