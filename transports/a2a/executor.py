@@ -2,9 +2,7 @@ from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 from declarative_agent_sdk.core.base_agent import BaseAgent
 from a2a.server.tasks import TaskUpdater
-from a2a.types import Part, TaskState
-from google.protobuf import struct_pb2
-from google.protobuf.json_format import ParseDict
+from a2a.types import TaskState
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.core.utils import remove_think_content
 from declarative_agent_sdk.transports.a2a.base_executor import BaseExecutor
@@ -36,7 +34,14 @@ class AIAgentExecutor(BaseExecutor):
             if event.is_final_response() and not event.long_running_tool_ids and event.content and event.content.parts:
                 """Final response received, send TASK_COMPLETED update to A2A client.
                 """
-                final_response = event.content.parts[0].text
+                # Every text part, not parts[0]: an answer streamed as several
+                # chunks, or text followed by a data part, used to reach the
+                # client truncated to whatever happened to land in the first
+                # part. Parts carry their own spacing, so join without a
+                # separator.
+                final_response = "".join(
+                    part.text for part in event.content.parts if part.text
+                )
                 if not final_response:
                     logger.warning("Final response is empty, skipping A2UI update.")
                     continue
@@ -51,12 +56,9 @@ class AIAgentExecutor(BaseExecutor):
                         message=self._formatter.format_response(result_text, ResponseType.TASK_COMPLETED, {"response": result_text}) if self._formatter else None
                     )
 
-                except Exception as e:
-                    logger.warning(f"Failure sending response: {e}")
-                    await updater.update_status(
-                        TaskState.TASK_STATE_FAILED,
-                        message=updater.new_agent_message(parts=[Part(text=str(e))])
-                    )
+                except Exception:
+                    logger.exception("Failure sending response")
+                    await self.fail(updater)
             elif event.actions.requested_tool_confirmations or event.long_running_tool_ids:
                 """Agent is requesting tool confirmation, send TASK_INPUT_REQUIRED update to A2A client with function call details for confirmation."""
                 try:
@@ -76,12 +78,9 @@ class AIAgentExecutor(BaseExecutor):
                             })]
                         )
                     )
-                except Exception as e:
-                    logger.warning(f"Failure sending event response: {e}")
-                    await updater.update_status(
-                        TaskState.TASK_STATE_FAILED,
-                        message=updater.new_agent_message(parts=[Part(text=str(e))])
-                    )
+                except Exception:
+                    logger.exception("Failure sending event response")
+                    await self.fail(updater)
             else:
                 """For any other events (like intermediate responses), we can send a TASK_WORKING update to the A2A client to indicate that the agent is still processing."""
                 logger.warning("Received event with no actionable content.")

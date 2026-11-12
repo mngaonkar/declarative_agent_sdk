@@ -245,3 +245,112 @@ class TestLeanA2AExecutor:
         await executor._execute_implementation(ctx, updater)
 
         assert any(s == TaskState.TASK_STATE_INPUT_REQUIRED for s, _ in updates)
+
+
+# ---------------------------------------------------------------------------
+# Regressions in the shared BaseExecutor / AIAgentExecutor plumbing
+# ---------------------------------------------------------------------------
+
+def _mock_updater(sink: List[Any]) -> MagicMock:
+    """TaskUpdater double that records every status transition."""
+    updater = MagicMock()
+    updater.update_status = AsyncMock(
+        side_effect=lambda state, message=None: sink.append((state, message))
+    )
+    updater.new_agent_message = MagicMock(
+        side_effect=lambda parts=None: SimpleNamespace(parts=parts or [])
+    )
+    updater.start_work = AsyncMock()
+    return updater
+
+
+def _agent_yielding(*events: AgentEvent) -> MagicMock:
+    agent = MagicMock()
+
+    async def invoke(_context):
+        for event in events:
+            yield event
+
+    agent.invoke = invoke
+    return agent
+
+
+class TestExecutorRegressions:
+    @pytest.mark.asyncio
+    async def test_malformed_request_raises_instead_of_going_silent(self):
+        """A missing task_id must reach the request handler as an A2AError.
+
+        It used to be caught by execute()'s own `except Exception`, where the
+        updater was still None, so nothing was enqueued and the caller got an
+        empty stream with no terminal event and no error.
+        """
+        from a2a.utils.errors import A2AError
+
+        executor = AIAgentExecutor(MagicMock(), formatter=TextResponseFormatter())
+        ctx = SimpleNamespace(
+            task_id=None, context_id="ctx-1", message=MagicMock(), current_task=None
+        )
+        queue = MagicMock()
+        queue.enqueue_event = AsyncMock()
+
+        with pytest.raises(A2AError):
+            await executor.execute(ctx, queue)
+
+    @pytest.mark.asyncio
+    async def test_multi_part_final_answer_is_not_truncated(self):
+        """Every text part of the final answer reaches the client.
+
+        Reading parts[0] alone silently dropped the rest of a chunked answer.
+        """
+        from declarative_agent_sdk.core.agent_event import Content, Part
+
+        event = AgentEvent(is_final=True)
+        event.content = Content(
+            [Part(text="first chunk. "), Part(text="second chunk. "), Part(text="third chunk.")]
+        )
+        executor = AIAgentExecutor(_agent_yielding(event), formatter=TextResponseFormatter())
+
+        updates: List[Any] = []
+        updater = _mock_updater(updates)
+        await executor._execute_implementation(SimpleNamespace(message="q"), updater)
+
+        completed = [m for s, m in updates if s == TaskState.TASK_STATE_COMPLETED]
+        assert completed, "expected a TASK_COMPLETED update"
+        assert completed[0].parts[0].text == "first chunk. second chunk. third chunk."
+
+    @pytest.mark.asyncio
+    async def test_agent_failure_does_not_leak_the_exception_text(self):
+        """The client gets a generic message; the detail only goes to the log."""
+        from declarative_agent_sdk.transports.a2a.base_executor import (
+            EXECUTION_FAILED_MESSAGE,
+        )
+
+        secret = "/home/someone/.env OPENAI_API_KEY=sk-leaked"
+
+        async def boom(_context):
+            raise RuntimeError(secret)
+            yield  # pragma: no cover - generator marker
+
+        agent = MagicMock()
+        agent.invoke = boom
+        executor = AIAgentExecutor(agent, formatter=TextResponseFormatter())
+
+        updates: List[Any] = []
+        updater = _mock_updater(updates)
+        ctx = SimpleNamespace(
+            task_id="task-1", context_id="ctx-1", message=MagicMock(), current_task=object()
+        )
+        queue = MagicMock()
+        queue.enqueue_event = AsyncMock()
+
+        with patch(
+            "declarative_agent_sdk.transports.a2a.base_executor.TaskUpdater",
+            return_value=updater,
+        ):
+            await executor.execute(ctx, queue)
+
+        failed = [m for s, m in updates if s == TaskState.TASK_STATE_FAILED]
+        assert failed, "expected a TASK_FAILED update"
+        sent_text = failed[0].parts[0].text
+        assert sent_text == EXECUTION_FAILED_MESSAGE
+        assert secret not in sent_text

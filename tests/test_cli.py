@@ -20,12 +20,12 @@ from declarative_agent_sdk.cli.main import (
 
 
 # ---------------------------------------------------------------------------
-# Entry-point shape — PyApp invokes this as an attribute chain
+# Entry-point shape — callers invoke this as an attribute chain
 # ---------------------------------------------------------------------------
 
 class TestEntryPointShape:
     def test_submodule_is_not_shadowed_by_the_function(self):
-        """PYAPP_EXEC_SPEC runs `declarative_agent_sdk.cli.main.main()`.
+        """Callers run `declarative_agent_sdk.cli.main.main()`.
 
         Re-exporting `main` in cli/__init__.py would make `.main` resolve to the
         function, and the second `.main` would then raise AttributeError.
@@ -38,10 +38,10 @@ class TestEntryPointShape:
         assert declarative_agent_sdk.cli.main is main_module
 
     def test_run_propagates_the_exit_code(self):
-        """PyApp discards the return value, so run() must raise SystemExit.
+        """A caller that discards the return value still needs the exit code.
 
-        Pointing PYAPP_EXEC_SPEC at main() made the binary always exit 0, even
-        when the command had failed.
+        run() must raise SystemExit; returning main()'s int would silently exit 0
+        even when the command had failed.
         """
         with pytest.raises(SystemExit) as excinfo:
             run()

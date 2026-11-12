@@ -1,0 +1,63 @@
+# systemd unit template for the Discord agent.
+#
+# install.sh fills in the PREFIX, USER and GROUP placeholders below and writes
+# the result to /etc/systemd/system/declarative-agent-discord.service. To do it
+# by hand, substitute those three tokens yourself.
+#
+# The prefix is the agent directory: agent.yaml, instructions.md, skills/,
+# workspace/, .env and the .venv holding the installed SDK.
+
+[Unit]
+Description=Declarative Agent SDK - Discord bot
+Documentation=https://github.com/mngaonkar/declarative_agent_sdk
+# network-online, not plain network: the first thing the process does is open a
+# TLS gateway connection to Discord, which fails outright without a route.
+Wants=network-online.target
+After=network-online.target
+
+# A bad token and a crashed process both exit 1 (cli/main.py), so without a
+# start limit a misconfigured bot would reconnect-fail forever and risk getting
+# the token flagged. Five failures in five minutes stops it; fix the cause and
+# `systemctl reset-failed declarative-agent-discord` to clear the latch.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@PREFIX@
+
+# The CLI loads the .env sitting beside the config (cli/main.py), so the token
+# stays in one 0600 file owned by this user instead of being duplicated here.
+ExecStart=@PREFIX@/.venv/bin/declarative-agent discord \
+    --config @PREFIX@/agent.yaml \
+    --log-level INFO
+
+# Without this, Python block-buffers stdout when it is a pipe and journald gets
+# the bot's output in silent 8KB bursts.
+Environment=PYTHONUNBUFFERED=1
+
+# always, not on-failure: SIGTERM shutdown exits 0 (serve() in cli/main.py), and
+# an unexpected clean exit should still be brought back. An explicit
+# `systemctl stop` never triggers a restart regardless.
+Restart=always
+RestartSec=5s
+
+# serve() waits up to 10s for discord.py to close its session before returning;
+# give it room so the stop is graceful rather than SIGKILLed mid-flush.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Deliberately light hardening. The agent's own tools write files and run
+# scripts (exec_command, write_file, run_script), so ProtectSystem=strict,
+# ReadOnlyPaths or ProtectHome would break the agent at runtime rather than at
+# startup — a failure that only shows up when a user asks it to do something.
+NoNewPrivileges=true
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

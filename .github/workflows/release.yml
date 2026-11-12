@@ -1,4 +1,4 @@
-name: Build binaries
+name: Release
 
 # Tag push publishes a release; manual runs just produce artifacts.
 on:
@@ -29,8 +29,7 @@ jobs:
           uv run python -V
           uv run pytest tests/ -q
 
-  # The wheel is py3-none-any, so build it exactly once. Producing it in both
-  # matrix jobs would upload two identical files that collide on merge.
+  # The wheel is py3-none-any, so one build covers every platform.
   wheel:
     needs: test
     runs-on: ubuntu-latest
@@ -41,9 +40,7 @@ jobs:
           # uv.lock is gitignored, so key the cache on pyproject.toml
           # instead; the default glob matches nothing and never invalidates.
           cache-dependency-glob: pyproject.toml
-      # Wheel only: an sdist would land as declarative_agent_sdk-<v>.tar.gz,
-      # easily confused with the declarative-agent-<v>-<target>.tar.gz binary
-      # bundles in the same release. Add --sdist here if you want one.
+      # Wheel only. Add --sdist here if a source distribution is ever wanted.
       - name: Build wheel
         run: uv build --package declarative-agent-sdk --wheel --out-dir dist
       - name: Check the wheel carries no repo junk
@@ -54,69 +51,23 @@ jobs:
             exit 1
           fi
           unzip -l dist/*.whl | grep -q 'declarative_agent_sdk/cli/main.py'
+
+      # The deploy scripts are what users run on a host, so a syntax error in
+      # them breaks installs without failing any Python test.
+      - name: Check the deploy scripts parse
+        run: |
+          set -euo pipefail
+          bash -n packaging/deploy/install.sh
+          bash -n packaging/deploy/uninstall.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: python-package
           path: dist/*.whl
           if-no-files-found: error
 
-  build:
-    needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # macos-latest is Apple Silicon (arm64). Do not pin macos-14 — that
-          # image is retired and the job fails instantly with
-          # "The configuration 'macos-14-arm64-us-default' is not supported".
-          - runner: macos-latest
-            target: aarch64-apple-darwin
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
-        with:
-          # uv.lock is gitignored, so key the cache on pyproject.toml
-          # instead; the default glob matches nothing and never invalidates.
-          cache-dependency-glob: pyproject.toml
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      # Both targets build natively on their own runner, so no cross-compilation.
-      - name: Build binary
-        run: ./packaging/build-binary.sh ${{ matrix.target }}
-
-      # The binary installs its dependencies on first run, so this smoke test
-      # exercises the real cold path: embedded Python unpack + dependency
-      # install + our entry point.
-      - name: Smoke test
-        run: |
-          set -euo pipefail
-          STAGE=$(echo dist/declarative-agent-*-${{ matrix.target }}/)
-          cd "$STAGE"
-          ./declarative-agent version
-          ./declarative-agent --help
-          ./declarative-agent discord --help
-          # No token here, so --check must fail cleanly rather than hang or crash.
-          if ./declarative-agent discord --check; then
-            echo "expected --check to fail without DISCORD_BOT_TOKEN" >&2
-            exit 1
-          fi
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: declarative-agent-${{ matrix.target }}
-          path: dist/declarative-agent-*-${{ matrix.target }}.tar.gz
-          if-no-files-found: error
-
   release:
-    needs: [build, wheel]
+    needs: wheel
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -132,7 +83,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/*.tar.gz
             artifacts/*.whl
             artifacts/SHA256SUMS
           generate_release_notes: true

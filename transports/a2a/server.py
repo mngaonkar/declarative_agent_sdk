@@ -65,13 +65,17 @@ class AIAgentServer():
         )
 
     def run(self):
+        # Both failure paths below raise rather than return. Logging and
+        # returning meant a server that never bound a socket exited 0, which a
+        # supervisor (systemd, launchd, Docker) reads as a clean shutdown and
+        # `systemctl start` reports as success.
         try:
             import uvicorn
-        except ImportError:
-            logger.error("uvicorn is not installed. Please install it with 'pip install uvicorn' to run the server.")
-            return
+        except ImportError as exc:
+            raise RuntimeError(
+                "uvicorn is required to run the A2A server — pip install uvicorn"
+            ) from exc
 
-        try:
-            uvicorn.run(self.app, host=self._host, port=self._port)
-        except Exception as e:
-            logger.error(f"Error running server: {e}")
+        # Deliberately not wrapped: "address already in use" and friends must
+        # reach the caller as a non-zero exit, not a log line.
+        uvicorn.run(self.app, host=self._host, port=self._port)

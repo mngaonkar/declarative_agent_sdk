@@ -24,18 +24,28 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed flows and package layout.
 
 ## Install
 
+Not published to PyPI yet, so install from this repo, from git, or from a
+release artifact.
+
 ```bash
-# From this repo
-uv sync
+# From a checkout (development)
+uv sync --extra discord --extra dev
 # or
 pip install -e ".[discord]"
 
-# Optional extras
-pip install "declarative-agent-sdk[discord]"   # Discord bot
-pip install "declarative-agent-sdk[tools]"     # Tavily, etc.
+# From git, no checkout needed
+pip install "declarative-agent-sdk[discord] @ git+https://github.com/mngaonkar/declarative_agent_sdk.git"
+
+# From a release wheel — one wheel works on every platform (py3-none-any)
+pip install "declarative_agent_sdk-<version>-py3-none-any.whl[discord]"
 ```
 
-Python **3.14+** (see `pyproject.toml`).
+Extras: `discord` (Discord bot), `tools` (Tavily), `dev` (pytest, ruff, mypy).
+
+**Python 3.14 exactly** for now. `requires-python = ">=3.14"` would also accept
+3.15, but several dependencies have no 3.15 wheels yet and fall back to source
+builds that fail — so [`.python-version`](.python-version) pins 3.14, which uv
+honours automatically.
 
 ---
 
@@ -107,20 +117,33 @@ declarative-agent discord --config agent.yaml
 declarative-agent version
 ```
 
-### 4. Standalone binary (no Python needed)
+### 4. Run it as a service (auto-restart)
 
 ```bash
-./packaging/build-binary.sh                            # host target
-./packaging/build-binary.sh x86_64-unknown-linux-gnu   # explicit target
+sudo ./packaging/deploy/install.sh --service-user youruser   # Linux, systemd
+./packaging/deploy/install.sh                                # macOS, launchd
 ```
 
-Produces `dist/declarative-agent-<version>-<target>.tar.gz` — a
-[PyApp](https://ofek.dev/pyapp/) executable with an embedded CPython 3.14, plus
-`agent.yaml`, `instructions.md` and `skills/` beside it. Unpack and run from
-anywhere; config paths resolve relative to the YAML. Dependencies install on
-first run (~20-45s, a few hundred MB), then startup is immediate.
-Targets built in CI: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`.
-See [packaging/README-dist.md](packaging/README-dist.md).
+Installs the wheel into its own venv under `/opt/discord-agent` (Linux) or
+`$HOME/.declarative-agent-discord` (macOS), registers a supervised service that
+restarts on crash, and caps the retry rate so a bad token cannot loop against
+Discord's API. Re-run to upgrade; `uninstall.sh` removes it. Details:
+[packaging/deploy/](packaging/deploy/).
+
+### CLI
+
+```
+declarative-agent discord --config PATH   serve an agent as a Discord bot
+                          --check         verify token, intent, permissions
+                          --env-file PATH explicit .env
+                          --prefix STR    command prefix (default "!ask ")
+                          --activity STR  the bot's "Playing ..." status
+                          --embed         answers as embed cards
+                          --log-level LVL DEBUG|INFO|WARNING|ERROR|CRITICAL
+declarative-agent version
+```
+
+Also available as `python -m declarative_agent_sdk.cli`.
 
 Full setup notes: [examples/discord_bot/README.md](examples/discord_bot/README.md).
 
@@ -184,7 +207,7 @@ transports/
   discord/            # DiscordAgentServer
   a2a/                # A2A server, client, executor, formatters
 workflows/            # multi-agent YAML graphs
-packaging/            # PyApp build script + distributed README
+packaging/deploy/     # install.sh + systemd / launchd service templates
 examples/discord_bot/
 ```
 
@@ -397,18 +420,28 @@ Multi-agent LangGraph workflows are configured in YAML and built with `WorkflowF
 | `TAVILY_API_KEY` | `tavily_search` tool |
 | `DISCORD_BOT_TOKEN` | Discord bot |
 
-`.env` next to the example or repo root is loaded when using `run_bot.py`.
+Credentials are read from the environment, or from the first `.env` found:
+`--env-file`, then beside the agent config, then `./.env`. Missing ones are
+reported at startup with the exact variable to set, rather than failing on the
+first model call.
 
 ---
 
 ## Development
 
 ```bash
-uv sync
+uv sync --extra discord --extra dev     # same as CI
 source .venv/bin/activate
-pytest tests/ -q
+
+pytest tests/ -q                                # 202 tests
 pytest tests/test_discord_agent_server.py -q    # Discord transport only
+pytest tests/test_cli.py -q                     # CLI / entry point
 ```
+
+CI ([`.github/workflows/release.yml`](.github/workflows/release.yml)) runs the
+suite, then builds the wheel and a binary per platform. A tag push (`v*`)
+publishes a release; `gh workflow run "Build binaries"` produces the artifacts
+without creating one.
 
 ---
 

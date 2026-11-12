@@ -3,12 +3,18 @@ from abc import ABC, abstractmethod
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
-from a2a.utils.errors import UnsupportedOperationError
+from a2a.utils.errors import A2AError, UnsupportedOperationError
 from a2a.types import Part, TaskState, Task, TaskStatus
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 
 logger = get_logger(__name__)
+
+# What a caller is told when the agent or workflow raises. The exception itself
+# is logged, not sent: str(exc) routinely carries filesystem paths, prompt
+# fragments and provider error bodies, and any client that can reach the RPC
+# endpoint would receive them.
+EXECUTION_FAILED_MESSAGE = "The agent could not complete this request."
 
 
 class BaseExecutor(AgentExecutor, ABC):
@@ -82,6 +88,19 @@ class BaseExecutor(AgentExecutor, ABC):
         """
         pass
 
+    async def fail(self, updater: TaskUpdater, text: str = EXECUTION_FAILED_MESSAGE) -> None:
+        """Move the task to FAILED, tolerating a failure to send that update."""
+        try:
+            await updater.update_status(
+                TaskState.TASK_STATE_FAILED,
+                message=updater.new_agent_message(parts=[Part(text=text)]),
+            )
+        except Exception:
+            # Not a bare `except`: that also swallowed CancelledError and
+            # KeyboardInterrupt, so a cancelled request could not be cancelled
+            # and Ctrl-C was absorbed by the server.
+            logger.exception("Failed to send the FAILED status")
+
     async def execute(
         self,
         context: RequestContext,
@@ -93,23 +112,29 @@ class BaseExecutor(AgentExecutor, ABC):
         Initializes task updater, delegates to implementation,
         and handles errors uniformly.
         """
-        updater = None
-        try:
-            updater = await self._initialize_task_updater(context, event_queue)
-            assert updater is not None, "TaskUpdater initialization failed"
+        # Outside the try below, deliberately. An A2AError raised here (missing
+        # task_id, context_id or message) is a protocol error that the request
+        # handler maps to a JSON-RPC or gRPC error for the caller. Catching it
+        # alongside agent failures left the caller with an empty stream and no
+        # terminal event at all, because there is no TaskUpdater yet to report
+        # a failure through.
+        updater = await self._initialize_task_updater(context, event_queue)
 
-            logger.info(f"Updater initialized successfully for task_id: {context.task_id}, context_id: {context.context_id}")
+        logger.info(
+            f"Updater initialized successfully for task_id: {context.task_id}, "
+            f"context_id: {context.context_id}"
+        )
+
+        try:
             await self._execute_implementation(context, updater)
-        except Exception as e:
-            logger.error(f"Error during execution: {e}")
-            if updater:
-                try:
-                    await updater.update_status(
-                        TaskState.TASK_STATE_FAILED,
-                        message=updater.new_agent_message(parts=[Part(text=f"An error occurred: {str(e)}")])
-                    )
-                except:
-                    logger.error(f"Failed to send error status: {e}")
+        except A2AError:
+            # Same reasoning: protocol errors belong to the request handler.
+            raise
+        except Exception:
+            # exception() so the traceback reaches the log, while the client
+            # gets EXECUTION_FAILED_MESSAGE instead of str(exc).
+            logger.exception("Error during execution")
+            await self.fail(updater)
 
     async def cancel(
         self,

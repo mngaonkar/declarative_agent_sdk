@@ -414,11 +414,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 def run() -> None:
     """Entry point for callers that ignore ``main()``'s return value.
 
-    PyApp's ``PYAPP_EXEC_SPEC`` generates ``module.attr()`` and discards the
-    result, so pointing it at :func:`main` would make the process always exit 0
-    no matter what went wrong.  Raising ``SystemExit`` carries the code out.
-    Setuptools' console script wraps ``main()`` in ``sys.exit()`` itself, so it
-    can use either.
+    A caller that invokes ``module.attr()`` and discards the result would make
+    the process always exit 0 no matter what went wrong.  Raising ``SystemExit``
+    carries the code out.  Setuptools' console script wraps ``main()`` in
+    ``sys.exit()`` itself, so it can use either.
     """
     raise SystemExit(main())
 

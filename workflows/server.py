@@ -66,13 +66,13 @@ class AIWorkflowServer():
         )
 
     def run(self):
+        # Same reasoning as AIAgentServer.run: a server that never started must
+        # not exit 0, or a supervisor treats the failure as a clean shutdown.
         try:
             import uvicorn
-        except ImportError:
-            logger.error("uvicorn is not installed. Please install it with 'pip install uvicorn' to run the server.")
-            return
+        except ImportError as exc:
+            raise RuntimeError(
+                "uvicorn is required to run the workflow server — pip install uvicorn"
+            ) from exc
 
-        try:
-            uvicorn.run(self.app, host=self._host, port=self._port)
-        except Exception as e:
-            logger.error(f"Error running server: {e}")
+        uvicorn.run(self.app, host=self._host, port=self._port)

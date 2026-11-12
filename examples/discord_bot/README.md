@@ -30,8 +30,9 @@ python run_bot.py --check
 declarative-agent discord --config agent.yaml --check
 ```
 
-A standalone binary with no Python dependency is also available — see
-[packaging/README-dist.md](../../packaging/README-dist.md).
+To run this bot as a managed service that restarts after a crash, see
+[packaging/deploy/](../../packaging/deploy/) — `install.sh` sets it up under
+systemd on Linux or launchd on macOS.
 
 To test the transport's behaviour without a token, an API key, or a network, run its test suite instead — it covers mention/DM/prefix routing, working-status updates, `<think>` stripping, 2000-character splitting, per-channel sessions, the ✅/❌ tool-approval round trip (approve, deny, timeout), and error reporting:
 
