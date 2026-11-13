@@ -1,66 +1,83 @@
 #!/usr/bin/env bash
 #
-# Remove the Discord agent service installed by install.sh.
+# Remove an agent created by install.sh: stop its supervisord program, drop the
+# program config, and optionally delete its directory. Non-interactive, like
+# its counterpart, so an orchestrating agent can tear down sub-agents
+# unattended.
 #
-# By default this stops and unregisters the service but leaves the install
-# directory alone, because it holds your .env and everything the agent wrote to
-# workspace/. Pass --purge to delete it too.
+#   ./uninstall.sh --name researcher             # stop and unregister
+#   ./uninstall.sh --name researcher --purge     # also delete its directory
+#   ./uninstall.sh --list
 #
-#   ./packaging/deploy/uninstall.sh --help
+# Without --purge the install directory is left alone, because it holds the
+# agent's .env and whatever it wrote to workspace/.
+#
+# Exit status 0 when the agent is gone, 1 on a usage error. Removing something
+# that was never installed is not an error; --json says what was found.
 
 set -euo pipefail
 
-SERVICE_NAME="declarative-agent-discord"
-LABEL="com.declarative-agent.discord"
+META_FILE=".agent-meta"
 
-info() { printf '==> %s\n' "$*"; }
+info() { printf '%s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+NAME=""
 PREFIX=""
-SYSTEM_SCOPE=0
 PURGE=0
-ASSUME_YES=0
+JSON=0
+LIST=0
 
 usage() {
   cat <<USAGE
-Remove the Discord agent service.
+Remove an agent created by install.sh.
+
+  uninstall.sh --name NAME [--purge] [--json]
+  uninstall.sh --list
 
 Options:
-  --prefix DIR   install directory (default: the same as install.sh)
-  --system       macOS: remove the LaunchDaemon rather than the LaunchAgent
-  --purge        also delete the install directory, including .env and
-                 workspace/ — asks first unless --yes is given
-  --yes          do not prompt for the --purge confirmation
+  --name NAME    agent to remove (required unless --list)
+  --prefix DIR   install directory, if it is not the default for this NAME
+  --purge        delete the install directory too, including .env and
+                 workspace/. Guarded: refuses anything that does not look
+                 like an agent install.
+  --json         print one JSON result object on stdout
+  --list         list installed agents as JSON and exit
   -h, --help     this message
 USAGE
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --name)   NAME="${2:-}"; shift 2 ;;
     --prefix) PREFIX="${2:-}"; shift 2 ;;
-    --system) SYSTEM_SCOPE=1; shift ;;
     --purge)  PURGE=1; shift ;;
-    --yes)    ASSUME_YES=1; shift ;;
+    --json)   JSON=1; shift ;;
+    --list)   LIST=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
 
+# --- platform (same roots install.sh uses) ---------------------------------
+
 OS="$(uname -s)"
+IS_ROOT=0
+[ "$(id -u)" -eq 0 ] && IS_ROOT=1
+
 case "$OS" in
   Linux)
-    command -v systemctl >/dev/null || die "systemctl not found"
-    [ "$(id -u)" -eq 0 ] || die "removing /etc/systemd/system/$SERVICE_NAME.service needs root — re-run with sudo"
-    : "${PREFIX:=/opt/discord-agent}"
+    if [ "$IS_ROOT" -eq 1 ]; then
+      AGENTS_ROOT="/opt/declarative-agent"
+    else
+      AGENTS_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/declarative-agent"
+    fi
     ;;
   Darwin)
-    if [ "$SYSTEM_SCOPE" -eq 1 ]; then
-      [ "$(id -u)" -eq 0 ] || die "removing a LaunchDaemon needs root — re-run with sudo"
-      : "${PREFIX:=/opt/declarative-agent-discord}"
+    if [ "$IS_ROOT" -eq 1 ]; then
+      AGENTS_ROOT="/opt/declarative-agent"
     else
-      # Same reasoning as install.sh: launchctl acts on the caller's own domain.
-      [ "$(id -u)" -ne 0 ] || die "a LaunchAgent lives in your own launchd domain — re-run without sudo, or pass --system"
-      : "${PREFIX:=$HOME/.declarative-agent-discord}"
+      AGENTS_ROOT="$HOME/.declarative-agent"
     fi
     ;;
   *)
@@ -68,53 +85,123 @@ case "$OS" in
     ;;
 esac
 
+SUPERVISOR_HOME="$AGENTS_ROOT/supervisor"
+SUPERVISOR_VENV="$SUPERVISOR_HOME/.venv"
+SUPERVISOR_CONF="$SUPERVISOR_HOME/supervisord.conf"
+SUPERVISOR_CONFD="$SUPERVISOR_HOME/conf.d"
+
+sctl() { "$SUPERVISOR_VENV/bin/supervisorctl" -c "$SUPERVISOR_CONF" "$@"; }
+
+if [ "$LIST" -eq 1 ]; then
+  first=1
+  printf '['
+  for meta in "$AGENTS_ROOT"/*/"$META_FILE"; do
+    [ -f "$meta" ] || continue
+    [ "$first" -eq 1 ] || printf ','
+    first=0
+    printf '%s' "$(cat "$meta")"
+  done
+  printf ']\n'
+  exit 0
+fi
+
+[ -n "$NAME" ] || die "--name is required (see --help)"
+case "$NAME" in
+  *[!a-z0-9_-]*) die "--name may only contain a-z, 0-9, '_' and '-': '$NAME'" ;;
+esac
+
+: "${PREFIX:=$AGENTS_ROOT/$NAME}"
+
 # --- stop and unregister ---------------------------------------------------
 
 REMOVED=0
+PURGED=0
+ACTIONS=""
 
-if [ "$OS" = "Linux" ]; then
-  UNIT="/etc/systemd/system/$SERVICE_NAME.service"
-  if [ -f "$UNIT" ]; then
-    # disable --now stops it and drops the multi-user.target symlink in one go.
-    systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
-    rm -f "$UNIT"
-    systemctl daemon-reload
-    # Without this a latched start limit survives and confuses the next install.
-    systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
-    info "removed $UNIT"
-    REMOVED=1
+note() { ACTIONS="$ACTIONS${ACTIONS:+,}\"$1\""; info "$2"; }
+
+PROGRAM_CONF="$SUPERVISOR_CONFD/$NAME.conf"
+
+if [ -x "$SUPERVISOR_VENV/bin/supervisorctl" ] && [ -f "$SUPERVISOR_CONF" ]; then
+  if sctl pid >/dev/null 2>&1; then
+    # stop before removing the config: `update` on a deleted config stops it
+    # too, but doing it explicitly means the JSON can report what happened.
+    if sctl stop "$NAME" >/dev/null 2>&1; then
+      REMOVED=1
+      note "stopped" "stopped program $NAME"
+    fi
   else
-    info "no systemd unit installed at $UNIT"
+    info "supervisord is not running; removing the program config only"
+  fi
+fi
+
+if [ -f "$PROGRAM_CONF" ]; then
+  rm -f "$PROGRAM_CONF"
+  REMOVED=1
+  note "config-removed" "removed $PROGRAM_CONF"
+  # reread+update makes supervisord forget the program entirely, so a later
+  # reinstall of the same name is an add rather than a confusing no-op.
+  if sctl pid >/dev/null 2>&1; then
+    sctl reread >/dev/null 2>&1 || true
+    sctl update >/dev/null 2>&1 || true
   fi
 else
-  if [ "$SYSTEM_SCOPE" -eq 1 ]; then
-    PLIST="/Library/LaunchDaemons/$LABEL.plist"
-    DOMAIN="system"
-  else
-    PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-    DOMAIN="gui/$(id -u)"
-  fi
-  # Boot out whether or not the plist is still on disk: the job can be loaded
-  # from an earlier install whose file was already deleted by hand.
-  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-    info "booted out $DOMAIN/$LABEL"
-    REMOVED=1
-  fi
-  if [ -f "$PLIST" ]; then
-    rm -f "$PLIST"
-    info "removed $PLIST"
-    REMOVED=1
-  fi
-  [ "$REMOVED" -eq 1 ] || info "no launchd job installed for $LABEL"
+  info "no supervisord program config at $PROGRAM_CONF"
 fi
+
+# Agents created before the switch to supervisord registered a launchd job or
+# a systemd unit of their own. Their metadata still says so, and without this
+# a --purge would delete the directory and leave that registration behind,
+# pointing at paths that no longer exist.
+LEGACY_KIND=""
+if [ -f "$PREFIX/$META_FILE" ]; then
+  LEGACY_KIND="$(sed -n 's/.*"service_kind"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PREFIX/$META_FILE" | head -1)"
+fi
+
+case "$LEGACY_KIND" in
+  systemd)
+    LEGACY_UNIT="/etc/systemd/system/declarative-agent-$NAME.service"
+    if [ -f "$LEGACY_UNIT" ]; then
+      [ "$IS_ROOT" -eq 1 ] || die "this agent predates supervisord and has a systemd unit at
+    $LEGACY_UNIT
+  Removing it needs root — re-run with sudo."
+      systemctl disable --now "declarative-agent-$NAME" >/dev/null 2>&1 || true
+      rm -f "$LEGACY_UNIT"
+      systemctl daemon-reload
+      systemctl reset-failed "declarative-agent-$NAME" 2>/dev/null || true
+      REMOVED=1
+      note "legacy-unit-removed" "removed pre-supervisord unit $LEGACY_UNIT"
+    fi
+    ;;
+  launchagent|launchdaemon)
+    LEGACY_LABEL="com.declarative-agent.$NAME"
+    if [ "$LEGACY_KIND" = "launchdaemon" ]; then
+      LEGACY_PLIST="/Library/LaunchDaemons/$LEGACY_LABEL.plist"
+      LEGACY_DOMAIN="system"
+    else
+      LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
+      LEGACY_DOMAIN="gui/$(id -u)"
+    fi
+    if launchctl bootout "$LEGACY_DOMAIN/$LEGACY_LABEL" 2>/dev/null; then
+      REMOVED=1
+      note "legacy-booted-out" "booted out pre-supervisord job $LEGACY_DOMAIN/$LEGACY_LABEL"
+    fi
+    if [ -f "$LEGACY_PLIST" ]; then
+      if [ "$LEGACY_KIND" = "launchdaemon" ] && [ "$IS_ROOT" -ne 1 ]; then
+        die "removing $LEGACY_PLIST needs root — re-run with sudo"
+      fi
+      rm -f "$LEGACY_PLIST"
+      REMOVED=1
+      note "legacy-plist-removed" "removed pre-supervisord plist $LEGACY_PLIST"
+    fi
+    ;;
+esac
 
 # --- optionally delete the install directory -------------------------------
 
 purge_prefix() {
   # Done in python rather than `rm -rf "$PREFIX"` so a mistyped or surprising
-  # --prefix cannot expand into something unintended. The guards below are the
-  # point of the exercise: refuse anything that is not plausibly an install dir.
+  # --prefix cannot expand into something unintended. The guards are the point.
   python3 - "$1" <<'PY'
 import os, pathlib, shutil, sys
 
@@ -128,14 +215,14 @@ for guard in (pathlib.Path("/"), pathlib.Path.home(), pathlib.Path(os.getcwd()))
         sys.exit(f"refusing to delete {resolved}")
 if len(resolved.parts) < 3:
     sys.exit(f"refusing to delete a top-level path: {resolved}")
-# An install dir always has at least one of these; a wrong --prefix usually has
-# none, and that is the case worth catching before the delete.
-if not any((resolved / name).exists() for name in ("agent.yaml", ".venv", ".env", "workspace")):
-    sys.exit(f"{resolved} does not look like an agent install (no agent.yaml, "
-             f".venv, .env or workspace/) — delete it yourself if you meant it")
+# An agent directory always has at least one of these; a wrong --prefix usually
+# has none, and that is the case worth catching before the delete.
+markers = (".agent-meta", "agent.yaml", ".venv", ".env", "workspace")
+if not any((resolved / name).exists() for name in markers):
+    sys.exit(f"{resolved} does not look like an agent install "
+             f"(no {', '.join(markers)}) — delete it yourself if you meant it")
 
 shutil.rmtree(resolved)
-print(f"    deleted {resolved}")
 PY
 }
 
@@ -143,41 +230,33 @@ if [ "$PURGE" -eq 1 ]; then
   if [ ! -d "$PREFIX" ]; then
     info "nothing to purge at $PREFIX"
   else
-    # Checked before the prompt, so a wrong --prefix is refused outright rather
-    # than after asking the user to confirm deleting something unrecognisable.
-    LOOKS_RIGHT=0
-    for marker in agent.yaml .venv .env workspace; do
-      [ -e "$PREFIX/$marker" ] && LOOKS_RIGHT=1
-    done
-    [ "$LOOKS_RIGHT" -eq 1 ] || die "$PREFIX does not look like an agent install (no agent.yaml, .venv, .env or workspace/) — delete it yourself if you meant it"
     command -v python3 >/dev/null \
-      || die "--purge needs python3 for the guarded delete; remove $PREFIX by hand instead"
-    echo
-    echo "About to delete $PREFIX, which contains:"
-    [ -f "$PREFIX/.env" ]       && echo "  .env        your Discord token and API keys"
-    [ -d "$PREFIX/workspace" ]  && echo "  workspace/  $(find "$PREFIX/workspace" -type f 2>/dev/null | wc -l | tr -d ' ') files the agent produced"
-    [ -d "$PREFIX/skills" ]     && echo "  skills/     agent skills"
-    [ -f "$PREFIX/agent.yaml" ] && echo "  agent.yaml  agent configuration"
-    echo
-    if [ "$ASSUME_YES" -eq 0 ]; then
-      printf 'Delete it? [y/N] '
-      read -r reply
-      case "$reply" in
-        y|Y|yes|YES) ;;
-        *) info "left $PREFIX in place"; exit 0 ;;
-      esac
-    fi
+      || die "--purge needs python3 for the guarded delete; remove $PREFIX by hand"
     purge_prefix "$PREFIX"
-    info "purged $PREFIX"
+    PURGED=1
+    note "purged" "deleted $PREFIX"
   fi
 elif [ -d "$PREFIX" ]; then
-  echo
-  info "left $PREFIX in place (.env, workspace/, agent.yaml). Delete it with --purge."
+  info "left $PREFIX in place (.env, workspace/). Use --purge to delete it."
 fi
 
-echo
-if [ "$REMOVED" -eq 1 ]; then
-  info "service removed"
+# --- result ----------------------------------------------------------------
+
+if [ "$JSON" -eq 1 ]; then
+  cat <<JSON
+{"name":"$NAME",
+ "prefix":"$PREFIX",
+ "service_removed":$([ "$REMOVED" -eq 1 ] && echo true || echo false),
+ "purged":$([ "$PURGED" -eq 1 ] && echo true || echo false),
+ "actions":[$ACTIONS]}
+JSON
 else
-  info "nothing was registered — if the bot is still running, it was started by hand"
+  if [ "$REMOVED" -eq 1 ]; then
+    info "agent '$NAME' removed"
+  else
+    info "nothing was registered for '$NAME' — if it is still running, it was started by hand"
+  fi
+  if [ -d "$SUPERVISOR_CONFD" ] && [ -z "$(ls -A "$SUPERVISOR_CONFD" 2>/dev/null)" ]; then
+    info "no agents left; stop supervisord with: $SUPERVISOR_VENV/bin/supervisorctl -c $SUPERVISOR_CONF shutdown"
+  fi
 fi
