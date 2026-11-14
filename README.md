@@ -292,8 +292,63 @@ examples/             # runnable samples (not in the wheel)
 |-----------|------|---------|-------------|
 | `skills_directory` | string | `skills` | Root for progressive skills (**lean**) |
 | `skills` | list | — | Skill paths for ADK/deepagent discovery |
-| `tools` | list | `[]` | Builtin/registry tool names |
+| `tools` | list | — | Allowlist of non-core tool names; omit for core + skill tools (see below) |
 | `tools_approval_required` | bool | `true` | Human approval before non-meta tools |
+
+#### How `tools:` is interpreted
+
+**Core tools are always available**, with or without a `tools:` list. Everything
+else is gated:
+
+| `tools:` in the YAML | What the agent gets |
+|----------------------|---------------------|
+| absent / empty | core tools **+** every tool discovered from the skills folder |
+| present | core tools **+** exactly the names listed — nothing else |
+
+When `tools:` is present it is the allowlist for *all* non-core tools, including
+skill-derived ones: a skill script's function must be named in `tools:` to be
+registered. A name that resolves to neither a registered tool nor a skill tool
+is skipped with a warning listing what *is* available (plus a "did you mean"
+suggestion), so typos are never silent.
+
+#### Core tools
+
+| Runtime | Always-on tools |
+|---------|-----------------|
+| `lean` | `Skill`, `list_skills`, `list_dir`, `read_file`, `write_file`, `run_script` — file access confined to the workspace, `attachments/`, the skills tree and `/tmp` |
+| `adk`, `deepagent` | `read_file`, `write_file` (plus whatever the framework itself injects, e.g. deepagents' own filesystem tools) |
+
+Under lean, `Skill`, `list_skills`, `list_dir` and `read_file` are auto-approved;
+every other tool goes through the approval gate when
+`tools_approval_required: true`. The sandboxed lean core versions win on name
+collision, so listing the builtin `read_file` / `write_file` in `tools:` has no
+effect there — use `exec_command` if you need unrestricted file access.
+
+#### Available built-in tools
+
+Every function in [`tools/builtin/`](tools/builtin) is loaded into the global
+`ToolRegistry` at startup; list a name under `tools:` to turn it into a function
+schema for the model.
+
+| Name | What it does | Needs |
+|------|--------------|-------|
+| `exec_command` | Run a shell command and return stdout/stderr/exit code (blocking, with timeout) | — |
+| `exec_async` | Start a long-running command in the background, returns a job id | — |
+| `check_exec_async` | Poll an `exec_async` job for completion and output | — |
+| `web_request` | HTTP request (GET/POST/…); optionally strips HTML to text | — |
+| `tavily_search` | Web search via the Tavily API | `TAVILY_API_KEY` |
+| `read_file` | Read a UTF-8 text file from any path (**core**) | — |
+| `write_file` | Write a UTF-8 text file to any path (**core**) | — |
+
+```yaml
+tools:
+  - web_request
+  - exec_command
+```
+
+Add your own with `ToolRegistry.register("my_tool", my_fn)` or
+`ToolRegistry.register_from_scripts_folder("path/to/scripts")` **before**
+building the agent — then list the name in `tools:` like any builtin.
 
 ### Workspace & other
 

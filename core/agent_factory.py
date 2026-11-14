@@ -25,7 +25,6 @@ from declarative_agent_sdk.core.agent_config import CommonAgentConfig, parse_com
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.core.base_agent import BaseAgent
 from declarative_agent_sdk.core.constants import DEFAULT_MODEL
-from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -254,22 +253,14 @@ class AgentFactory:
 
     @staticmethod
     def _resolve_tool_names(tool_names: List[Any], agent_name: str) -> List[Any]:
-        if not tool_names:
-            return []
-        resolved = []
-        for item in tool_names:
-            if isinstance(item, str):
-                try:
-                    resolved.append(ToolRegistry.get(item))
-                except ValueError:
-                    logger.info(
-                        f"Tool '{item}' not in global registry for agent "
-                        f"'{agent_name}', will resolve from skills"
-                    )
-                    resolved.append(item)
-            else:
-                resolved.append(item)
-        return resolved
+        """
+        Pass the ``tools:`` list through untouched.
+
+        Names are resolved by the runtime, not here: only the runtime knows its
+        skill-derived tools, and resolving twice would warn twice. See
+        ``ToolRegistry.resolve``.
+        """
+        return list(tool_names or [])
 
     @staticmethod
     def _resolve_middleware(middleware_config: List[Any]) -> List[Any]:

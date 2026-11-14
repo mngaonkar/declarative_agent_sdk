@@ -1,7 +1,8 @@
 import os
+import difflib
 import importlib.util
 import inspect
-from typing import Any, Dict, List, Callable
+from typing import Any, Dict, List, Callable, Optional
 from pathlib import Path
 from declarative_agent_sdk.core.agent_logging import get_logger
 from dotenv import load_dotenv
@@ -13,6 +14,12 @@ class ToolRegistry:
     """Registry to map tool names to actual tool objects."""
     
     _tools: Dict[str, Any] = {}
+    _builtins_registered: bool = False
+
+    # Tools every agent gets whether or not the YAML declares a `tools:` list.
+    # The lean runtime has its own (sandboxed) core set in LeanToolRegistry;
+    # these are the equivalents for the adk / deepagent runtimes.
+    CORE_TOOL_NAMES: tuple = ('read_file', 'write_file')
     
     @classmethod
     def register(cls, name: str, tool: Any) -> None:
@@ -43,8 +50,12 @@ class ToolRegistry:
         return list(cls._tools.keys())
     
     @classmethod
-    def register_built_in_tools(cls):
-        """Register built-in tools from builtin directory."""
+    def register_built_in_tools(cls, force: bool = False):
+        """Register built-in tools from builtin directory (once per class)."""
+        # __dict__ (not getattr) so a subclass with its own _tools still loads.
+        if cls.__dict__.get('_builtins_registered') and not force:
+            return
+        cls._builtins_registered = True
         builtin_dir = Path(__file__).parent / 'builtin'
         if not builtin_dir.exists():
             logger.warning(f"Built-in tools directory does not exist: {builtin_dir}")
@@ -132,7 +143,89 @@ class ToolRegistry:
             return 0
     
     @classmethod
+    def as_dict(cls) -> Dict[str, Any]:
+        """Snapshot of the registry as a name -> callable mapping."""
+        return dict(cls._tools)
+
+    @classmethod
+    def core_tools(cls) -> List[Any]:
+        """
+        Always-available tools.
+
+        Registered regardless of the YAML ``tools:`` list, which only ever
+        gates *non-core* tools.
+        """
+        cls.register_built_in_tools()
+        return [cls._tools[name] for name in cls.CORE_TOOL_NAMES if name in cls._tools]
+
+    @classmethod
+    def dedupe(cls, tools: List[Any]) -> List[Any]:
+        """Drop repeats (by tool name, else identity), keeping first occurrence."""
+        seen = set()
+        unique = []
+        for tool in tools:
+            key = getattr(tool, '__name__', None) or id(tool)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(tool)
+        return unique
+
+    @classmethod
+    def unknown_tool_message(
+        cls,
+        name: str,
+        agent_name: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Warning text for a tool name that is not in the registry."""
+        cls.register_built_in_tools()
+        available = sorted(set(cls._tools) | set(extra or {}))
+        close = difflib.get_close_matches(name, available, n=1, cutoff=0.6)
+        owner = f" for agent '{agent_name}'" if agent_name else ""
+        hint = f" Did you mean '{close[0]}'?" if close else ""
+        return (
+            f"Unknown tool '{name}' in the tools list{owner}; it will be skipped "
+            f"and the agent will not have that capability.{hint} "
+            f"Available tools: {', '.join(available) or '(none)'}"
+        )
+
+    @classmethod
+    def resolve(
+        cls,
+        items: Optional[List[Any]],
+        agent_name: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        keep_unresolved: bool = False,
+    ) -> List[Any]:
+        """
+        Resolve a YAML ``tools:`` list to callables.
+
+        Strings are looked up in the registry, then in ``extra`` (a runtime's
+        skill-derived tools); anything else (a callable passed programmatically)
+        is kept as-is. Every name that resolves in neither logs a warning naming
+        the available tools, so a typo is never silent.
+        """
+        cls.register_built_in_tools()
+        resolved: List[Any] = []
+        for item in items or []:
+            if not isinstance(item, str):
+                resolved.append(item)
+                continue
+            tool = cls._tools.get(item)
+            if tool is None and extra:
+                tool = extra.get(item)
+            if tool is not None:
+                resolved.append(tool)
+                continue
+            logger.warning(cls.unknown_tool_message(item, agent_name, extra))
+            if keep_unresolved:
+                resolved.append(item)
+        return resolved
+
+    @classmethod
     def clear(cls) -> None:
         """Clear all registered tools. Useful for testing."""
         cls._tools.clear()
+        cls._builtins_registered = False
         logger.debug("Cleared all tools from registry")

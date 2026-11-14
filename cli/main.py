@@ -118,6 +118,25 @@ def preflight(config: dict, *, require_discord_token: bool = False) -> List[str]
     return problems
 
 
+def preflight_warnings(config: dict) -> List[str]:
+    """Return non-fatal config problems — the agent still starts without these."""
+    from declarative_agent_sdk.tools.tool_registry import ToolRegistry
+
+    warnings: List[str] = []
+    names = [t for t in (config.get("tools") or []) if isinstance(t, str)]
+    # With `skills:` declared, a name may be a skill-derived tool that only the
+    # running agent can resolve; it warns there instead.
+    if names and not config.get("skills"):
+        ToolRegistry.register_built_in_tools()
+        known = set(ToolRegistry.list_available())
+        warnings.extend(
+            ToolRegistry.unknown_tool_message(name, config.get("name"))
+            for name in names
+            if name not in known
+        )
+    return warnings
+
+
 def load_checked_config(config_path: Path, *, require_discord_token: bool) -> Optional[dict]:
     """Load the config and verify credentials; None means "stop, told them why"."""
     from declarative_agent_sdk.core.agent_factory import AgentFactory
@@ -133,6 +152,13 @@ def load_checked_config(config_path: Path, *, require_discord_token: bool) -> Op
               f"containing {DEFAULT_CONFIG_NAME}.\n",
               file=sys.stderr)
         return None
+
+    warnings = preflight_warnings(config)
+    if warnings:
+        print(f"\nWarning — {config_path.name}:\n", file=sys.stderr)
+        for warning in warnings:
+            print(f"  !  {warning}", file=sys.stderr)
+        print(file=sys.stderr)
 
     problems = preflight(config, require_discord_token=require_discord_token)
     if problems:

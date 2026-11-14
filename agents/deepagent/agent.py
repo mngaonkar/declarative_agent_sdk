@@ -375,20 +375,20 @@ class LangChainAIAgent(BaseAgent):
                 skills_list=skills,
             )
 
+        # core tools are always registered; `tools:`, when declared, is the
+        # allowlist for every non-core tool, skill-derived ones included.
         ToolRegistry.register_built_in_tools()
-        resolved: List[Any] = list(skills_registry._get_tool_registry().get_all())
+        skill_tools = skills_registry._get_tool_registry().as_dict()
+        resolved: List[Any] = list(ToolRegistry.core_tools())
 
         if tools:
-            for tool_item in tools:
-                if isinstance(tool_item, str):
-                    try:
-                        resolved.append(ToolRegistry.get(tool_item))
-                    except ValueError:
-                        logger.warning(f"Tool '{tool_item}' not found in registry, skipping")
-                else:
-                    resolved.append(tool_item)
+            resolved.extend(
+                ToolRegistry.resolve(tools, agent_name=name, extra=skill_tools)
+            )
         else:
-            resolved.extend(ToolRegistry.get_all())
+            resolved.extend(skill_tools.values())
+
+        resolved = ToolRegistry.dedupe(resolved)
 
         lc_tools: List[BaseTool] = []
         for fn in resolved:

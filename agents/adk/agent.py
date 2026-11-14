@@ -159,24 +159,31 @@ class ADKAIAgent(BaseAgent):
                 skill_directory=skills_directory, skills_list=skills
             )
 
-        # Collect tool callables
+        # Collect tool callables.
+        #   core tools      -> always registered
+        #   skill tools     -> registered when no `tools:` list is declared
+        #   `tools:` given  -> that list is the allowlist for every non-core
+        #                      tool, skill-derived ones included
         ToolRegistry.register_built_in_tools()
-        resolved_tools: List[Any] = list(skills_registry._get_tool_registry().get_all())
+        skill_tools = skills_registry._get_tool_registry().as_dict()
+        resolved_tools: List[Any] = list(ToolRegistry.core_tools())
 
         if tools:
-            for tool_item in tools:
-                if isinstance(tool_item, str):
-                    try:
-                        resolved_tools.append(ToolRegistry.get(tool_item))
-                    except ValueError:
-                        logger.warning(f"Tool '{tool_item}' not found in registry, skipping")
-                else:
-                    resolved_tools.append(tool_item)
+            resolved_tools.extend(
+                ToolRegistry.resolve(tools, agent_name=name, extra=skill_tools)
+            )
         else:
-            logger.info("No tools specified; using all tools from built-in registry")
-            resolved_tools.extend(ToolRegistry.get_all())
+            logger.info(
+                "No tools declared; registering core tools "
+                f"+ {len(skill_tools)} skill tool(s)"
+            )
+            resolved_tools.extend(skill_tools.values())
 
-        logger.info(f"Resolved tools: {resolved_tools}")
+        resolved_tools = ToolRegistry.dedupe(resolved_tools)
+        logger.info(
+            f"Resolved {len(resolved_tools)} tool(s): "
+            f"{[getattr(t, '__name__', repr(t)) for t in resolved_tools]}"
+        )
 
         # Optional tool-confirmation wrapping
         if tools_approval_required:

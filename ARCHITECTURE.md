@@ -404,6 +404,22 @@ or a global agent key.
 
 ```
 Global ToolRegistry  ──► tools/builtin/*.py
+    register_built_in_tools()   loads every builtin once per class (idempotent)
+    core_tools()                always registered, whatever the YAML says
+                                (adk/deepagent: read_file, write_file;
+                                 lean has its own sandboxed core set)
+    resolve(names, agent, extra)  the single YAML `tools:` -> callable path;
+                                `extra` carries the runtime's skill tools, so
+                                a listed skill tool resolves too; a name in
+                                neither warns (suggestion + available list)
+                                and is dropped
+
+YAML `tools:` semantics (all three runtimes)
+    omitted  -> core tools + every skill-folder tool
+    present  -> core tools + exactly the listed names (skill tools included:
+                a skill tool must be listed to be registered)
+    AgentFactory does not pre-resolve names — only the runtime knows its
+    skill tools, so it owns the single authoritative resolution + warning.
 
 ADK / deepagent agents may use instance-isolated SkillRegistry subclasses
 so skill tools do not collide across agents in one process.

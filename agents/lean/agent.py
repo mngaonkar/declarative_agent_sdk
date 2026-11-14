@@ -120,18 +120,13 @@ class LeanAIAgent(BaseAgent):
             self._skills, workspace=workspace_directory
         )
 
-        # Bridge user / builtin callables
+        # Bridge user / builtin callables (unknown names warn inside resolve)
         ToolRegistry.register_built_in_tools()
-        resolved: List[Any] = []
-        if tools:
-            for item in tools:
-                if isinstance(item, str):
-                    try:
-                        resolved.append(ToolRegistry.get(item))
-                    except ValueError:
-                        logger.warning(f"Tool '{item}' not found; skipping")
-                elif callable(item):
-                    resolved.append(item)
+        resolved: List[Any] = [
+            item
+            for item in ToolRegistry.resolve(tools, agent_name=name)
+            if callable(item)
+        ]
         for fn in resolved:
             try:
                 self._tools.add_callable(fn)

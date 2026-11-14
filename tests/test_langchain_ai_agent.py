@@ -4,6 +4,8 @@ Unit tests for LangChainAIAgent.
 All LLM and I/O calls are mocked — no API keys or network access required.
 """
 
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -44,7 +46,7 @@ def _make_agent(chunks: list | None = None, name: str = "test_agent") -> LangCha
     Build a LangChainAIAgent with all external dependencies mocked:
       - create_deep_agent  → fake graph
       - read_from_file     → static instruction string
-      - ToolRegistry       → empty (no built-in tools)
+      - ToolRegistry       → empty (no built-in / core tools)
     Uses /tmp as workspace so no temp-dir cleanup is needed.
     """
     if chunks is None:
@@ -60,7 +62,7 @@ def _make_agent(chunks: list | None = None, name: str = "test_agent") -> LangCha
             return_value="You are a helpful assistant.",
         ),
         patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.register_built_in_tools"),
-        patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.get_all", return_value=[]),
+        patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.core_tools", return_value=[]),
     ):
         return LangChainAIAgent(
             name=name,
@@ -257,7 +259,7 @@ class TestLangChainAIAgentInit:
                 return_value="System instruction.",
             ),
             patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.register_built_in_tools"),
-            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.get_all", return_value=[]),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.core_tools", return_value=[]),
         ):
             LangChainAIAgent(
                 name="agent",
@@ -420,7 +422,7 @@ class TestToolApprovalWiring:
                 return_value="sys",
             ),
             patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.register_built_in_tools"),
-            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.get_all", return_value=[]),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.core_tools", return_value=[]),
         ):
             def fake_tool(x: str) -> str:
                 """demo tool"""
@@ -455,7 +457,7 @@ class TestToolApprovalWiring:
                 return_value="sys",
             ),
             patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.register_built_in_tools"),
-            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.get_all", return_value=[]),
+            patch("declarative_agent_sdk.agents.deepagent.agent.ToolRegistry.core_tools", return_value=[]),
         ):
             LangChainAIAgent(
                 name="a",
@@ -585,3 +587,100 @@ class TestInvoke:
 
         [e async for e in agent.invoke(ctx)]
         assert captured_queries[0] == "Hello world"
+
+
+# ---------------------------------------------------------------------------
+# `tools:` gating — core always on, listed names are the allowlist
+# ---------------------------------------------------------------------------
+
+class TestToolGating:
+    """
+    Contract (shared by all runtimes):
+      - core tools are registered whatever the YAML says
+      - no `tools:` list  -> core tools + every skill-folder tool
+      - `tools:` present  -> core tools + exactly the listed names, and a
+                             skill tool must be listed to be registered
+    """
+
+    @staticmethod
+    def _skills_dir(tmp_path):
+        skill = tmp_path / "skills" / "toc"
+        (skill / "scripts").mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: toc\ndescription: Generate a table of contents\n---\nUse toc_build.\n"
+        )
+        (skill / "scripts" / "toc_build.py").write_text(
+            'def toc_build(text: str) -> str:\n    """Build a TOC."""\n    return "toc"\n'
+        )
+        return str(tmp_path / "skills")
+
+    @staticmethod
+    def _tool_names(tools=None, skills_directory="skills", skills=None):
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured["tools"] = [t.name for t in (kwargs.get("tools") or [])]
+            return _graph_mock([])
+
+        with (
+            patch(
+                "declarative_agent_sdk.agents.deepagent.agent.create_deep_agent",
+                side_effect=fake_create,
+            ),
+            patch(
+                "declarative_agent_sdk.agents.deepagent.agent.read_from_file",
+                return_value="You are a helpful assistant.",
+            ),
+        ):
+            LangChainAIAgent(
+                name="gating_agent",
+                instruction_file="instructions.md",
+                model="claude-3-5-haiku-20241022",
+                provider="anthropic",
+                workspace_directory="/tmp",
+                tools_approval_required=False,
+                tools=tools,
+                skills=skills,
+                skills_directory=skills_directory,
+            )
+        return sorted(captured.get("tools") or [])
+
+    def test_core_tools_without_any_tools_list(self):
+        assert self._tool_names() == ["read_file", "write_file"]
+
+    def test_no_tools_list_registers_skill_tools(self, tmp_path):
+        names = self._tool_names(
+            skills_directory=self._skills_dir(tmp_path), skills=["toc"]
+        )
+        assert names == ["read_file", "toc_build", "write_file"]
+
+    def test_listed_tool_is_added_to_core(self):
+        assert self._tool_names(tools=["exec_command"]) == [
+            "exec_command",
+            "read_file",
+            "write_file",
+        ]
+
+    def test_skill_tool_must_be_listed_when_tools_present(self, tmp_path):
+        skills_dir = self._skills_dir(tmp_path)
+        listed = self._tool_names(
+            tools=["toc_build"], skills_directory=skills_dir, skills=["toc"]
+        )
+        assert listed == ["read_file", "toc_build", "write_file"]
+
+        gated = self._tool_names(
+            tools=["web_request"], skills_directory=skills_dir, skills=["toc"]
+        )
+        assert gated == ["read_file", "web_request", "write_file"]
+
+    def test_unknown_name_leaves_only_core(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert self._tool_names(tools=["exec_commnd"]) == [
+                "read_file",
+                "write_file",
+            ]
+        assert "Unknown tool 'exec_commnd'" in caplog.text
+        assert "Did you mean 'exec_command'?" in caplog.text
+
+    def test_core_tool_listed_twice_is_not_duplicated(self):
+        assert self._tool_names(tools=["read_file"]) == ["read_file", "write_file"]
