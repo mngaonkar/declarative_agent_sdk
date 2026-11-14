@@ -5,16 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "declarative-agent-sdk"
 version = "0.9.2"
-description = "Declarative YAML-based SDK for building production-grade Google ADK agents"
+description = "YAML-first agents with peer runtimes (lean, Google ADK, deepagents), Discord and A2A transports, progressive skills and tool approval"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
 authors = [
-    {name = "Google ADK Samples Contributors"}
+    {name = "mahadev gaonkar"}
 ]
 keywords = [
     "google-adk",
     "agents",
+    "a2a",
+    "discord",
     "declarative",
     "yaml",
     "llm",
@@ -102,10 +104,11 @@ all = [
 declarative-agent = "declarative_agent_sdk.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/mngaonkar/google-adk-samples"
-Documentation = "https://github.com/mngaonkar/google-adk-samples/tree/main/sdk#readme"
-Repository = "https://github.com/mngaonkar/google-adk-samples"
-"Bug Tracker" = "https://github.com/mngaonkar/google-adk-samples/issues"
+Homepage = "https://github.com/mngaonkar/declarative_agent_sdk"
+Documentation = "https://github.com/mngaonkar/declarative_agent_sdk#readme"
+Repository = "https://github.com/mngaonkar/declarative_agent_sdk"
+"Bug Tracker" = "https://github.com/mngaonkar/declarative_agent_sdk/issues"
+Releases = "https://github.com/mngaonkar/declarative_agent_sdk/releases"
 
 # Package root maps to this directory; subpackages listed explicitly
 [tool.setuptools]

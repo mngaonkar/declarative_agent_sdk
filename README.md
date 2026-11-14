@@ -18,6 +18,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed flows and package layout.
 | **Built-in tools** | `web_request`, `tavily_search`, `exec_command`, files, lean FS tools |
 | **Tool approval** | Human-in-the-loop (Discord ✅/❌ or A2A) |
 | **Transports** | Discord bot, A2A / JSON-RPC server |
+| **Background agents** | `install.sh` provisions A2A agents under supervisord, no root needed |
 | **Multi-agent workflows** | Optional LangGraph workflows via YAML |
 
 ---
@@ -138,18 +139,27 @@ declarative-agent discord --config agent.yaml
 declarative-agent version
 ```
 
-### 4. Run it as a service (auto-restart)
+### 4. Run A2A agents as background services
 
 ```bash
-sudo ./packaging/deploy/install.sh --service-user youruser   # Linux, systemd
-./packaging/deploy/install.sh                                # macOS, launchd
+./packaging/deploy/install.sh --name researcher --provider openai --model gpt-4o-mini
+./packaging/deploy/install.sh --name coder --provider vllm \
+    --model qwen2.5-coder:latest --endpoint http://10.0.0.147:11434/v1 --json
+./packaging/deploy/install.sh --list
+./packaging/deploy/install.sh --enable-at-boot     # once per machine
+./packaging/deploy/uninstall.sh --name coder --purge
 ```
 
-Installs the wheel into its own venv under `/opt/discord-agent` (Linux) or
-`$HOME/.declarative-agent-discord` (macOS), registers a supervised service that
-restarts on crash, and caps the retry rate so a bad token cannot loop against
-Discord's API. Re-run to upgrade; `uninstall.sh` removes it. Details:
-[packaging/deploy/](packaging/deploy/).
+`install.sh` is non-interactive and self-contained: it installs the SDK from
+GitHub into a per-agent venv, generates `agent.yaml`, `instructions.md` and
+`run_server.py` from the flags, and registers the agent as a program under a
+single per-user **supervisord** (no root, same on Linux and macOS). Each agent
+gets its own directory and port (allocated from 8000 unless `--port` is given),
+binds `0.0.0.0`, and publishes this host's primary address in its agent card;
+override with `--host` / `--advertise-host` behind NAT or a proxy. `--json`
+prints one result object, so an orchestrating agent can provision sub-agents.
+Without `--enable-at-boot`, agents survive crashes but not reboots. Details:
+[packaging/deploy/README.md](packaging/deploy/README.md).
 
 ### CLI
 
@@ -161,12 +171,28 @@ declarative-agent discord --config PATH   serve an agent as a Discord bot
                           --activity STR  the bot's "Playing ..." status
                           --embed         answers as embed cards
                           --log-level LVL DEBUG|INFO|WARNING|ERROR|CRITICAL
+declarative-agent a2a                     placeholder, not wired up yet
 declarative-agent version
 ```
 
-Also available as `python -m declarative_agent_sdk.cli`.
+Also available as `python -m declarative_agent_sdk.cli`. To serve over A2A, use
+`AIAgentServer` from Python (see [A2A Server](#a2a-server)).
 
 Full setup notes: [examples/discord_bot/README.md](examples/discord_bot/README.md).
+
+### Examples
+
+| Example | Shows |
+|---------|-------|
+| [lean_agent](examples/lean_agent/) | Lean runtime, sync + streaming, a skill |
+| [adk_agent](examples/adk_agent/) | Google ADK runtime with Gemini |
+| [deepagent_agent](examples/deepagent_agent/) | `deepagents` / LangGraph runtime with HITL interrupts |
+| [simple_agent](examples/simple_agent/) | Minimal Python sync/stream usage (uv workspace member) |
+| [a2a_lean](examples/a2a_lean/) | Lean agent over A2A + interactive client with tool approval |
+| [discord_bot](examples/discord_bot/) | Discord bot with skills and file attachments |
+| [llm_wiki](examples/llm_wiki/) | Agent that maintains a markdown knowledge base |
+| [workflow](examples/workflow/) | Multi-agent LangGraph workflow from YAML |
+| [docker](examples/docker/) | Generic image + `docker compose` |
 
 Also see external samples: [declarative_agent_sdk_examples](https://github.com/mngaonkar/declarative_agent_sdk_examples).
 
@@ -228,8 +254,8 @@ transports/
   discord/            # DiscordAgentServer
   a2a/                # A2A server, client, executor, formatters
 workflows/            # multi-agent YAML graphs
-packaging/deploy/     # install.sh + systemd / launchd service templates
-examples/discord_bot/
+packaging/deploy/     # install.sh / uninstall.sh: A2A agents under supervisord
+examples/             # runnable samples (not in the wheel)
 ```
 
 ---
@@ -275,7 +301,8 @@ examples/discord_bot/
 |-----------|------|---------|-------------|
 | `workspace_directory` | string | `workspace` | Scratch / outputs |
 | `publish_url` | string | — | A2A agent card URL |
-| `enable_truncation` / `context_window` / … | | | Optional token truncation |
+| `max_tool_iterations` / `max_step_retries` / `max_no_tool_continues` / `history_limit` | int | runtime default | Loop limits |
+| `enable_truncation` / `context_window` / `truncate_strategy` / `safety_margin` | | `false` / — / `end` / `100` | Optional token truncation |
 
 ### Examples
 
@@ -384,7 +411,9 @@ Enable **MESSAGE CONTENT INTENT** in the developer portal.
 | `token` | `$DISCORD_BOT_TOKEN` | Bot token |
 | `command_prefix` | `None` | e.g. `"!ask "` |
 | `session_scope` | `channel` | `channel` \| `user` \| `global` |
-| `tools_approval` timeout | `120` | Seconds |
+| `tool_confirmation_timeout` | `120.0` | Seconds to wait for ✅/❌ |
+| `allowed_channels` | `None` | Restrict to these channel IDs |
+| `respond_to_all_messages` | `false` | Reply without a mention or prefix |
 | `format_markdown` | `true` | Discord-friendly markdown |
 | `reply_as_embed` | `false` | Post answers as embeds |
 
@@ -419,15 +448,19 @@ Lean end-to-end example (server + interactive client + tool approval):
 cd examples/a2a_lean
 export OPENAI_API_KEY=sk-...
 python run_server.py          # terminal 1
-python run_client.py          # terminal 2
+python run_client.py          # terminal 2 (AGENT_URL=... to point elsewhere)
 pytest ../../tests/test_lean_a2a.py -q   # mock LLM, no API key
 ```
+
+When the agent asks to run a tool, the client prompts
+`Approve? [y = yes, Y = yes to all, N = no]`. `Y` auto-approves every further
+tool call for the rest of the session.
 
 ---
 
 ## Workflows
 
-Multi-agent LangGraph workflows are configured in YAML and built with `WorkflowFactory`. Register node/router functions on `WorkflowRegistry` first. See [ARCHITECTURE.md](ARCHITECTURE.md) and the workflow parameter section in older docs if you maintain multi-agent pipelines.
+Multi-agent LangGraph workflows are configured in YAML and built with `WorkflowFactory`. Register node/router functions on `WorkflowRegistry` first. See [examples/workflow](examples/workflow/) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -454,15 +487,18 @@ first model call.
 uv sync --extra discord --extra dev     # same as CI
 source .venv/bin/activate
 
-pytest tests/ -q                                # 202 tests
+pytest tests/ -q                                # 209 tests
 pytest tests/test_discord_agent_server.py -q    # Discord transport only
 pytest tests/test_cli.py -q                     # CLI / entry point
 ```
 
-CI ([`.github/workflows/release.yml`](.github/workflows/release.yml)) runs the
-suite, then builds the wheel and a binary per platform. A tag push (`v*`)
-publishes a release; `gh workflow run "Build binaries"` produces the artifacts
-without creating one.
+CI ([`.github/workflows/release.yml`](.github/workflows/release.yml)) runs on
+every push and PR: the test suite, then a wheel + sdist build, a version
+consistency check (`pyproject.toml` vs `__version__.py`), a smoke install of the
+wheel, and a syntax check of the deploy scripts. The build is uploaded as a
+`wheel-<sha>` workflow artifact. A tag push (`v*`) also publishes a GitHub
+release with the wheel, sdist and `SHA256SUMS`; the tag must match the built
+version.
 
 ---
 
@@ -472,6 +508,7 @@ without creating one.
 |-----|----------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Runtimes, events, Discord images, package map |
 | [examples/discord_bot/README.md](examples/discord_bot/README.md) | Discord modes, intents, troubleshooting |
+| [packaging/deploy/README.md](packaging/deploy/README.md) | Background A2A agents under supervisord |
 | [DOCKER.md](DOCKER.md) | Container image and mounts |
 
 ---
