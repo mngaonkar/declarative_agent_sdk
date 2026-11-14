@@ -61,7 +61,12 @@ def _part_text(parts) -> str:
     return "\n".join(texts).strip()
 
 
+# Set to True once the user answers "Y" — approves all further tool calls this session.
+_auto_approve = False
+
+
 async def handle_events(client: AIAgentClient, event_stream) -> None:
+    global _auto_approve
     async for event in event_stream:
         state, parts, task_id, context_id = _unpack_event(event)
         if state is None:
@@ -85,8 +90,18 @@ async def handle_events(client: AIAgentClient, event_stream) -> None:
             fn_name = fr.get("name", "unknown tool")
             args = fr.get("args") or {}
             print(f"\nTool approval requested: {fn_name}({args})")
-            answer = input("Approve? [y/N]: ").strip().lower()
-            approved = answer in ("y", "yes")
+            if _auto_approve:
+                print("Auto-approved.")
+                approved = True
+            else:
+                answer = input(
+                    "Approve? [y = yes, Y = yes to all, N = no]: "
+                ).strip()
+                if answer == "Y":
+                    _auto_approve = True
+                    approved = True
+                else:
+                    approved = answer.lower() in ("y", "yes")
             await handle_events(
                 client,
                 client.send_tool_confirmation(task_id, context_id, fn_id, approved),

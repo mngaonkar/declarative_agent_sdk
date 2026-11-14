@@ -354,3 +354,74 @@ class TestExecutorRegressions:
         sent_text = failed[0].parts[0].text
         assert sent_text == EXECUTION_FAILED_MESSAGE
         assert secret not in sent_text
+
+
+# ---------------------------------------------------------------------------
+# Agent card: the A2A spec marks several fields REQUIRED
+# ---------------------------------------------------------------------------
+
+class TestAgentCard:
+    def test_required_fields_are_populated(self):
+        """version and the mode lists must be non-empty.
+
+        Without them a2a-sdk >= 1.3 logs "AgentCard is not spec-compliant" on
+        every card fetch and warns the card could be rejected outright in a
+        future major release.
+        """
+        from declarative_agent_sdk.__version__ import __version__
+        from declarative_agent_sdk.transports.a2a.utils import create_agent_card
+
+        card = create_agent_card(
+            "demo", "A demo agent", {"disk-space": "Check disk"},
+            url="http://127.0.0.1:8000/",
+        )
+
+        assert card.version == __version__
+        assert list(card.default_input_modes)
+        assert list(card.default_output_modes)
+        # Both transports exchange text plus JSON data parts (tool approval).
+        assert "text/plain" in card.default_input_modes
+        assert "application/json" in card.default_output_modes
+
+    def test_card_passes_the_sdk_validator(self):
+        """Checked against a2a's own rule rather than our reading of the spec."""
+        proto_utils = pytest.importorskip(
+            "a2a.utils.proto_utils",
+            reason="needs an a2a-sdk with warn_on_missing_required_fields",
+        )
+        if not hasattr(proto_utils, "warn_on_missing_required_fields"):
+            pytest.skip("a2a-sdk predates the required-field validator")
+
+        from declarative_agent_sdk.transports.a2a.utils import create_agent_card
+
+        # With skills and without: workflows always build a card with
+        # skills=None, and an empty skills list fails the same validator.
+        for skills in ({"disk-space": "Check disk"}, None):
+            card = create_agent_card(
+                "demo", "A demo agent", skills, url="http://127.0.0.1:8000/"
+            )
+            assert proto_utils.warn_on_missing_required_fields(card, "test") is True, (
+                f"card with skills={skills!r} is not spec-compliant"
+            )
+
+    def test_cardless_agent_still_declares_a_skill(self):
+        """skills is REQUIRED, so an agent with none gets one general entry."""
+        from declarative_agent_sdk.transports.a2a.utils import create_agent_card
+
+        card = create_agent_card("demo", "A demo agent", None)
+        assert len(card.skills) == 1
+        assert card.skills[0].id == "general"
+        assert card.skills[0].description == "A demo agent"
+
+    def test_caller_can_override(self):
+        from declarative_agent_sdk.transports.a2a.utils import create_agent_card
+
+        card = create_agent_card(
+            "demo", "A demo agent", None,
+            version="2.1.0",
+            default_input_modes=["text/plain"],
+            default_output_modes=["text/plain"],
+        )
+        assert card.version == "2.1.0"
+        assert list(card.default_input_modes) == ["text/plain"]
+        assert list(card.default_output_modes) == ["text/plain"]
