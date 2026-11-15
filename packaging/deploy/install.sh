@@ -45,7 +45,9 @@ SUPERVISOR_DIRNAME="supervisor"
 BOOT_LABEL="com.declarative-agent.supervisor"
 BOOT_UNIT="declarative-agent-supervisor"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# :-$0 keeps `set -u` happy when the script is piped (ssh ... 'bash -s' < install.sh),
+# which is how agents-control provisions a remote machine.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo .)"
 if [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
   UNINSTALL_HINT="$SCRIPT_DIR/uninstall.sh"
 else
@@ -109,6 +111,7 @@ PREFIX=""
 SOURCE_KIND="git"
 GIT_REF="$DEFAULT_GIT_REF"
 RELEASE_VERSION="$DEFAULT_RELEASE"
+WHEEL_FILE=""
 INSTRUCTIONS=""
 INSTRUCTIONS_FILE=""
 TOOLS="web_request,exec_command"
@@ -160,9 +163,13 @@ Behaviour:
   --no-approval          run tools without asking the client first
 
 Install:
-  --source KIND          git | release                       (default git)
+  --source KIND          git | release | wheel               (default git)
   --ref REF              git ref when --source git           (default $DEFAULT_GIT_REF)
   --version V            version when --source release       (default $DEFAULT_RELEASE)
+  --wheel FILE           wheel to install when --source wheel. The path is on
+                         THIS machine. Lets an agent run code that is not
+                         pushed anywhere: build the wheel, send it over, point
+                         at it.
   --env-file F           seed .env from F (0600); otherwise the provider's key
                          is taken from this script's environment
   --service-user USER    account the service runs as (default \$SUDO_USER or you)
@@ -204,6 +211,7 @@ while [ $# -gt 0 ]; do
     --source)            SOURCE_KIND="${2:-}"; shift 2 ;;
     --ref)               GIT_REF="${2:-}"; shift 2 ;;
     --version)           RELEASE_VERSION="${2:-}"; shift 2 ;;
+    --wheel)             WHEEL_FILE="${2:-}"; shift 2 ;;
     --env-file)          ENV_FILE="${2:-}"; shift 2 ;;
     --service-user)      SERVICE_USER="${2:-}"; shift 2 ;;
     --no-service)        SERVICE=0; shift ;;
@@ -502,7 +510,11 @@ esac
 
 case "$SOURCE_KIND" in
   git|release) ;;
-  *) die "--source must be git or release: '$SOURCE_KIND'" ;;
+  wheel)
+    [ -n "$WHEEL_FILE" ] || die "--source wheel needs --wheel FILE"
+    [ -f "$WHEEL_FILE" ] || die "--wheel not found on this machine: $WHEEL_FILE"
+    ;;
+  *) die "--source must be git, release or wheel: '$SOURCE_KIND'" ;;
 esac
 
 case "$PROVIDER" in
@@ -606,6 +618,13 @@ fi
 if [ "$SOURCE_KIND" = "git" ]; then
   WHEEL_SPEC="declarative-agent-sdk @ ${GIT_URL}@${GIT_REF}"
   SOURCE_LABEL="git:$GIT_REF"
+elif [ "$SOURCE_KIND" = "wheel" ]; then
+  # A file already on this machine. --upgrade alone will not replace an
+  # installed wheel of the same version, which is the normal case when
+  # iterating on unreleased code, so this one is forced.
+  WHEEL_SPEC="$WHEEL_FILE"
+  SOURCE_LABEL="wheel:$(basename "$WHEEL_FILE")"
+  FORCE_REINSTALL=1
 else
   RELEASE_VERSION="${RELEASE_VERSION#v}"
   WHEEL_SPEC="declarative-agent-sdk @ $REPO_URL/releases/download/v${RELEASE_VERSION}/declarative_agent_sdk-${RELEASE_VERSION}-py3-none-any.whl"
@@ -803,7 +822,10 @@ if [ ! -x "$VENV/bin/python" ]; then
   info "  created venv on python $PYTHON_VERSION"
 fi
 
-uv pip install --python "$VENV/bin/python" --upgrade "$WHEEL_SPEC" >/dev/null 2>&1 \
+PIP_FLAGS="--upgrade"
+[ "${FORCE_REINSTALL:-0}" -eq 1 ] && PIP_FLAGS="--upgrade --reinstall"
+# shellcheck disable=SC2086
+uv pip install --python "$VENV/bin/python" $PIP_FLAGS "$WHEEL_SPEC" >/dev/null 2>&1 \
   || die "installing '$WHEEL_SPEC' failed"
 SDK_VERSION="$("$VENV/bin/declarative-agent" version 2>/dev/null | awk '{print $2}')"
 info "  installed SDK ${SDK_VERSION:-unknown}"

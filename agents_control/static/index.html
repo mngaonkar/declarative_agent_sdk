@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agents-control</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛠️</text></svg>">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="banner hidden" id="stale-banner">
+  <span id="stale-text"></span>
+  <button class="icon-btn" id="stale-close" title="Dismiss">×</button>
+</div>
+<div id="app" class="layout">
+
+  <!-- ─── sidebar ─────────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="dot" id="conn-dot" title="stream status"></span>
+      <strong>agents-control</strong>
+    </div>
+
+    <nav class="views">
+      <button class="view-tab active" data-view="board">Board</button>
+      <button class="view-tab" data-view="agents">Agents</button>
+      <button class="view-tab" data-view="machines">Machines</button>
+      <button class="view-tab" data-view="settings">Settings</button>
+    </nav>
+
+    <div class="side-section">
+      <div class="side-head">
+        <span>Channels</span>
+        <button class="icon-btn" id="new-channel" title="Create channel">+</button>
+      </div>
+      <ul class="channel-list" id="channel-list"></ul>
+    </div>
+
+    <div class="side-section grow">
+      <div class="side-head"><span>Agents</span></div>
+      <ul class="agent-list" id="sidebar-agents"></ul>
+    </div>
+
+    <div class="side-foot" id="side-foot"></div>
+  </aside>
+
+  <!-- ─── board view ──────────────────────────────────────────────────── -->
+  <main class="pane" id="view-board">
+    <header class="pane-head">
+      <div>
+        <h1 id="channel-title">no channel</h1>
+        <p class="sub" id="channel-topic"></p>
+      </div>
+      <div class="head-actions">
+        <button id="halt-btn" class="btn danger" hidden>Stop</button>
+        <button id="delete-channel" class="btn ghost" hidden>Delete channel</button>
+      </div>
+    </header>
+
+    <div class="board">
+      <div class="messages" id="messages">
+        <div class="empty" id="board-empty">
+          <h2>No channel selected</h2>
+          <p>Create a channel, add agents to it, then address them with
+             <code>@name.machine</code> (or just <code>@name</code> when it is
+             unambiguous). A line with no mention is just a note on the board —
+             nothing is dispatched and nothing is spent.</p>
+        </div>
+      </div>
+
+      <aside class="members">
+        <div class="side-head"><span>In this channel</span></div>
+        <ul id="member-list" class="member-list"></ul>
+        <div class="member-add">
+          <select id="member-select"></select>
+          <button class="btn small" id="member-add-btn">Add</button>
+        </div>
+      </aside>
+    </div>
+
+    <div class="composer" id="composer" hidden>
+      <div class="typing" id="typing"></div>
+      <div class="composer-row">
+        <div class="input-wrap">
+          <ul class="mention-pop hidden" id="mention-pop" role="listbox"></ul>
+          <textarea id="input" rows="1" autocomplete="off"
+                    placeholder="Message #channel — @agent.machine to address one"></textarea>
+        </div>
+        <button class="btn primary" id="send">Send</button>
+      </div>
+      <div class="hint" id="mention-hint"></div>
+    </div>
+  </main>
+
+  <!-- ─── agents view ─────────────────────────────────────────────────── -->
+  <main class="pane hidden" id="view-agents">
+    <header class="pane-head">
+      <div><h1>Agents</h1><p class="sub">Provisioned through install.sh on a registered machine</p></div>
+      <div class="head-actions">
+        <button class="btn primary" id="new-agent">Create agent</button>
+      </div>
+    </header>
+    <div class="scroll"><table class="grid" id="agents-table"></table></div>
+  </main>
+
+  <!-- ─── machines view ───────────────────────────────────────────────── -->
+  <main class="pane hidden" id="view-machines">
+    <header class="pane-head">
+      <div><h1>Machines</h1><p class="sub">macOS or Linux hosts reachable over SSH, with <code>uv</code> installed</p></div>
+      <div class="head-actions">
+        <button class="btn primary" id="new-machine">Register machine</button>
+      </div>
+    </header>
+    <div class="scroll"><table class="grid" id="machines-table"></table></div>
+  </main>
+
+  <!-- ─── settings view ───────────────────────────────────────────────── -->
+  <main class="pane hidden" id="view-settings">
+    <header class="pane-head">
+      <div><h1>Settings</h1><p class="sub">Defaults for newly created agents, and relay limits</p></div>
+    </header>
+    <div class="scroll">
+      <form class="form card" id="settings-form">
+        <label>Default framework
+          <select name="default_framework">
+            <option value="lean">lean</option>
+            <option value="adk">adk</option>
+            <option value="deepagent">deepagent</option>
+          </select>
+        </label>
+        <label>Default provider
+          <select name="default_provider">
+            <option value="openai">openai</option>
+            <option value="google">google</option>
+            <option value="anthropic">anthropic</option>
+            <option value="vllm">vllm</option>
+          </select>
+        </label>
+        <label>Default model <input name="default_model" type="text"></label>
+        <label>Default SDK source
+          <select name="default_sdk_source">
+            <option value="local">this working tree (build &amp; send a wheel)</option>
+            <option value="git">git (repository branch)</option>
+          </select>
+          <small>What a new agent installs. <code>git</code> cannot see unpushed work.</small>
+        </label>
+        <label>Default tools <input name="default_tools" type="text">
+          <small>Comma-separated. <code>send_to_agent</code> is what lets an agent talk to a peer.</small>
+        </label>
+        <label class="check"><input name="default_approval" type="checkbox">
+          Require tool approval by default
+          <small>Off means agents run <code>exec_command</code> without asking.</small>
+        </label>
+        <label>Agent reply timeout (s) <input name="agent_timeout_seconds" type="number" min="10" max="86400">
+          <small>How long the board follows a turn. Dispatch submits the task and polls,
+                 so this is a budget on the agent's work — not a limit on how long it
+                 may stay quiet. Waiting for an approval does not spend it.</small>
+        </label>
+        <div class="row">
+          <label>Poll every (s) <input name="poll_interval_seconds" type="number" min="1" max="60"></label>
+          <label>backing off to (s) <input name="poll_max_interval_seconds" type="number" min="1" max="120"></label>
+          <label>Poll request timeout (s) <input name="poll_request_timeout_seconds" type="number" min="5" max="600"></label>
+        </div>
+        <label>Approval timeout (s) <input name="approval_timeout_seconds" type="number" min="10" max="3600"></label>
+        <label>Max relay hops <input name="max_relay_hops" type="number" min="0" max="50">
+          <small><strong>0 = unlimited.</strong> An agent that mentions another starts a
+                 chain the board relays. This caps how far one message can travel;
+                 unlimited means you are the brake (<em>Stop</em> on the channel).</small>
+        </label>
+        <label>Channel history sent to agents <input name="transcript_context_messages" type="number" min="0" max="50">
+          <small>Agents keep history in memory and supervisord restarts them; this is what survives a bounce.</small>
+        </label>
+        <div class="form-actions"><button class="btn primary" type="submit">Save</button></div>
+      </form>
+    </div>
+  </main>
+</div>
+
+<!-- ─── modals ────────────────────────────────────────────────────────── -->
+<div class="modal-back hidden" id="modal-back">
+  <div class="modal" id="modal">
+    <header><h2 id="modal-title">…</h2><button class="icon-btn" id="modal-close">×</button></header>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<template id="tpl-channel-form">
+  <form class="form">
+    <label>Name <input name="name" placeholder="research" required pattern="[A-Za-z0-9_-]+"></label>
+    <label>Topic <input name="topic" placeholder="what this channel is for"></label>
+    <div class="form-actions"><button class="btn primary" type="submit">Create</button></div>
+  </form>
+</template>
+
+<template id="tpl-machine-form">
+  <form class="form">
+    <label>Name <input name="name" placeholder="build-box" required
+                       pattern="[A-Za-z0-9][A-Za-z0-9_-]*">
+      <small>Must be unique, and becomes half of each agent's address
+             (<code>agent.machine</code>) — no dots or spaces.</small>
+    </label>
+    <label class="check"><input name="is_local" type="checkbox"> This machine (no SSH)</label>
+    <label>Host <input name="host" placeholder="10.0.0.12 or box.local"></label>
+    <label>SSH user <input name="ssh_user" placeholder="ubuntu"></label>
+    <label>SSH key <input name="ssh_key" placeholder="~/.ssh/id_ed25519"></label>
+    <label>SSH port <input name="ssh_port" type="number" value="22"></label>
+    <p class="note">The host needs <code>uv</code> and key-based SSH. agents-control
+       stages <code>install.sh</code> under <code>~/.agents-control/bin</code> and runs it there.</p>
+    <div class="form-actions"><button class="btn primary" type="submit">Register</button></div>
+  </form>
+</template>
+
+<template id="tpl-agent-form">
+  <form class="form">
+    <label>Machine <select name="machine_id" required></select></label>
+    <label>Name <input name="name" placeholder="researcher" required pattern="[a-z0-9][a-z0-9_-]*">
+      <small>Lowercase, digits, <code>-</code> and <code>_</code> — it becomes a directory
+             and a service name. Unique per machine; agents are addressed as
+             <code>name.machine</code>.</small>
+    </label>
+    <label>Description <input name="description" placeholder="one line for the agent card"></label>
+    <div class="row">
+      <label>Framework <select name="framework">
+        <option value="lean">lean</option><option value="adk">adk</option>
+        <option value="deepagent">deepagent</option>
+      </select></label>
+      <label>Provider <select name="provider">
+        <option value="openai">openai</option><option value="google">google</option>
+        <option value="anthropic">anthropic</option><option value="vllm">vllm</option>
+      </select></label>
+    </div>
+    <label>Model <input name="model"></label>
+    <label>Endpoint <input name="endpoint" placeholder="http://10.0.0.147:11434/v1 (vLLM)"></label>
+    <label>Host interface (<code>HOST</code>)
+      <span class="field-row">
+        <select name="bind_host"></select>
+        <button type="button" class="btn small" id="bind-host-rescan" title="Read addresses from the machine">↻</button>
+      </span>
+      <small>The address the A2A server binds to, passed as <code>HOST</code> to
+             <code>run_server.py</code>, and what the agent card publishes. On a host with
+             more than one external interface, pick the one this board can reach —
+             <em>all interfaces</em> makes install.sh guess from the default route.</small>
+      <small id="bind-host-note"></small>
+    </label>
+    <label class="hidden" id="bind-host-custom-row">Host address
+      <input name="bind_host_custom" placeholder="10.0.0.132">
+    </label>
+    <label>Advertise as <input name="advertise_host" placeholder="same as HOST">
+      <small>Only needed when the address to publish differs from the bind address —
+             behind NAT, a proxy, or in a container.</small>
+    </label>
+    <label>Tools <input name="tools"></label>
+    <label>SDK source <select name="sdk_source">
+        <option value="local">this working tree (build &amp; send a wheel)</option>
+        <option value="git">git (repository branch)</option>
+      </select>
+      <small><strong>This working tree</strong> is what you want while the board and
+             the agents change together — <code>git</code> installs whatever is pushed,
+             which will not include anything uncommitted.</small>
+    </label>
+    <label>Git ref <input name="sdk_ref" placeholder="master (only used with git)"></label>
+    <label>Instructions <textarea name="instructions" rows="4"
+      placeholder="You are a research agent. Answer concisely."></textarea></label>
+    <label>API key <input name="api_key" type="password" placeholder="leave empty to use the machine's own env">
+      <small>Sent over SSH stdin to a 0600 file, handed to <code>--env-file</code>, then deleted. Never in argv.</small>
+    </label>
+    <label class="check"><input name="approval" type="checkbox" checked> Require tool approval</label>
+    <div class="form-actions"><button class="btn primary" type="submit">Create</button></div>
+    <p class="note">Provisioning builds a venv on the target and can take a few minutes.</p>
+  </form>
+</template>
+
+<template id="tpl-token-form">
+  <form class="form">
+    <p class="note">This control plane requires a token (<code>AGENTS_CONTROL_TOKEN</code>).</p>
+    <label>Token <input name="token" type="password" required></label>
+    <div class="form-actions"><button class="btn primary" type="submit">Unlock</button></div>
+  </form>
+</template>
+
+<script src="/static/md.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

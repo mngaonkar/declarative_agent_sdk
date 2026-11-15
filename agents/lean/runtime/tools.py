@@ -14,15 +14,24 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry, parse_frontmatter
+from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 
 logger = get_logger(__name__)
 
 # Tools that never need human approval (meta / discovery).
+#
+# The two board tools are here on purpose. `list_agents` only reads a roster.
+# `send_to_agent` posts a message to the board — which the agent can do anyway
+# by writing @name in its reply, with no tool and no approval — so a click in
+# front of it buys nothing and makes every hand-off tedious. What bounds a
+# cascade is the channel's Stop and max_relay_hops, not an approval prompt.
 AUTO_APPROVE_TOOLS: Set[str] = {
     "Skill",
     "list_skills",
     "list_dir",
     "read_file",
+    "send_to_agent",
+    "list_agents",
 }
 
 
@@ -219,6 +228,28 @@ class LeanToolRegistry:
             ["path"],
             self._run_script,
         )
+        self._register_board_tools()
+
+    def _register_board_tools(self) -> None:
+        """
+        Add send_to_agent and list_agents when this agent is on a board.
+
+        Core rather than opt-in: an agent that can be addressed as @name should
+        be able to answer in kind, and asking people to list a tool for the
+        thing the board is *for* is a trap — the symptom is an agent that
+        cannot bring in a peer and says nothing about why. Off a board they are
+        left out: there they could only report that there is no board, and
+        every tool offered costs tokens on every request.
+        """
+        if not ToolRegistry.on_a_board():
+            logger.debug("no AGENTS_CONTROL_URL; board tools not registered")
+            return
+        ToolRegistry.register_built_in_tools()
+        for name in ToolRegistry.BOARD_TOOL_NAMES:
+            try:
+                self.add_callable(ToolRegistry.get(name))
+            except (ValueError, Exception) as exc:   # noqa: BLE001 - never fatal
+                logger.warning(f"could not register board tool '{name}': {exc}")
 
     def _is_mutable(self, path: str) -> bool:
         abs_path = str(Path(path).expanduser().resolve())

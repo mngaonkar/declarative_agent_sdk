@@ -144,14 +144,17 @@ class AgentFactory:
             f"tools_approval_required={common.tools_approval_required})"
         )
         # Only forward loop budgets the YAML actually set, so LeanAIAgent's
-        # own defaults stay authoritative.
-        lean_kwargs = {
+        # own defaults stay authoritative. Annotated Any because the values are
+        # a mix of int and float; without it every **kwarg widens to int|float
+        # and none of them match their parameter.
+        lean_kwargs: Dict[str, Any] = {
             key: value
             for key, value in (
                 ("max_tool_iterations", common.max_tool_iterations),
                 ("max_step_retries", common.max_step_retries),
                 ("max_no_tool_continues", common.max_no_tool_continues),
                 ("history_limit", common.history_limit),
+                ("request_timeout", common.request_timeout),
             )
             if value is not None
         }

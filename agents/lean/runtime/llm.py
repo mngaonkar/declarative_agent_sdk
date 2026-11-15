@@ -17,6 +17,13 @@ class LLMError(Exception):
     pass
 
 
+# One model call, not one turn: a turn may make several. 120s was too short for
+# a local server asked for anything long — a 27B model writing a document hits
+# it every time, and the loop surfaces that as "the agent could not complete
+# this request" with the real cause only in the log.
+DEFAULT_REQUEST_TIMEOUT = 300.0
+
+
 class LeanLLMClient:
     """Minimal chat-completions client (no streaming required for tool loop)."""
 
@@ -28,7 +35,7 @@ class LeanLLMClient:
         base_url: str = "https://api.openai.com/v1",
         temperature: Optional[float] = 0.7,
         max_tokens: Optional[int] = 4096,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
     ) -> None:
         self.model = model
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -94,7 +101,29 @@ class LeanLLMClient:
                 if exc.code == 400 and self._adapt(detail):
                     continue
                 raise LLMError(f"HTTP {exc.code} from API: {detail}") from exc
+            except TimeoutError as exc:
+                # Deliberately not retried: a timeout has already cost the full
+                # budget, and three attempts would spend it three times before
+                # the caller hears anything.
+                #
+                # Raised as LLMError so the loop ends the turn with a readable
+                # error event. A bare TimeoutError escaped the generator and
+                # killed the whole turn, losing both the reason and whatever
+                # the agent had already produced.
+                raise LLMError(
+                    f"the model call timed out after {self.timeout:g}s. A local "
+                    f"server that unloads the model between requests pays that "
+                    f"reload on every call — raise request_timeout (or "
+                    f"endpoint.timeout) in agent.yaml, or keep the model "
+                    f"resident."
+                ) from exc
             except urllib.error.URLError as exc:
+                reason = getattr(exc, "reason", exc)
+                if isinstance(reason, TimeoutError):
+                    raise LLMError(
+                        f"could not reach {self.base_url} within "
+                        f"{self.timeout:g}s (connection timed out)"
+                    ) from exc
                 raise LLMError(f"network error talking to {self.base_url}: {exc}") from exc
             except json.JSONDecodeError as exc:
                 raise LLMError(f"could not parse API response: {exc}") from exc

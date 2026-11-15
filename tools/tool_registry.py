@@ -20,6 +20,13 @@ class ToolRegistry:
     # The lean runtime has its own (sandboxed) core set in LeanToolRegistry;
     # these are the equivalents for the adk / deepagent runtimes.
     CORE_TOOL_NAMES: tuple = ('read_file', 'write_file')
+
+    # Talking to the board an agent belongs to. Core when there is a board —
+    # an agent that can be addressed with @name should be able to answer in
+    # kind without anyone listing a tool for it — and absent when there is
+    # not, because off a board these two can only report that there is no
+    # board, and every tool offered costs tokens on every request.
+    BOARD_TOOL_NAMES: tuple = ('send_to_agent', 'list_agents')
     
     @classmethod
     def register(cls, name: str, tool: Any) -> None:
@@ -63,7 +70,11 @@ class ToolRegistry:
         
         registered_count = 0
         for file in builtin_dir.glob('*.py'):
-            if file.name.startswith('__'):
+            # A leading underscore marks a module as plumbing for the tools
+            # beside it, not a tool itself. Without this, a shared helper's
+            # public functions become tools — and a helper called `get` would
+            # be offered to every model.
+            if file.name.startswith('_'):
                 continue
             registered_count += cls._register_functions_from_file(str(file), prefix='')
         
@@ -148,6 +159,19 @@ class ToolRegistry:
         return dict(cls._tools)
 
     @classmethod
+    def on_a_board(cls) -> bool:
+        """True when agents-control seeded this agent's .env with a board URL."""
+        return bool(os.environ.get("AGENTS_CONTROL_URL"))
+
+    @classmethod
+    def core_tool_names(cls) -> List[str]:
+        """Core names for this agent, board tools included when applicable."""
+        names = list(cls.CORE_TOOL_NAMES)
+        if cls.on_a_board():
+            names += list(cls.BOARD_TOOL_NAMES)
+        return names
+
+    @classmethod
     def core_tools(cls) -> List[Any]:
         """
         Always-available tools.
@@ -156,7 +180,7 @@ class ToolRegistry:
         gates *non-core* tools.
         """
         cls.register_built_in_tools()
-        return [cls._tools[name] for name in cls.CORE_TOOL_NAMES if name in cls._tools]
+        return [cls._tools[name] for name in cls.core_tool_names() if name in cls._tools]
 
     @classmethod
     def dedupe(cls, tools: List[Any]) -> List[Any]:
