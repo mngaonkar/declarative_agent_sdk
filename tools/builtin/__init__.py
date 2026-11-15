@@ -8,6 +8,8 @@ from declarative_agent_sdk.tools.builtin.exec_tool import exec_command, exec_asy
 from declarative_agent_sdk.tools.builtin.write_file import write_file
 from declarative_agent_sdk.tools.builtin.read_file import read_file
 from declarative_agent_sdk.tools.builtin.web_request import web_request
+from declarative_agent_sdk.tools.builtin.send_to_agent import send_to_agent
+from declarative_agent_sdk.tools.builtin.list_agents import list_agents
 
 __all__ = [
     'exec_command',
@@ -15,4 +17,6 @@ __all__ = [
     'write_file',
     'read_file',
     'web_request',
+    'send_to_agent',
+    'list_agents',
 ]

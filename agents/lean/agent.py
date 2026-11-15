@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import os
 import uuid
 from pathlib import Path
@@ -86,6 +88,7 @@ class LeanAIAgent(BaseAgent):
         endpoint_url: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: Optional[float] = 0.7,
+        request_timeout: Optional[float] = None,
         max_tool_iterations: int = 32,
         max_step_retries: int = 3,
         max_no_tool_continues: int = 4,
@@ -145,6 +148,7 @@ class LeanAIAgent(BaseAgent):
             base_url=base_url,
             temperature=temperature,
             max_tokens=max_output_tokens,
+            **({} if request_timeout is None else {"timeout": float(request_timeout)}),
         )
         self._loop = LeanLoop(
             client=self._client,
@@ -177,7 +181,7 @@ class LeanAIAgent(BaseAgent):
         self, query: str, session_id: Optional[str] = None
     ) -> AsyncGenerator[AgentEvent, None]:
         sid = session_id or str(uuid.uuid4())
-        for ev in self._loop.run(query, sid):
+        async for ev in _drain(self._loop.run(query, sid)):
             yield _loop_event_to_agent_event(ev)
 
     async def tool_confirmation(
@@ -190,7 +194,7 @@ class LeanAIAgent(BaseAgent):
             f"[{self.name}] lean tool_confirmation yes={yes} "
             f"context_id={context_id} session={session_id}"
         )
-        for ev in self._loop.resume(session_id, approved=yes):
+        async for ev in _drain(self._loop.resume(session_id, approved=yes)):
             yield _loop_event_to_agent_event(ev)
 
     async def invoke(
@@ -225,6 +229,28 @@ class LeanAIAgent(BaseAgent):
             raise ValueError("No text content found in A2A message")
         async for event in self.run_query(query, session_id=context.context_id):
             yield event
+
+
+_DRAIN_SENTINEL = object()
+
+
+async def _drain(generator: Any) -> AsyncGenerator[Any, None]:
+    """
+    Pull a synchronous generator without blocking the event loop.
+
+    The lean loop is deliberately synchronous and its LLM client uses blocking
+    urllib, so iterating it directly from an async method stalls the whole
+    process: while a model call is in flight, the A2A server cannot answer
+    anything — not a status poll, not `tasks/get`, not even the next
+    `message/send`. One `next()` per thread hop keeps the loop free, and the
+    calls stay strictly sequential so the generator is only ever touched by one
+    thread at a time.
+    """
+    while True:
+        event = await asyncio.to_thread(next, generator, _DRAIN_SENTINEL)
+        if event is _DRAIN_SENTINEL:
+            return
+        yield event
 
 
 def _a2a_tool_confirmation(message: Any) -> Optional[tuple]:

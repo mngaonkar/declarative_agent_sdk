@@ -1,5 +1,6 @@
 """Unit tests for the lean deliberative runtime (no network)."""
 
+import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -480,3 +481,86 @@ class TestFactoryLean:
             agent = AgentFactory.from_dict({"name": "n", "agent_framework": "lean"})
         c.assert_called_once()
         assert agent is fake
+
+
+# ---------------------------------------------------------------------------
+# a model call that times out
+# ---------------------------------------------------------------------------
+
+class TestLLMTimeout:
+    """
+    A read timeout used to escape `chat()` as a bare TimeoutError. The loop
+    only catches LLMError, so the exception tore through the generator and
+    ended the turn with a generic "could not complete this request" — losing
+    both the reason and anything the agent had already said.
+    """
+
+    @staticmethod
+    def _client(timeout=300):
+        from declarative_agent_sdk.agents.lean.runtime.llm import LeanLLMClient
+        return LeanLLMClient(model="m", api_key="k",
+                             base_url="http://127.0.0.1:9/v1", timeout=timeout)
+
+    def test_a_read_timeout_becomes_a_readable_llm_error(self, monkeypatch):
+        from declarative_agent_sdk.agents.lean.runtime import llm
+
+        def boom(*args, **kwargs):
+            raise TimeoutError("timed out")
+
+        monkeypatch.setattr(llm.urllib.request, "urlopen", boom)
+        with pytest.raises(llm.LLMError) as excinfo:
+            self._client(300).chat([{"role": "user", "content": "hi"}])
+
+        message = str(excinfo.value)
+        assert "timed out after 300s" in message
+        assert "request_timeout" in message          # says what to change
+
+    def test_it_is_not_retried(self, monkeypatch):
+        """Three attempts would spend the budget three times over."""
+        from declarative_agent_sdk.agents.lean.runtime import llm
+
+        calls = []
+
+        def boom(*args, **kwargs):
+            calls.append(1)
+            raise TimeoutError("timed out")
+
+        monkeypatch.setattr(llm.urllib.request, "urlopen", boom)
+        with pytest.raises(llm.LLMError):
+            self._client().chat([{"role": "user", "content": "hi"}])
+        assert len(calls) == 1
+
+    def test_a_connect_timeout_is_distinguished(self, monkeypatch):
+        from declarative_agent_sdk.agents.lean.runtime import llm
+
+        def boom(*args, **kwargs):
+            raise llm.urllib.error.URLError(TimeoutError("timed out"))
+
+        monkeypatch.setattr(llm.urllib.request, "urlopen", boom)
+        with pytest.raises(llm.LLMError, match="connection timed out"):
+            self._client(120).chat([{"role": "user", "content": "hi"}])
+
+    def test_the_loop_ends_the_turn_cleanly(self, monkeypatch, tmp_path):
+        """
+        The point of wrapping it: the turn finishes with an error event instead
+        of the exception escaping, so the transcript keeps what came before.
+        """
+        from declarative_agent_sdk.agents.lean.runtime.llm import LLMError
+        from declarative_agent_sdk.agents.lean.runtime.loop import LeanLoop
+        from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
+        from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
+
+        skills = SkillRegistry(root=str(tmp_path / "skills"))
+        tools = LeanToolRegistry(skills, workspace=str(tmp_path / "ws"))
+
+        class TimingOutClient:
+            def chat(self, messages, tools=None):
+                raise LLMError("the model call timed out after 300s. …")
+
+        loop = LeanLoop(client=TimingOutClient(), tools=tools, skills=skills,
+                        instruction="", tools_approval_required=False)
+        events = list(loop.run("write the paper", "session-1"))
+
+        assert events, "the turn produced nothing at all"
+        assert events[-1].kind == "error"
+        assert "timed out after 300s" in events[-1].text

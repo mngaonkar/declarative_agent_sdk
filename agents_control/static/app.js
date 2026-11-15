@@ -1,0 +1,1277 @@
+/* agents-control board. Vanilla JS: fetch for commands, SSE for everything live. */
+
+const state = {
+  machines: [], agents: [], channels: [], settings: {}, defaults: {},
+  channelId: null, messages: [], members: [], halted: false,
+  typing: new Set(), approvals: new Map(), lastId: 0, needsAuth: false,
+};
+
+const $ = (sel) => document.querySelector(sel);
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = text;
+  return node;
+};
+/*
+ * The server revision this board needs. Kept in step with API_REVISION in
+ * agents_control/__init__.py.
+ *
+ * These can drift: this file is read from disk on every request, so a browser
+ * always gets the current board, while the Python routes were loaded when the
+ * process started. Edit the tree without restarting and the new board asks the
+ * old server for routes it does not have — which it answers with a bare 404.
+ */
+const EXPECTS_API = 16;
+
+/** An agent's address on the board. The bare name is unique only per machine. */
+const fqn = (agent) => agent.qualified || `${agent.name}.${agent.machine_name}`;
+
+const token = {
+  get: () => localStorage.getItem('ac-token') || '',
+  set: (value) => localStorage.setItem('ac-token', value),
+};
+
+/* ── transport ──────────────────────────────────────────────────────── */
+
+async function api(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  const current = token.get();
+  if (current) headers.Authorization = `Bearer ${current}`;
+  const response = await fetch(path, { ...options, headers });
+  if (response.status === 401) {
+    state.needsAuth = true;
+    askForToken();
+    throw new Error('unauthorized');
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const described = [payload.error, payload.detail].filter(Boolean).join('\n');
+    if (described) throw new Error(described);
+    // No error body on a 404 means the router never reached a handler: this
+    // process does not have that route. Almost always a server left running
+    // from before the feature existed.
+    if (response.status === 404) {
+      checkServerVersion();
+      throw new Error(
+        `This control plane has no ${options.method || 'GET'} ${path} — it is ` +
+        'running older code than this page. Restart the service ' +
+        '(declarative-agent control) and reload.');
+    }
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return payload;
+}
+
+/**
+ * Compare the running process against the board it served.
+ *
+ * /healthz is public, so this works before a token is entered — which matters,
+ * because an old server may 401 or 404 everything else.
+ */
+async function checkServerVersion() {
+  let health;
+  try {
+    health = await (await fetch('/healthz')).json();
+  } catch {
+    return;                               // offline; the SSE dot already says so
+  }
+  const revision = Number(health.api_revision || 0);
+  $('#side-foot').title =
+    `agents-control ${health.version || '?'} · api ${revision} · up since ${health.started || '?'}`;
+
+  if (revision >= EXPECTS_API) return;
+  showStale(
+    `This page expects server api ${EXPECTS_API}, but the running process is ` +
+    `${revision ? `api ${revision}` : 'older than api 1'}` +
+    `${health.started ? ` (started ${new Date(health.started).toLocaleString()})` : ''}. ` +
+    'Some screens will fail with 404 until you restart it: ' +
+    'declarative-agent control');
+}
+
+function showStale(text) {
+  const banner = $('#stale-banner');
+  $('#stale-text').textContent = text;
+  banner.classList.remove('hidden');
+}
+
+function toast(message, bad = false) {
+  $('#toast')?.remove();
+  const node = el('div', bad ? 'bad' : '', message);
+  node.id = 'toast';
+  document.body.appendChild(node);
+  setTimeout(() => node.remove(), bad ? 9000 : 4000);
+}
+
+/* ── bootstrap ──────────────────────────────────────────────────────── */
+
+async function load() {
+  const data = await api('/api/state');
+  state.machines = data.machines;
+  state.agents = data.agents;
+  state.channels = data.channels;
+  state.settings = data.settings;
+  state.defaults = data.defaults || {};
+  state.needsAuth = data.auth;
+  renderSidebar();
+  renderAgents();
+  renderMachines();
+  renderSettings();
+  if (state.channelId == null && state.channels.length) selectChannel(state.channels[0].id);
+  else if (state.channelId != null) renderBoardHeader();
+}
+
+function connect() {
+  const query = token.get() ? `?token=${encodeURIComponent(token.get())}` : '';
+  const stream = new EventSource(`/api/events${query}`);
+  stream.addEventListener('hello', () => $('#conn-dot').classList.add('live'));
+  stream.addEventListener('ping', () => {});
+  stream.addEventListener('update', (event) => handleEvent(JSON.parse(event.data)));
+  stream.onerror = () => {
+    $('#conn-dot').classList.remove('live');
+    stream.close();
+    setTimeout(connect, 3000);           // the server may be restarting
+  };
+}
+
+function handleEvent(event) {
+  switch (event.type) {
+    case 'message':
+      if (event.channel_id === state.channelId) {
+        state.messages.push(event.message);
+        state.lastId = Math.max(state.lastId, event.message.id);
+        appendMessage(event.message);
+      }
+      break;
+    case 'status':
+      if (event.channel_id === state.channelId) {
+        $('#typing').textContent = `@${event.agent}: ${event.text}`;
+      }
+      break;
+    case 'typing':
+      if (event.channel_id === state.channelId) {
+        event.on ? state.typing.add(event.agent) : state.typing.delete(event.agent);
+        renderTyping();
+      }
+      break;
+    case 'approval':
+      state.approvals.set(event.approval.id, event.approval);
+      if (event.channel_id === state.channelId) appendApproval(event.approval);
+      break;
+    case 'approval_resolved':
+      state.approvals.delete(event.id);
+      document.getElementById(`approval-${event.id}`)?.remove();
+      break;
+    case 'halt':
+      if (event.channel_id === state.channelId) {
+        state.halted = event.halted;
+        renderBoardHeader();
+      }
+      load();
+      break;
+    default:
+      load();                            // machines / agents / channels / settings
+  }
+}
+
+/* ── sidebar ────────────────────────────────────────────────────────── */
+
+function renderSidebar() {
+  const channels = $('#channel-list');
+  channels.innerHTML = '';
+  state.channels.forEach((channel) => {
+    const item = el('li', channel.id === state.channelId ? 'active' : '');
+    if (channel.halted) item.classList.add('halted');
+    item.append(el('span', '', `#${channel.name}`));
+    const count = el('span', 'tag', String((channel.members || []).length));
+    item.append(count);
+    item.onclick = () => selectChannel(channel.id);
+    channels.append(item);
+  });
+  if (!state.channels.length) {
+    channels.append(el('li', '', 'no channels yet'));
+  }
+
+  const agents = $('#sidebar-agents');
+  agents.innerHTML = '';
+  state.agents.forEach((agent) => {
+    const item = el('li');
+    item.append(el('span', `pin ${agent.ready ? 'ready' : 'down'}`));
+    item.append(el('span', '', fqn(agent)));
+    item.title = `${agent.model || agent.framework} · ${agent.url || 'no url'}`;
+    agents.append(item);
+  });
+  if (!state.agents.length) agents.append(el('li', '', 'no agents yet'));
+
+  $('#side-foot').textContent =
+    `${state.machines.length} machine(s) · ${state.agents.length} agent(s)`;
+}
+
+/* ── board ──────────────────────────────────────────────────────────── */
+
+async function selectChannel(id) {
+  state.channelId = id;
+  state.typing.clear();
+  state.lastId = 0;
+  const data = await api(`/api/channels/${id}/messages`);
+  state.messages = data.messages;
+  state.members = data.members;
+  state.halted = data.halted;
+  state.lastId = state.messages.length ? state.messages[state.messages.length - 1].id : 0;
+  renderSidebar();
+  renderBoardHeader();
+  renderMessages();
+  renderMembers();
+}
+
+function renderBoardHeader() {
+  const channel = state.channels.find((c) => c.id === state.channelId);
+  $('#channel-title').textContent = channel ? `#${channel.name}` : 'no channel';
+  $('#channel-topic').textContent = channel?.topic || '';
+  $('#composer').hidden = !channel;
+  $('#halt-btn').hidden = !channel;
+  $('#delete-channel').hidden = !channel;
+  $('#input').placeholder = channel
+    ? `Message #${channel.name} — use @agent to address one`
+    : '';
+  const halt = $('#halt-btn');
+  halt.textContent = state.halted ? 'Resume' : 'Stop';
+  halt.className = state.halted ? 'btn' : 'btn danger';
+  renderMentionHint();
+}
+
+function renderMentionHint() {
+  const names = state.members.map((m) => `@${fqn(m)}`).join('  ');
+  $('#mention-hint').textContent = state.halted
+    ? 'Channel halted — dispatches are refused until you resume.'
+    : (names ? `in channel: ${names}` : 'no agents in this channel yet — add one on the right');
+}
+
+function renderMessages() {
+  const list = $('#messages');
+  list.innerHTML = '';
+  if (!state.channelId) {
+    list.append(buildEmpty());
+    return;
+  }
+  if (!state.messages.length) {
+    const empty = el('div', 'empty');
+    empty.append(el('h2', '', 'Nothing here yet'));
+    empty.append(el('p', '', 'Address an agent with @name to start.'));
+    list.append(empty);
+  }
+  state.messages.forEach((message) => appendMessage(message, false));
+  state.approvals.forEach((approval) => {
+    if (approval.channel_id === state.channelId) appendApproval(approval, false);
+  });
+  scrollDown();
+}
+
+function buildEmpty() {
+  const node = el('div', 'empty');
+  node.append(el('h2', '', 'No channel selected'));
+  node.append(el('p', '', 'Create a channel, add agents, then address them with @name.'));
+  return node;
+}
+
+/**
+ * How a sender is shown. Messages written before an agent had a machine — or
+ * by an agent whose .env predates AGENT_QUALIFIED_NAME — carry a bare name, so
+ * resolve it here rather than leaving the board inconsistent.
+ */
+function displaySender(name) {
+  if (!name || name.includes('.')) return name;
+  const matches = state.agents.filter((a) => a.name === name);
+  return matches.length === 1 ? fqn(matches[0]) : name;
+}
+
+function appendMessage(message, scroll = true) {
+  const list = $('#messages');
+  list.querySelector('.empty')?.remove();
+  const row = el('div', `msg ${message.sender_kind}`);
+  const who = el('span', 'who',
+    message.sender_kind === 'system' ? '*' : displaySender(message.sender));
+  who.title = message.sender;
+  row.append(who);
+  const body = el('span', 'text');
+  if (message.target) {
+    body.append(el('span', 'to', `→ @${displaySender(message.target)} `));
+  }
+  body.append(renderBody(message.text));
+  row.append(body);
+  row.append(el('time', '', fmtTime(message.created)));
+  list.append(row);
+  if (scroll) scrollDown();
+}
+
+/**
+ * Agents answer in Markdown whether or not you ask them to, so render it.
+ * AgentMarkdown builds nodes rather than HTML strings — the text came from a
+ * model, which is to say from whatever that model just read.
+ */
+function renderBody(text) {
+  if (window.AgentMarkdown) {
+    return window.AgentMarkdown.render(text, document, {
+      onMention: (token, doc) => {
+        const span = doc.createElement('span');
+        span.className = 'mention';
+        span.textContent = '@' + displaySender(token.name);
+        return span;
+      },
+    });
+  }
+  return document.createTextNode(text);     // md.js failed to load
+}
+
+function appendApproval(approval, scroll = true) {
+  if (document.getElementById(`approval-${approval.id}`)) return;
+  const box = el('div', 'approval');
+  box.id = `approval-${approval.id}`;
+  const line = el('div');
+  line.append(el('strong', '', `@${approval.agent}`));
+  line.append(document.createTextNode(' wants to run '));
+  line.append(el('span', 'tool', `${approval.tool}(${fmtArgs(approval.args)})`));
+  box.append(line);
+  const row = el('div', 'row');
+  const approve = el('button', 'btn primary small', 'Approve');
+  const deny = el('button', 'btn small', 'Deny');
+  approve.onclick = () => resolveApproval(approval.id, true, box);
+  deny.onclick = () => resolveApproval(approval.id, false, box);
+  row.append(approve, deny);
+  box.append(row);
+  $('#messages').append(box);
+  if (scroll) scrollDown();
+}
+
+async function resolveApproval(id, approved, box) {
+  box.querySelectorAll('button').forEach((b) => (b.disabled = true));
+  try {
+    await api(`/api/approvals/${id}`, {
+      method: 'POST', body: JSON.stringify({ approved }),
+    });
+  } catch (error) {
+    toast(error.message, true);
+    box.querySelectorAll('button').forEach((b) => (b.disabled = false));
+  }
+}
+
+function renderTyping() {
+  const names = [...state.typing];
+  $('#typing').textContent = names.length
+    ? `${names.map((n) => '@' + n).join(', ')} ${names.length > 1 ? 'are' : 'is'} working…`
+    : '';
+}
+
+function renderMembers() {
+  const list = $('#member-list');
+  list.innerHTML = '';
+  state.members.forEach((member) => {
+    const item = el('li');
+    const left = el('span');
+    left.append(el('span', `pin ${member.ready ? 'ready' : 'down'}`));
+    left.append(document.createTextNode(' ' + fqn(member)));
+    left.title = `${member.machine_name} · ${member.url || 'no url'}`;
+    item.append(left);
+    const remove = el('span', 'x', '×');
+    remove.title = 'Remove from channel';
+    remove.onclick = async () => {
+      await api(`/api/channels/${state.channelId}/members/${member.id}`, { method: 'DELETE' });
+      selectChannel(state.channelId);
+    };
+    item.append(remove);
+    list.append(item);
+  });
+
+  const select = $('#member-select');
+  select.innerHTML = '';
+  const inChannel = new Set(state.members.map((m) => m.id));
+  const available = state.agents.filter((a) => !inChannel.has(a.id));
+  if (!available.length) {
+    select.append(new Option('no agents to add', ''));
+  } else {
+    available.forEach((agent) => select.append(new Option(fqn(agent), agent.id)));
+  }
+  $('#member-add-btn').disabled = !available.length || !state.channelId;
+}
+
+function scrollDown() {
+  const list = $('#messages');
+  list.scrollTop = list.scrollHeight;
+}
+
+/* ── agents view ────────────────────────────────────────────────────── */
+
+function renderAgents() {
+  const table = $('#agents-table');
+  table.innerHTML = '';
+  table.append(headRow(['Agent (name.machine)', 'Machine', 'Runtime', 'URL', 'State', '']));
+  if (!state.agents.length) {
+    table.append(emptyRow(6, 'No agents. Register a machine, then create one.'));
+    return;
+  }
+  state.agents.forEach((agent) => {
+    const row = el('tr');
+    row.append(cell(fqn(agent), 'mono'), cell(agent.machine_name));
+    row.append(cell(`${agent.framework} · ${agent.provider} · ${agent.model || '—'}`));
+    const url = el('td', 'mono');
+    if (agent.url) {
+      const link = el('a', '', agent.url);
+      link.href = agent.agent_card || agent.url;
+      link.target = '_blank';
+      url.append(link);
+    } else url.textContent = '—';
+    row.append(url);
+
+    const status = el('td');
+    status.append(el('span', `tag ${agent.ready ? 'ok' : 'bad'}`, agent.ready ? 'ready' : 'not ready'));
+    if (agent.problems) {
+      status.append(el('div', 'note', agent.problems));
+    }
+    row.append(status);
+
+    const actions = el('td');
+    const settings = el('button', 'btn small', '⚙ Settings');
+    settings.title = 'Edit agent.yaml on the machine';
+    settings.onclick = () => openAgentConfig(agent);
+    const remove = el('button', 'btn danger small', 'Delete');
+    remove.onclick = () => deleteAgent(agent);
+    actions.append(settings, remove);
+    row.append(actions);
+    table.append(row);
+  });
+}
+
+async function deleteAgent(agent) {
+  const purge = confirm(
+    `Delete agent '${fqn(agent)}'?\n\n` +
+    `OK = also purge its directory (.env, workspace/).\n` +
+    `Cancel = stop and unregister only, keeping its files.`
+  );
+  try {
+    await api(`/api/agents/${agent.id}?purge=${purge ? 1 : 0}`, { method: 'DELETE' });
+    toast(`Deleted ${agent.name}${purge ? ' (purged)' : ''}`);
+    load();
+  } catch (error) { toast(error.message, true); }
+}
+
+/* ── agent config editor ────────────────────────────────────────────── */
+
+async function openAgentConfig(agent) {
+  const loading = el('p', 'note', 'Reading agent.yaml from the machine…');
+  openModal(`${fqn(agent)} · settings`, loading);
+
+  let data;
+  try {
+    data = await api(`/api/agents/${agent.id}/config`);
+  } catch (error) {
+    loading.className = 'warn-box';
+    loading.textContent = `Could not read the config: ${error.message}`;
+    return;
+  }
+
+  const wrap = el('div');
+
+  // live supervisord state, with the obvious controls next to it
+  const statusRow = el('div', 'status-row');
+  const renderStatus = (status) => {
+    statusRow.innerHTML = '';
+    const ok = status?.ok;
+    statusRow.append(el('span', `tag ${ok ? 'ok' : 'warn'}`, ok ? 'supervisord' : 'unmanaged'));
+    statusRow.append(el('span', 'out',
+      (status?.output || status?.hint || 'no status').slice(0, 200)));
+    const btns = el('div', 'btns');
+    ['restart', 'stop', 'start'].forEach((action) => {
+      const button = el('button', 'btn small', action);
+      button.onclick = async () => {
+        button.disabled = true;
+        try {
+          const result = await api(`/api/agents/${agent.id}/action`, {
+            method: 'POST', body: JSON.stringify({ action }),
+          });
+          renderStatus(result);
+          toast(`${agent.name}: ${action} ${result.ok ? 'ok' : 'failed'}`, !result.ok);
+          load();
+        } catch (error) { toast(error.message, true); }
+        finally { button.disabled = false; }
+      };
+      btns.append(button);
+    });
+    statusRow.append(btns);
+  };
+  renderStatus(data.status);
+  wrap.append(statusRow);
+  wrap.append(el('p', 'note', data.prefix));
+
+  // tabs
+  const tabs = el('div', 'tabs');
+  const bodies = el('div', 'tab-body');
+  const panes = {};
+  ['Properties', 'Raw YAML', 'Instructions'].forEach((label, i) => {
+    const tab = el('button', i === 0 ? 'active' : '', label);
+    const pane = el('div', i === 0 ? 'active' : '');
+    panes[label] = pane;
+    tab.onclick = () => {
+      [...tabs.children].forEach((t) => t.classList.toggle('active', t === tab));
+      [...bodies.children].forEach((b) => b.classList.toggle('active', b === pane));
+    };
+    tabs.append(tab);
+    bodies.append(pane);
+  });
+  wrap.append(tabs, bodies);
+
+  // Properties: rendered from the schema the server sent
+  const form = el('form', 'form');
+  data.schema.forEach((prop) => {
+    const value = data.properties[prop.key];
+    const label = el('label', prop.type === 'bool' ? 'check' : '');
+    let field;
+    if (prop.type === 'choice') {
+      field = el('select');
+      if (!prop.choices.includes(String(value))) field.append(new Option(String(value || ''), value || ''));
+      prop.choices.forEach((choice) => field.append(new Option(choice, choice)));
+      field.value = value ?? '';
+    } else if (prop.type === 'bool') {
+      field = el('input');
+      field.type = 'checkbox';
+      field.checked = Boolean(value);
+    } else {
+      field = el('input');
+      field.type = prop.type === 'int' || prop.type === 'number' ? 'number' : 'text';
+      if (prop.step) field.step = prop.step;
+      field.value = value ?? '';
+    }
+    field.name = prop.key;
+    if (prop.type === 'bool') {
+      label.append(field, document.createTextNode(' ' + prop.label));
+    } else {
+      label.append(document.createTextNode(prop.label), field);
+    }
+    if (prop.help) label.append(el('small', '', prop.help));
+    form.append(label);
+  });
+  panes['Properties'].append(form);
+  panes['Properties'].append(el('p', 'note',
+    'Saving this form rewrites agent.yaml, which keeps the header comment but ' +
+    'drops any others. Use Raw YAML to control the file exactly.'));
+
+  // Raw YAML + instructions
+  const rawBox = el('textarea', 'code');
+  rawBox.value = data.yaml;
+  rawBox.spellcheck = false;
+  panes['Raw YAML'].append(rawBox);
+  panes['Raw YAML'].append(el('p', 'note',
+    'Written verbatim. name cannot change — it keys the install directory and ' +
+    'the supervisord program.'));
+
+  const insBox = el('textarea', 'code');
+  insBox.value = data.instructions;
+  insBox.spellcheck = false;
+  panes['Instructions'].append(insBox);
+  panes['Instructions'].append(el('p', 'note',
+    'instructions.md — the system prompt this agent starts from.'));
+
+  // save
+  const warnBox = el('div', 'warn-box');
+  warnBox.hidden = true;
+  wrap.append(warnBox);
+
+  const actions = el('div', 'form-actions');
+  const restartLabel = el('label', 'check');
+  const restartBox = el('input');
+  restartBox.type = 'checkbox';
+  restartBox.checked = true;
+  restartLabel.append(restartBox, document.createTextNode(' Restart after saving'));
+  restartLabel.append(el('small', '', 'A running agent read its config once at startup.'));
+  const save = el('button', 'btn primary', 'Save');
+  actions.append(restartLabel, save);
+  wrap.append(actions);
+
+  const activeTab = () => tabs.querySelector('button.active').textContent;
+
+  save.onclick = async () => {
+    save.disabled = true;
+    save.innerHTML = '<span class="spin">↻</span> saving…';
+    warnBox.hidden = true;
+    const payload = { restart: restartBox.checked, instructions: insBox.value };
+    // Whichever editor you were last in wins, so the two cannot fight.
+    if (activeTab() === 'Raw YAML') payload.yaml = rawBox.value;
+    else payload.properties = values(form);
+
+    try {
+      const result = await api(`/api/agents/${agent.id}/config`, {
+        method: 'PUT', body: JSON.stringify(payload),
+      });
+      rawBox.value = result.yaml;
+      if (result.warnings?.length) {
+        warnBox.hidden = false;
+        warnBox.innerHTML = '';
+        warnBox.append(el('strong', '', 'Saved, with warnings:'));
+        const list = el('ul');
+        result.warnings.forEach((warning) => list.append(el('li', '', warning)));
+        warnBox.append(list);
+      } else {
+        toast(`${agent.name} saved${restartBox.checked ? ' and restarted' : ''}`);
+        closeModal();
+      }
+      load();
+    } catch (error) {
+      warnBox.hidden = false;
+      warnBox.textContent = error.message;
+    } finally {
+      save.disabled = false;
+      save.textContent = 'Save';
+    }
+  };
+
+  openModal(`${fqn(agent)} · settings`, wrap);
+}
+
+/* ── machines view ──────────────────────────────────────────────────── */
+
+function renderMachines() {
+  const table = $('#machines-table');
+  table.innerHTML = '';
+  table.append(headRow(['Machine', 'Target', 'OS', 'Addresses', 'Status', '']));
+  if (!state.machines.length) {
+    table.append(emptyRow(6, 'No machines. Register this one, or an SSH host.'));
+    return;
+  }
+  state.machines.forEach((machine) => {
+    const row = el('tr');
+    row.append(cell(machine.name, 'mono'));
+    row.append(cell(machine.is_local ? 'local' :
+      `${machine.ssh_user ? machine.ssh_user + '@' : ''}${machine.host}` +
+      (machine.ssh_port !== 22 ? `:${machine.ssh_port}` : ''), 'mono'));
+    row.append(cell(machine.os_kind || '—'));
+    const addresses = el('td', 'mono');
+    const list = machine.interfaces || [];
+    if (!list.length) {
+      addresses.textContent = '—';
+    } else {
+      list.forEach((iface) => {
+        const note = iface.note ? ` (${iface.note})` : '';
+        addresses.append(el('div', '', `${iface.name} ${iface.address}${note}`));
+      });
+    }
+    row.append(addresses);
+
+    const status = el('td');
+    const kind = machine.status === 'ready' ? 'ok' : machine.status === 'unknown' ? '' : 'warn';
+    status.append(el('span', `tag ${kind}`, machine.status));
+    if (machine.last_error) status.append(el('div', 'note', machine.last_error));
+    row.append(status);
+
+    const actions = el('td');
+    const test = el('button', 'btn small', 'Test');
+    test.onclick = async () => {
+      test.innerHTML = '<span class="spin">↻</span>';
+      try { await api(`/api/machines/${machine.id}/test`, { method: 'POST' }); load(); }
+      catch (error) { toast(error.message, true); }
+      finally { test.textContent = 'Test'; }
+    };
+    const refresh = el('button', 'btn small', 'Refresh agents');
+    refresh.onclick = async () => {
+      try {
+        const result = await api(`/api/machines/${machine.id}/refresh`, { method: 'POST' });
+        toast(`${result.found} agent(s) found, ${result.removed} stale record(s) dropped`);
+        load();
+      } catch (error) { toast(error.message, true); }
+    };
+    const remove = el('button', 'btn danger small', 'Forget');
+    remove.onclick = async () => {
+      if (!confirm(`Forget '${machine.name}'?\n\nAgents keep running on the box — ` +
+                   `delete them first if you want them gone.`)) return;
+      try { await api(`/api/machines/${machine.id}`, { method: 'DELETE' }); load(); }
+      catch (error) { toast(error.message, true); }
+    };
+    actions.append(test, refresh, remove);
+    row.append(actions);
+    table.append(row);
+  });
+}
+
+/* ── settings view ──────────────────────────────────────────────────── */
+
+function renderSettings() {
+  const form = $('#settings-form');
+  Object.entries(state.settings).forEach(([key, value]) => {
+    const field = form.elements[key];
+    if (!field) return;
+    if (field.type === 'checkbox') field.checked = Boolean(value);
+    else field.value = value;
+    markDrift(field, key, value);
+  });
+}
+
+/**
+ * Point out a stored value that no longer matches the shipped default.
+ *
+ * A store keeps whatever it was created with — seeding only fills missing keys
+ * — so a default raised in a later version never reaches an existing store.
+ * That is how a board carried on waiting only 300s for a reply after the
+ * default became 900. Shown, not overwritten: the value may be deliberate.
+ */
+function markDrift(field, key, value) {
+  field.parentElement.querySelector('.drift')?.remove();
+  const shipped = state.defaults[key];
+  if (shipped === undefined || String(shipped) === String(value)) return;
+
+  const note = el('small', 'drift');
+  note.append(document.createTextNode(`this build ships ${JSON.stringify(shipped)} · `));
+  const use = el('a', '', 'use it');
+  use.href = '#';
+  use.onclick = (event) => {
+    event.preventDefault();
+    if (field.type === 'checkbox') field.checked = Boolean(shipped);
+    else field.value = shipped;
+    note.remove();
+  };
+  note.append(use);
+  field.parentElement.append(note);
+}
+
+/* ── modal ──────────────────────────────────────────────────────────── */
+
+function openModal(title, node) {
+  $('#modal-title').textContent = title;
+  const body = $('#modal-body');
+  body.innerHTML = '';
+  body.append(node);
+  $('#modal-back').classList.remove('hidden');
+  body.querySelector('input, select, textarea')?.focus();
+}
+function closeModal() { $('#modal-back').classList.add('hidden'); }
+
+function formFrom(id) {
+  return document.getElementById(id).content.cloneNode(true).querySelector('form');
+}
+function values(form) {
+  const out = {};
+  new FormData(form).forEach((value, key) => (out[key] = value));
+  form.querySelectorAll('input[type=checkbox]').forEach((box) => (out[box.name] = box.checked));
+  return out;
+}
+
+function askForToken() {
+  const form = formFrom('tpl-token-form');
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    token.set(values(form).token);
+    closeModal();
+    location.reload();
+  };
+  openModal('Token required', form);
+}
+
+/* ── wiring ─────────────────────────────────────────────────────────── */
+
+function headRow(labels) {
+  const row = el('tr');
+  labels.forEach((label) => row.append(el('th', '', label)));
+  return row;
+}
+function emptyRow(span, text) {
+  const row = el('tr');
+  const cellNode = el('td', 'note', text);
+  cellNode.colSpan = span;
+  row.append(cellNode);
+  return row;
+}
+function cell(text, cls) { return el('td', cls, text); }
+function fmtTime(iso) {
+  try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  catch { return ''; }
+}
+function fmtArgs(args) {
+  const text = Object.entries(args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+  return text.length > 120 ? text.slice(0, 119) + '…' : text;
+}
+
+document.querySelectorAll('.view-tab').forEach((tab) => {
+  tab.onclick = () => {
+    document.querySelectorAll('.view-tab').forEach((t) => t.classList.toggle('active', t === tab));
+    ['board', 'agents', 'machines', 'settings'].forEach((view) =>
+      $(`#view-${view}`).classList.toggle('hidden', view !== tab.dataset.view));
+  };
+});
+
+$('#modal-close').onclick = closeModal;
+$('#modal-back').onclick = (event) => { if (event.target.id === 'modal-back') closeModal(); };
+
+$('#new-channel').onclick = () => {
+  const form = formFrom('tpl-channel-form');
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      const result = await api('/api/channels', {
+        method: 'POST', body: JSON.stringify(values(form)),
+      });
+      closeModal();
+      await load();
+      selectChannel(result.channel.id);
+    } catch (error) { toast(error.message, true); }
+  };
+  openModal('New channel', form);
+};
+
+$('#delete-channel').onclick = async () => {
+  const channel = state.channels.find((c) => c.id === state.channelId);
+  if (!channel || !confirm(`Delete #${channel.name} and its transcript?`)) return;
+  await api(`/api/channels/${channel.id}`, { method: 'DELETE' });
+  state.channelId = null;
+  state.messages = [];
+  state.members = [];
+  await load();
+  renderMessages();
+  renderMembers();
+  renderBoardHeader();
+};
+
+$('#halt-btn').onclick = async () => {
+  try {
+    await api(`/api/channels/${state.channelId}/halt`, {
+      method: 'POST', body: JSON.stringify({ halted: !state.halted }),
+    });
+  } catch (error) { toast(error.message, true); }
+};
+
+$('#member-add-btn').onclick = async () => {
+  const agentId = Number($('#member-select').value);
+  if (!agentId) return;
+  try {
+    await api(`/api/channels/${state.channelId}/members`, {
+      method: 'POST', body: JSON.stringify({ agent_id: agentId }),
+    });
+    await load();
+    selectChannel(state.channelId);
+  } catch (error) { toast(error.message, true); }
+};
+
+$('#new-machine').onclick = () => {
+  const form = formFrom('tpl-machine-form');
+  form.elements.name.oninput = (event) => event.target.setCustomValidity('');
+  form.elements.is_local.onchange = (event) => {
+    const local = event.target.checked;
+    ['host', 'ssh_user', 'ssh_key', 'ssh_port'].forEach((name) => {
+      form.elements[name].disabled = local;
+    });
+    if (local) form.elements.host.value = 'localhost';
+  };
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const field = form.elements.name;
+    const wanted = field.value.trim();
+    // Checked here for an instant answer; the server enforces it regardless.
+    const clash = state.machines.find(
+      (m) => m.name.toLowerCase() === wanted.toLowerCase());
+    if (clash) {
+      field.setCustomValidity(`'${clash.name}' is already registered`);
+      field.reportValidity();
+      toast(`A machine called '${clash.name}' is already registered ` +
+            `(${clash.is_local ? 'this machine' : clash.host}). ` +
+            `Machine names must be unique — they are half of an agent's address.`, true);
+      return;
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(wanted)) {
+      field.setCustomValidity('letters, digits, - and _ only (no dots)');
+      field.reportValidity();
+      toast('A machine name becomes part of an agent address ' +
+            '(<agent>.<machine>), so it cannot contain dots or spaces.', true);
+      return;
+    }
+    const button = form.querySelector('button[type=submit]');
+    button.disabled = true;
+    button.innerHTML = '<span class="spin">↻</span> checking…';
+    try {
+      const result = await api('/api/machines', {
+        method: 'POST', body: JSON.stringify(values(form)),
+      });
+      closeModal();
+      toast(result.probe.ok
+        ? `Registered ${result.machine.name} (${result.probe.os || 'unknown OS'})`
+        : `Registered, but unreachable:\n${result.probe.error}`, !result.probe.ok);
+      load();
+    } catch (error) {
+      toast(error.message, true);
+      button.disabled = false;
+      button.textContent = 'Register';
+    }
+  };
+  openModal('Register machine', form);
+};
+
+$('#new-agent').onclick = () => {
+  if (!state.machines.length) {
+    toast('Register a machine first — agents are installed on a machine.', true);
+    return;
+  }
+  const form = formFrom('tpl-agent-form');
+  state.machines.forEach((machine) =>
+    form.elements.machine_id.append(new Option(
+      `${machine.name}${machine.status !== 'ready' ? ` (${machine.status})` : ''}`, machine.id)));
+  // Scoped to the form, not the document: this runs before openModal() puts
+  // the cloned template into the page, so a document query would find nothing
+  // and throw — which killed the whole handler and left the button inert.
+  const customRow = form.querySelector('#bind-host-custom-row');
+  const rescan = form.querySelector('#bind-host-rescan');
+  const hostNote = form.querySelector('#bind-host-note');
+
+  const machineFor = () => state.machines.find(
+    (m) => m.id === Number(form.elements.machine_id.value));
+
+  const describe = (iface) => {
+    const note = iface.note ? ` — ${iface.note}` : '';
+    return `${iface.name} · ${iface.address}${note}`;
+  };
+
+  // The addresses come from the machine, so the picker is rebuilt whenever the
+  // machine changes. They were collected when it was registered or last tested.
+  const fillHosts = () => {
+    const machine = machineFor();
+    const list = machine?.interfaces || [];
+    const select = form.elements.bind_host;
+    const chosen = select.value;
+    select.innerHTML = '';
+    select.append(new Option('all interfaces (0.0.0.0)', '0.0.0.0'));
+    list.forEach((iface) => select.append(new Option(describe(iface), iface.address)));
+    select.append(new Option('other address…', '__custom__'));
+    if (list.some((iface) => iface.address === chosen)) {
+      select.value = chosen;               // keep the choice across a rescan
+    } else if (list.length === 1) {
+      // One obvious address and nothing else to weigh up: offer it rather than
+      // making 0.0.0.0 the silent default on a single-homed box.
+      select.value = list[0].address;
+    }
+    hostNote.textContent = list.length
+      ? `${list.length} address(es) found on ${machine.name}`
+      : `No addresses recorded for ${machine?.name || 'this machine'} — rescan to look.`;
+    customRow.classList.toggle('hidden', select.value !== '__custom__');
+  };
+
+  /** Ask the machine what it has, now. */
+  const rescanHosts = async () => {
+    const machine = machineFor();
+    if (!machine) return;
+    rescan.disabled = true;
+    hostNote.textContent = `Reading addresses from ${machine.name}…`;
+    try {
+      const result = await api(`/api/machines/${machine.id}/interfaces`,
+                               { method: 'POST' });
+      machine.interfaces = result.interfaces;      // local state, for this form
+      fillHosts();
+      if (!result.ok) hostNote.textContent = result.error || 'Machine unreachable.';
+    } catch (error) {
+      hostNote.textContent = `Could not read addresses: ${error.message}`;
+    } finally {
+      rescan.disabled = false;
+    }
+  };
+
+  rescan.onclick = (event) => {
+    event.preventDefault();
+    rescanHosts();
+  };
+  form.elements.machine_id.onchange = () => {
+    fillHosts();
+    // A machine with nothing recorded predates address collection; go and look
+    // rather than offering an empty picker.
+    if (!(machineFor()?.interfaces || []).length) rescanHosts();
+  };
+  form.elements.bind_host.onchange = (event) => {
+    customRow.classList.toggle('hidden', event.target.value !== '__custom__');
+  };
+  fillHosts();
+  if (!(machineFor()?.interfaces || []).length) rescanHosts();
+
+  form.elements.framework.value = state.settings.default_framework;
+  form.elements.provider.value = state.settings.default_provider;
+  form.elements.model.value = state.settings.default_model;
+  form.elements.tools.value = state.settings.default_tools;
+  form.elements.sdk_source.value = state.settings.default_sdk_source || 'local';
+  form.elements.approval.checked = Boolean(state.settings.default_approval);
+
+  const nameField = form.elements.name;
+  nameField.oninput = () => nameField.setCustomValidity('');
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const wanted = nameField.value.trim();
+    const machineId = Number(form.elements.machine_id.value);
+    const machine = state.machines.find((m) => m.id === machineId);
+    // Same rule as the server: an agent name is unique per machine, because
+    // together they form the address the board dispatches to.
+    const clash = state.agents.find(
+      (a) => a.machine_id === machineId && a.name.toLowerCase() === wanted.toLowerCase());
+    if (clash) {
+      nameField.setCustomValidity(`'${fqn(clash)}' already exists`);
+      nameField.reportValidity();
+      toast(`'${fqn(clash)}' already exists. Agent names are unique per machine — ` +
+            `pick another name, or delete that agent first.`, true);
+      return;
+    }
+    const payload = values(form);
+    if (payload.bind_host === '__custom__') {
+      payload.bind_host = (payload.bind_host_custom || '').trim();
+      if (!payload.bind_host) {
+        toast('Pick an interface, or type the address to bind to.', true);
+        return;
+      }
+    }
+    delete payload.bind_host_custom;
+
+    const button = form.querySelector('button[type=submit]');
+    button.disabled = true;
+    button.innerHTML = '<span class="spin">↻</span> provisioning…';
+    try {
+      const result = await api('/api/agents', {
+        method: 'POST', body: JSON.stringify(payload),
+      });
+      closeModal();
+      const problems = result.result.problems;
+      toast(result.agent.ready
+        ? `Created ${fqn(result.agent)} at ${result.agent.url}` +
+          (result.result.sdk_source ? ` (${result.result.sdk_source})` : '')
+        : `Installed ${result.agent.name}, but it cannot start:\n${
+            Array.isArray(problems) ? problems.join('\n') : problems || 'unknown'}`,
+        !result.agent.ready);
+      load();
+    } catch (error) {
+      toast(error.message, true);
+      button.disabled = false;
+      button.textContent = 'Create';
+    }
+  };
+  openModal('Create agent', form);
+};
+
+$('#settings-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const payload = values($('#settings-form'));
+  ['agent_timeout_seconds', 'approval_timeout_seconds', 'transcript_context_messages',
+   'max_relay_hops', 'poll_interval_seconds', 'poll_max_interval_seconds',
+   'poll_request_timeout_seconds'].forEach((key) => (payload[key] = Number(payload[key])));
+  try {
+    const result = await api('/api/settings', {
+      method: 'PUT', body: JSON.stringify(payload),
+    });
+    state.settings = result.settings;
+    toast('Settings saved');
+  } catch (error) { toast(error.message, true); }
+};
+
+const input = $('#input');
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  mention.refresh();
+});
+input.addEventListener('keydown', (event) => {
+  // While the @ list is open it owns Enter, Tab and the arrows; otherwise
+  // Enter sends. Shift+Enter is always a newline.
+  if (mention.open) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      mention.move(event.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      mention.accept();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      mention.close();
+      return;
+    }
+  }
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    send();
+  }
+});
+input.addEventListener('blur', () => setTimeout(() => mention.close(), 120));
+input.addEventListener('click', () => mention.refresh());
+$('#send').onclick = send;
+
+/* ── @ typeahead ─────────────────────────────────────────────────────── */
+
+const mention = {
+  open: false,
+  index: 0,
+  matches: [],
+  token: null,          // { start, end, query } of the @word at the caret
+
+  /** The @word the caret sits in, or null. */
+  tokenAt() {
+    const caret = input.selectionStart;
+    if (caret !== input.selectionEnd) return null;           // a selection, not a caret
+    const before = input.value.slice(0, caret);
+    // An @ only opens a mention at a word boundary, so an email address
+    // or a mid-word @ does not trigger the list.
+    const match = /(^|[\s(,:;!?])@([A-Za-z0-9_.-]*)$/.exec(before);
+    if (!match) return null;
+    const query = match[2];
+    return { start: caret - query.length - 1, end: caret, query };
+  },
+
+  refresh() {
+    const token = this.tokenAt();
+    if (!token || !state.channelId) return this.close();
+    const query = token.query.toLowerCase();
+    const inChannel = new Set(state.members.map((m) => m.id));
+
+    // Every agent is offered, not just this channel's members: looking for an
+    // agent you have not added yet is exactly when you need the list. The ones
+    // outside the channel are marked, and picking one joins it first.
+    const hit = (agent) =>
+      fqn(agent).toLowerCase().startsWith(query) ||
+      agent.name.toLowerCase().startsWith(query);
+    const loose = (agent) => fqn(agent).toLowerCase().includes(query);
+
+    const members = state.agents.filter((a) => inChannel.has(a.id));
+    const others = state.agents.filter((a) => !inChannel.has(a.id));
+    let matches = [
+      ...members.filter(hit).map((a) => ({ agent: a, member: true })),
+      ...others.filter(hit).map((a) => ({ agent: a, member: false })),
+    ];
+    if (!matches.length) {
+      matches = [
+        ...members.filter(loose).map((a) => ({ agent: a, member: true })),
+        ...others.filter(loose).map((a) => ({ agent: a, member: false })),
+      ];
+    }
+
+    this.token = token;
+    this.matches = matches.slice(0, 20);   // the list scrolls past a few
+    this.index = 0;
+    this.render();
+  },
+
+  render() {
+    const pop = $('#mention-pop');
+    pop.innerHTML = '';
+    if (!this.matches.length) {
+      // Say why there is nothing rather than showing an empty box.
+      const note = el('li', 'none', state.agents.length
+        ? 'no agent matches that'
+        : 'no agents yet — create one on the Agents tab');
+      pop.append(note);
+      pop.classList.remove('hidden');
+      this.open = false;                 // nothing to accept
+      return;
+    }
+    this.matches.forEach((entry, i) => {
+      const { agent, member } = entry;
+      const item = el('li', i === this.index ? 'sel' : '');
+      if (!member) item.classList.add('outside');
+      item.setAttribute('role', 'option');
+      item.append(el('span', `pin ${agent.ready ? 'ready' : 'down'}`));
+      item.append(el('span', 'name', '@' + fqn(agent)));
+      item.append(el('span', 'meta', member
+        ? (agent.model || agent.framework || '')
+        : '+ add to channel'));
+      // mousedown, not click: blur would close the list first.
+      item.onmousedown = (event) => {
+        event.preventDefault();
+        this.index = i;
+        this.accept();
+      };
+      pop.append(item);
+    });
+    pop.classList.remove('hidden');
+    this.open = true;
+  },
+
+  move(delta) {
+    if (!this.matches.length) return;
+    this.index = (this.index + delta + this.matches.length) % this.matches.length;
+    this.render();
+    $('#mention-pop').children[this.index]?.scrollIntoView({ block: 'nearest' });
+  },
+
+  accept() {
+    const entry = this.matches[this.index];
+    if (!entry || !this.token) return this.close();
+    const { agent, member } = entry;
+    const { start, end } = this.token;
+    const value = input.value;
+    // Always the fully qualified name: it is the unambiguous address, and two
+    // machines may well run an agent with the same bare name.
+    const insert = `@${fqn(agent)} `;
+    input.value = value.slice(0, start) + insert + value.slice(end);
+    const caret = start + insert.length;
+    input.setSelectionRange(caret, caret);
+    this.close();
+    input.focus();
+
+    // Picking an agent that is not in the channel adds it, so the mention you
+    // just typed can actually be dispatched.
+    if (!member) this.join(agent);
+  },
+
+  async join(agent) {
+    const channelId = state.channelId;
+    try {
+      await api(`/api/channels/${channelId}/members`, {
+        method: 'POST', body: JSON.stringify({ agent_id: agent.id }),
+      });
+      await load();
+      if (state.channelId === channelId) await selectChannel(channelId);
+      toast(`Added @${fqn(agent)} to this channel`);
+    } catch (error) {
+      toast(`Could not add @${fqn(agent)}: ${error.message}`, true);
+    }
+  },
+
+  close() {
+    this.open = false;
+    this.matches = [];
+    this.token = null;
+    $('#mention-pop').classList.add('hidden');
+  },
+};
+
+async function send() {
+  const text = input.value.trim();
+  if (!text || state.channelId == null) return;
+  mention.close();
+  input.value = '';
+  input.style.height = 'auto';
+  try {
+    const result = await api(`/api/channels/${state.channelId}/messages`, {
+      method: 'POST', body: JSON.stringify({ text }),
+    });
+    if (!result.dispatched.length && /@/.test(text) === false) {
+      $('#mention-hint').textContent =
+        'Posted to the board. Nothing was dispatched — address an agent with @name.';
+      setTimeout(renderMentionHint, 4000);
+    }
+  } catch (error) {
+    toast(error.message, true);
+    input.value = text;
+  }
+}
+
+/*
+ * An exception inside a click handler is swallowed by the browser: the button
+ * just does nothing, with no message anywhere a user would look. This surfaces
+ * it instead — that is how "Create agent does nothing" presented, and it took a
+ * code read rather than a glance to find.
+ */
+window.addEventListener('error', (event) => {
+  toast(`Something broke: ${event.message}`, true);
+});
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason;
+  toast(`Something broke: ${reason?.message || reason}`, true);
+});
+
+$('#stale-close').onclick = () => $('#stale-banner').classList.add('hidden');
+
+// Before anything else: an old process cannot serve this board correctly, and
+// saying so once beats a 404 per screen.
+checkServerVersion();
+
+load().then(connect).catch((error) => {
+  if (error.message !== 'unauthorized') toast(error.message, true);
+});

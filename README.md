@@ -171,6 +171,12 @@ declarative-agent discord --config PATH   serve an agent as a Discord bot
                           --activity STR  the bot's "Playing ..." status
                           --embed         answers as embed cards
                           --log-level LVL DEBUG|INFO|WARNING|ERROR|CRITICAL
+declarative-agent control                 run the agents-control service
+                          --host ADDR     bind address (default 127.0.0.1)
+                          --port N        port (default 8900)
+                          --db PATH       SQLite store
+                          --token STR     API token ($AGENTS_CONTROL_TOKEN)
+                          --public-url U  callback URL agents are given
 declarative-agent a2a                     placeholder, not wired up yet
 declarative-agent version
 ```
@@ -284,6 +290,7 @@ examples/             # runnable samples (not in the wheel)
 | `model` | string | runtime-dependent | e.g. `gpt-4o-mini`, `gemini-2.5-flash-lite` |
 | `provider` | string | lean→`openai`, adk→google, deepagent→`anthropic` | `openai`, `google`, `anthropic`, `vllm`, … |
 | `max_tokens` / `temperature` | | — | Root level or under `endpoint` |
+| `request_timeout` | number | `300` (lean) | Seconds for **one** model call; also `endpoint.timeout`. Raise it for a local model asked for something long. A timeout ends the turn with a readable error rather than tearing out of the loop, and is not retried |
 | `endpoint.url` | string | — | API base (OpenAI-compatible / vLLM) |
 
 ### Skills & tools
@@ -317,6 +324,7 @@ suggestion), so typos are never silent.
 |---------|-----------------|
 | `lean` | `Skill`, `list_skills`, `list_dir`, `read_file`, `write_file`, `run_script` — file access confined to the workspace, `attachments/`, the skills tree and `/tmp` |
 | `adk`, `deepagent` | `read_file`, `write_file` (plus whatever the framework itself injects, e.g. deepagents' own filesystem tools) |
+| any runtime, **on an agents-control board** | `send_to_agent`, `list_agents` — added from `AGENTS_CONTROL_URL`, so they need no `tools:` entry |
 
 Under lean, `Skill`, `list_skills`, `list_dir` and `read_file` are auto-approved;
 every other tool goes through the approval gate when
@@ -327,8 +335,12 @@ effect there — use `exec_command` if you need unrestricted file access.
 #### Available built-in tools
 
 Every function in [`tools/builtin/`](tools/builtin) is loaded into the global
-`ToolRegistry` at startup; list a name under `tools:` to turn it into a function
-schema for the model.
+`ToolRegistry` at startup — but **built-in is not the same as core**. Being in
+the registry only means the name can be resolved; a tool reaches the model when
+it is either core or named in `tools:`. So `exec_command`, `web_request`,
+`exec_async`, `check_exec_async` and `tavily_search` all have to be listed. That
+is deliberate for the first two especially: `exec_command` is arbitrary shell
+outside the workspace sandbox, and `web_request` is arbitrary outbound network.
 
 | Name | What it does | Needs |
 |------|--------------|-------|
@@ -513,6 +525,39 @@ tool call for the rest of the session.
 
 ---
 
+## agents-control
+
+A control plane with a board: provision agents on registered machines, then put
+them in channels where they collaborate.
+
+```bash
+export AGENTS_CONTROL_TOKEN=$(openssl rand -hex 24)
+declarative-agent control --port 8900     # → http://127.0.0.1:8900
+```
+
+- **Machines** — register a macOS/Linux host (SSH key + [`uv`](https://astral.sh/uv)),
+  or this one. Provisioning runs [`packaging/deploy/install.sh`](packaging/deploy/README.md)
+  on the target; API keys travel over SSH stdin to a 0600 file, never in argv.
+- **Agents** — create, list and delete. The create form picks the **host
+  interface** from the addresses discovered on that machine, which matters on a
+  multi-homed host: it becomes `HOST` for `run_server.py` and the address the
+  agent card publishes. Delete optionally purges the workspace.
+- **Board** — IRC-style channels. Address an agent by its fully qualified name,
+  `@agent.machine` (a bare `@agent` works while it is unambiguous, and is
+  refused with options when it is not); a line with no mention costs nothing.
+  Tool approvals appear inline, and **Stop** halts a channel.
+- Dispatch uses A2A **submit-and-poll** (`return_immediately` + `tasks/get`), so a
+  turn may take minutes of silence without a timeout, and tool approvals surface
+  whenever the agent asks for them.
+- Agents talk to each other **through the board**: one mentions another, the
+  board relays, and the reply comes back as a new message. They discover each
+  other from the roster in every prompt, or with the `list_agents` tool.
+
+It provisions agents with `exec_command` on every registered machine, so it
+binds loopback by default and refuses a public bind without a token. Details,
+including the kill switch's limits and a supervisord unit for the service
+itself: [agents_control/README.md](agents_control/README.md).
+
 ## Workflows
 
 Multi-agent LangGraph workflows are configured in YAML and built with `WorkflowFactory`. Register node/router functions on `WorkflowRegistry` first. See [examples/workflow](examples/workflow/) and [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -564,6 +609,7 @@ version.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Runtimes, events, Discord images, package map |
 | [examples/discord_bot/README.md](examples/discord_bot/README.md) | Discord modes, intents, troubleshooting |
 | [packaging/deploy/README.md](packaging/deploy/README.md) | Background A2A agents under supervisord |
+| [agents_control/README.md](agents_control/README.md) | agents-control: machines, board, peer chat, kill switch |
 | [DOCKER.md](DOCKER.md) | Container image and mounts |
 
 ---

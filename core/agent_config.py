@@ -29,6 +29,9 @@ class CommonAgentConfig:
     endpoint_url: Optional[str] = None
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
+    # Seconds to wait on one model call. A local model writing something long
+    # needs far more than a hosted one answering a question.
+    request_timeout: Optional[float] = None
     tools: List[Any] = field(default_factory=list)
     tools_approval_required: bool = True
     skills: Optional[List[str]] = None
@@ -70,6 +73,12 @@ def parse_common_config(
     if temperature is None:
         temperature = config.get("temperature")
 
+    # endpoint.timeout reads naturally next to endpoint.url, which is where a
+    # slow local server is configured in the first place.
+    request_timeout = endpoint.get("timeout")
+    if request_timeout is None:
+        request_timeout = config.get("request_timeout")
+
     return CommonAgentConfig(
         name=config["name"],
         description=config.get("description", "") or "",
@@ -79,6 +88,7 @@ def parse_common_config(
         endpoint_url=endpoint.get("url"),
         max_tokens=max_tokens,
         temperature=temperature,
+        request_timeout=request_timeout,
         tools=list(config.get("tools") or []),
         tools_approval_required=config.get("tools_approval_required", True),
         skills=config.get("skills"),

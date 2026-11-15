@@ -162,6 +162,10 @@ AgentFactory.from_yaml_file()
 LeanAIAgent.__init__
     │
     ├─ SkillRegistry(skills_directory)     progressive L1 catalog from SKILL.md
+    ├─ run_query drains the sync loop via asyncio.to_thread, so a blocking
+    │  model call does not stall the server: without it the A2A endpoint
+    │  answers nothing while the model works — no status, no tasks/get, not
+    │  even the next message/send
     ├─ LeanToolRegistry                    Skill, list_skills, FS tools, run_script
     ├─ register builtin + YAML tools       add_callable (type-coerce LLM args)
     ├─ LeanLLMClient                       OpenAI-compatible /chat/completions

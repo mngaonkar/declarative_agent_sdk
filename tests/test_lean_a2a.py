@@ -425,3 +425,78 @@ class TestAgentCard:
         assert card.version == "2.1.0"
         assert list(card.default_input_modes) == ["text/plain"]
         assert list(card.default_output_modes) == ["text/plain"]
+
+
+# ---------------------------------------------------------------------------
+# the loop must not block the event loop
+# ---------------------------------------------------------------------------
+
+class TestDrain:
+    """
+    The lean loop is synchronous and its LLM client uses blocking urllib, so
+    iterating it straight from an async method stalls the whole process: while
+    a model call is in flight the A2A server answers nothing — not a status
+    poll, not tasks/get, not even the next message/send. That made a
+    long-running turn impossible to follow, whichever A2A pattern was used.
+    """
+
+    @staticmethod
+    def _drain():
+        from declarative_agent_sdk.agents.lean.agent import _drain
+        return _drain
+
+    @pytest.mark.asyncio
+    async def test_it_yields_everything_in_order(self):
+        def numbers():
+            yield from (1, 2, 3)
+
+        assert [n async for n in self._drain()(numbers())] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_generator_ends_cleanly(self):
+        def nothing():
+            return
+            yield
+
+        assert [n async for n in self._drain()(nothing())] == []
+
+    @pytest.mark.asyncio
+    async def test_the_event_loop_keeps_running_during_blocking_work(self):
+        """The regression: a blocking call must not stall other coroutines."""
+        import asyncio
+        import time
+
+        def blocking():
+            for value in range(3):
+                time.sleep(0.15)        # stands in for urlopen
+                yield value
+
+        ticks = []
+
+        async def ticker():
+            for _ in range(12):
+                await asyncio.sleep(0.03)
+                ticks.append(1)
+
+        collected = []
+
+        async def consume():
+            async for value in self._drain()(blocking()):
+                collected.append(value)
+
+        await asyncio.gather(consume(), ticker())
+
+        assert collected == [0, 1, 2]
+        # ~0.45s of blocking work; a stalled loop would let almost no tick run
+        assert len(ticks) >= 8, f"the event loop was blocked ({len(ticks)} ticks)"
+
+    @pytest.mark.asyncio
+    async def test_an_exception_propagates(self):
+        def boom():
+            yield 1
+            raise RuntimeError("model said no")
+
+        drain = self._drain()
+        with pytest.raises(RuntimeError, match="model said no"):
+            async for _ in drain(boom()):
+                pass

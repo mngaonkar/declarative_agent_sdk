@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 DEFAULT_CONFIG_NAME = "agent.yaml"
+DEFAULT_CONTROL_DB = "~/.agents-control/control.db"
 
 # Which environment variable each provider needs for its API key.
 _PROVIDER_KEYS = {
@@ -376,6 +377,32 @@ def cmd_version(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_control(args: argparse.Namespace) -> int:
+    """Run the agents-control service."""
+    from declarative_agent_sdk.agents_control import ControlPlane
+
+    if args.log_level:
+        os.environ["SDK_LOG_LEVEL"] = args.log_level
+
+    plane = ControlPlane(
+        db_path=args.db,
+        token=args.token if args.token is not None else None,
+        public_url=args.public_url or "",
+    )
+    print(f"agents-control → http://{args.host}:{args.port}")
+    print(f"  store:   {plane.store.path}")
+    print(f"  agents:  {len(plane.store.agents())} on {len(plane.store.machines())} machine(s)")
+    if not plane.token:
+        print("  auth:    none — anything that can reach this port can provision "
+              "agents with shell access")
+    try:
+        plane.run(host=args.host, port=args.port)
+    except RuntimeError as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_a2a(args: argparse.Namespace) -> int:
     print("The a2a transport is not yet exposed through this CLI.\n"
           "Use declarative_agent_sdk.AIAgentServer directly for now.",
@@ -410,6 +437,24 @@ def build_parser() -> argparse.ArgumentParser:
                              type=str.upper,
                              help="SDK log level (default: INFO, or $SDK_LOG_LEVEL)")
     discord_cmd.set_defaults(func=cmd_discord)
+
+    control_cmd = sub.add_parser(
+        "control", help="Run the agents-control service (board + machine provisioning)")
+    control_cmd.add_argument("--host", default="127.0.0.1",
+                             help="Bind address (default: 127.0.0.1). A non-loopback bind "
+                                  "requires AGENTS_CONTROL_TOKEN.")
+    control_cmd.add_argument("--port", type=int, default=8900, help="Port (default: 8900)")
+    control_cmd.add_argument("--db", default=DEFAULT_CONTROL_DB,
+                             help=f"SQLite store (default: {DEFAULT_CONTROL_DB})")
+    control_cmd.add_argument("--token", default=None,
+                             help="API token; defaults to $AGENTS_CONTROL_TOKEN")
+    control_cmd.add_argument("--public-url", default=None,
+                             help="URL agents should call back on, if it is not "
+                                  "http://<host>:<port> (NAT, proxy, container)")
+    control_cmd.add_argument("--log-level", default=None,
+                             choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
+                             type=str.upper, help="SDK log level")
+    control_cmd.set_defaults(func=cmd_control)
 
     a2a_cmd = sub.add_parser("a2a", help="Serve an agent over A2A / JSON-RPC (not yet wired up)")
     a2a_cmd.add_argument("--config", help=f"Agent YAML config (default: ./{DEFAULT_CONFIG_NAME})")
