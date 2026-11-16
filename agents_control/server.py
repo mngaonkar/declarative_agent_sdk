@@ -585,6 +585,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
             "messages": store.messages(channel_id, limit=limit, after_id=after),
             "members": store.members(channel_id),
             "halted": store.is_halted(channel_id),
+            "auto_approve": store.auto_approve(channel_id),
         })
 
     @guard
@@ -604,6 +605,22 @@ def create_app(cp: "ControlPlane") -> Starlette:
             raise LookupError("no such channel")
         payload = await body(request)
         return JSONResponse(router.halt(channel_id, bool(payload.get("halted", True))))
+
+    @guard
+    async def set_auto_approve(request: Request) -> Response:
+        """How this channel answers tool approvals."""
+        channel_id = int(request.path_params["channel_id"])
+        if store.channel(channel_id) is None:
+            raise LookupError("no such channel")
+        payload = await body(request)
+        level = str(payload.get("level") or "")
+        try:
+            await in_thread(store.set_auto_approve, channel_id, level)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        router.announce_auto_approve(channel_id, level)
+        bus.publish({"type": "channels"})
+        return JSONResponse({"auto_approve": level})
 
     @guard
     async def resolve_approval(request: Request) -> Response:
@@ -813,6 +830,8 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/channels/{channel_id:int}/messages", get_messages),
         Route("/api/channels/{channel_id:int}/messages", post_message, methods=["POST"]),
         Route("/api/channels/{channel_id:int}/halt", set_halt, methods=["POST"]),
+        Route("/api/channels/{channel_id:int}/auto-approve",
+              set_auto_approve, methods=["POST"]),
         Route("/api/approvals/{approval_id}", resolve_approval, methods=["POST"]),
         Route("/api/settings", get_settings),
         Route("/api/settings", put_settings, methods=["PUT"]),

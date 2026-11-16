@@ -375,6 +375,7 @@ What this buys, beyond not timing out:
 | board | `poll_interval_seconds` → `poll_max_interval_seconds` | 2s → 10s | poll cadence |
 | board | `poll_request_timeout_seconds` | 60s | one submit or `tasks/get` call |
 | board | `approval_timeout_seconds` | 300s | how long a human has to click |
+| channel | **Approvals** selector (header) | ask every time | which tools skip the click |
 
 The reply timeout is a budget on the agent's *work*: waiting for an approval
 does not spend it, and a quiet agent is not a stalled one. A client timeout now
@@ -436,6 +437,31 @@ board closes that stream, the human decides, and the decision opens the next
 leg. Holding an HTTP request open across a human decision ran the client's read
 timeout down while the agent sat waiting for an answer, and the turn died at
 *requesting tool confirmation* every time.
+
+### Auto-approval, per channel
+
+Clicking Approve for every `web_request` in a long research run is the whole of
+the friction, so the channel header carries an **Approvals** selector:
+
+| Level | What happens |
+|---|---|
+| *ask every time* (default) | every gated tool waits for a human |
+| *auto, except shell* | approved immediately, unless the tool runs commands — `exec_command`, `exec_async`, `check_exec_async`, `run_script` |
+| *auto, everything* | approved immediately, no exceptions |
+
+It sits on the **channel**, not the agent, for three reasons: you can revoke it
+mid-run with one click, it does not follow the agent into other channels, and it
+needs no restart. The agent-side `tools_approval_required: false` is the blunt
+version — all-or-nothing, every channel, and only after a reinstall.
+
+Every automatic decision is still written into the transcript
+(`web_request auto-approved for @researcher.here`), because who approved a tool
+call is part of the record even when the answer was a standing one. A refusal
+under *auto, except shell* is posted too — otherwise an agent waiting on a
+denied `exec_command` looks like it stalled.
+
+The selector turns amber while it is on. Nothing is auto-approved on a channel
+you have not armed, and the level survives a restart of the board.
 
 Two consequences of a dispatch timing out, both now stated in the channel:
 
@@ -529,6 +555,7 @@ approvals — which are, by design, denied rather than resumed.
 | POST/DELETE | `/api/channels/{id}/members[/{agent_id}]` | membership |
 | GET/POST | `/api/channels/{id}/messages` | transcript / post and dispatch |
 | POST | `/api/channels/{id}/halt` | kill switch |
+| POST | `/api/channels/{id}/auto-approve` | `""` \| `"safe"` \| `"all"` |
 | POST | `/api/approvals/{id}` | approve or deny a tool call |
 | GET/PUT | `/api/settings` | defaults and timeouts |
 | GET | `/api/peer/roster` · `/api/peer/preflight` · POST `/api/peer/log` | used by `send_to_agent` |

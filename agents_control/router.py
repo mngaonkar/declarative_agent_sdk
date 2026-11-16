@@ -45,6 +45,12 @@ logger = get_logger(__name__)
 # the bare agent name when that is unambiguous. The machine part is optional in
 # the pattern, and the dot only counts when a name character follows it, so
 # "ask @coder." keeps its full stop.
+# Tools that run commands. Auto-approving these is a different decision from
+# auto-approving a fetch or a sandboxed write, so 'safe' holds the line here.
+SHELL_TOOLS = frozenset({
+    "exec_command", "exec_async", "check_exec_async", "run_script",
+})
+
 MENTION_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)?)")
 
 
@@ -619,6 +625,22 @@ class ChannelRouter:
         })
         return approval
 
+    def _auto_decision(self, channel_id: int, approval: PendingApproval):
+        """
+        Answer without a human when the channel says to. None means ask.
+
+        Per channel rather than per agent: `tools_approval_required: false` in
+        agent.yaml is all-or-nothing, needs a restart, and travels with the
+        agent to every channel it joins. This is revocable in one click and
+        scoped to the conversation where you decided it.
+        """
+        level = self.store.auto_approve(channel_id)
+        if level == "all":
+            return True
+        if level == "safe":
+            return approval.tool not in SHELL_TOOLS
+        return None
+
     async def _await_decision(
         self, channel_id: int, name: str, approval: PendingApproval
     ) -> bool:
@@ -629,6 +651,22 @@ class ChannelRouter:
         run just because the agent was still there, and must not hang forever
         either.
         """
+        auto = self._auto_decision(channel_id, approval)
+        if auto is not None:
+            # Recorded, not silent: an approval nobody saw still belongs in the
+            # transcript, and 'safe' refusing a shell call has to be visible or
+            # it looks like the agent stalled.
+            verdict = "auto-approved" if auto else (
+                "auto-denied (shell commands still need a person)")
+            self._post(channel_id, "system", "system",
+                       f"{approval.tool} {verdict} for @{name}.")
+            self.pending.pop(approval.id, None)
+            self.bus.publish({
+                "type": "approval_resolved", "channel_id": channel_id,
+                "id": approval.id, "approved": auto,
+            })
+            return auto
+
         wait_for = int(self.store.setting("approval_timeout_seconds", 300))
         try:
             await asyncio.wait_for(approval.event.wait(), timeout=wait_for)
@@ -679,6 +717,17 @@ class ChannelRouter:
             self._post(channel_id, "system", "system", "Channel resumed.")
         self.bus.publish({"type": "halt", "channel_id": channel_id, "halted": halted})
         return {"halted": halted, "cancelled": cancelled}
+
+    def announce_auto_approve(self, channel_id: int, level: str) -> None:
+        """Say so in the channel: changing who approves belongs in the record."""
+        said = {
+            "": "Tool approvals: asking every time.",
+            "safe": "Tool approvals: auto-approving everything except shell "
+                    "commands (exec_command, run_script).",
+            "all": "Tool approvals: auto-approving everything, shell commands "
+                   "included.",
+        }[level]
+        self._post(channel_id, "system", "system", said)
 
     # ------------------------------------------------- peer-reported traffic
 

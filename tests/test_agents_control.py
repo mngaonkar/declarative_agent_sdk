@@ -3124,3 +3124,124 @@ class TestPerRuntimeProperties:
         assert "prop.runtimes" in app_js
         # and re-decides when the dropdown changes, before anything is saved
         assert "agent_framework" in app_js and "showFor" in app_js
+
+
+# ---------------------------------------------------------------------------
+# auto-approval, per channel
+# ---------------------------------------------------------------------------
+
+class TestAutoApprove:
+    """
+    Clicking Approve for every web_request in a long research run is the whole
+    of the friction. The setting lives on the channel, not the agent:
+    `tools_approval_required: false` is all-or-nothing, needs a restart, and
+    follows the agent into every channel it joins.
+    """
+
+    @pytest.fixture
+    def board(self, store):
+        router = ChannelRouter(store, EventBus())
+        channel = store.add_channel("dev")
+        return router, store, channel["id"]
+
+    @staticmethod
+    def _approval(channel_id, tool):
+        from declarative_agent_sdk.agents_control.router import PendingApproval
+        return PendingApproval(channel_id, "researcher.here", tool, {},
+                               task_id="t", context_id="c", function_id="f")
+
+    def test_asking_is_the_default(self, board):
+        router, store, channel_id = board
+        assert store.auto_approve(channel_id) == ""
+        assert router._auto_decision(channel_id, self._approval(channel_id, "web_request")) is None
+
+    def test_safe_approves_a_fetch(self, board):
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "safe")
+        for tool in ("web_request", "write_file", "tavily_search"):
+            assert router._auto_decision(channel_id, self._approval(channel_id, tool)) is True
+
+    def test_safe_still_refuses_shell(self, board):
+        """Running commands is a different decision from fetching a page."""
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "safe")
+        for tool in ("exec_command", "exec_async", "run_script"):
+            assert router._auto_decision(channel_id, self._approval(channel_id, tool)) is False
+
+    def test_all_approves_shell_too(self, board):
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "all")
+        assert router._auto_decision(channel_id, self._approval(channel_id, "exec_command")) is True
+
+    @pytest.mark.asyncio
+    async def test_an_auto_decision_skips_the_wait(self, board):
+        router, store, channel_id = board
+        store.update_settings({"approval_timeout_seconds": 600})
+        store.set_auto_approve(channel_id, "safe")
+        approval = self._approval(channel_id, "web_request")
+        router.pending[approval.id] = approval
+
+        # nobody resolves it; without auto-approval this would block 600s
+        assert await asyncio.wait_for(
+            router._await_decision(channel_id, "researcher.here", approval),
+            timeout=2) is True
+        assert router.pending == {}
+
+    @pytest.mark.asyncio
+    async def test_it_is_recorded_in_the_transcript(self, board):
+        """An approval nobody saw still belongs in the record."""
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "safe")
+        approval = self._approval(channel_id, "web_request")
+        router.pending[approval.id] = approval
+        await router._await_decision(channel_id, "researcher.here", approval)
+        assert "auto-approved" in store.messages(channel_id)[-1]["text"]
+
+    @pytest.mark.asyncio
+    async def test_a_safe_refusal_is_visible(self, board):
+        """Otherwise it looks like the agent stalled."""
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "safe")
+        approval = self._approval(channel_id, "exec_command")
+        router.pending[approval.id] = approval
+        assert await router._await_decision(channel_id, "x", approval) is False
+        assert "shell commands still need a person" in store.messages(channel_id)[-1]["text"]
+
+    def test_the_level_is_validated(self, board):
+        router, store, channel_id = board
+        with pytest.raises(ValueError, match="unknown auto-approve level"):
+            store.set_auto_approve(channel_id, "yolo")
+
+    def test_it_survives_a_restart(self, tmp_path):
+        path = str(tmp_path / "s.db")
+        store = Store(path)
+        channel = store.add_channel("dev")
+        store.set_auto_approve(channel["id"], "all")
+        store.close()
+        assert Store(path).auto_approve(channel["id"]) == "all"
+
+    def test_the_api_sets_and_reports_it(self, client, plane):
+        channel = client.post("/api/channels", json={"name": "dev"},
+                              headers=AUTH).json()["channel"]
+        response = client.post(f"/api/channels/{channel['id']}/auto-approve",
+                               json={"level": "safe"}, headers=AUTH)
+        assert response.status_code == 200
+        read = client.get(f"/api/channels/{channel['id']}/messages", headers=AUTH).json()
+        assert read["auto_approve"] == "safe"
+        # and the change is announced, because who approves is part of the record
+        assert any("except shell" in m["text"] for m in read["messages"])
+
+    def test_a_bad_level_is_rejected(self, client):
+        channel = client.post("/api/channels", json={"name": "dev"},
+                              headers=AUTH).json()["channel"]
+        assert client.post(f"/api/channels/{channel['id']}/auto-approve",
+                           json={"level": "yolo"}, headers=AUTH).status_code == 400
+
+    def test_the_board_shows_it_next_to_stop(self):
+        html = (Path(__file__).resolve().parents[1]
+                / "agents_control" / "static" / "index.html").read_text()
+        app_js = (Path(__file__).resolve().parents[1]
+                  / "agents_control" / "static" / "app.js").read_text()
+        assert 'id="auto-approve"' in html
+        assert "auto-approve`" in app_js
+        assert "armed" in app_js          # visibly on, not a quiet default
