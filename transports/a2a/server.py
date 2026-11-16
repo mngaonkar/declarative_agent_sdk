@@ -5,6 +5,8 @@ from a2a.utils.constants import DEFAULT_RPC_URL, TransportProtocol, PROTOCOL_VER
 from a2a.types import AgentInterface
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 import socket
 
 from declarative_agent_sdk.core.agent_logging import get_logger
@@ -54,6 +56,7 @@ class AIAgentServer():
         routes = (
             create_agent_card_routes(self._agent.agent_card)
             + create_jsonrpc_routes(request_handler, DEFAULT_RPC_URL)
+            + [Route("/context", self._context_route, methods=["GET"])]
         )
 
         self.app = Starlette(routes=routes)
@@ -63,6 +66,37 @@ class AIAgentServer():
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+    async def _context_route(self, request):
+        """
+        How big a prompt this agent is prefixing to each model request.
+
+        The conversation history lives in this process and nowhere else: a
+        model server only knows about the request it was last handed, and the
+        A2A protocol has no shape for "how much context are you carrying?".
+        agents-control polls this to show it on the Agents tab.
+
+        Sizes only — no message content is returned, so this exposes nothing
+        the agent card does not already.
+        """
+        report = getattr(self._agent, "context_report", None)
+        if report is None:
+            return JSONResponse({
+                "supported": False,
+                "agent": self._agent.name,
+                "note": (
+                    "this runtime does not report its context size — "
+                    "the lean runtime does"
+                ),
+            })
+        try:
+            return JSONResponse({"supported": True, **report()})
+        except Exception as exc:      # noqa: BLE001 — diagnostics must not 500 silently
+            logger.warning(f"/context failed: {exc}")
+            return JSONResponse(
+                {"supported": False, "agent": self._agent.name, "error": str(exc)},
+                status_code=500,
+            )
 
     def run(self):
         # Both failure paths below raise rather than return. Logging and

@@ -194,6 +194,10 @@ $SCTL stop <name>            # leave it registered but down
 $SCTL shutdown               # stop supervisord and every agent with it
 
 curl -s http://<advertise_host>:<port>/.well-known/agent-card.json
+
+# how much context the agent is prefixing to each model request (lean only;
+# sizes, never message content)
+curl -s http://<advertise_host>:<port>/context
 ```
 
 The exact `supervisorctl` invocation is in the install's JSON output, so an

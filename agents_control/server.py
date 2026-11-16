@@ -28,6 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.agents_control import config as agent_config
+from declarative_agent_sdk.agents_control import metrics as model_metrics
 from declarative_agent_sdk.agents_control.machines import MachineDriver, MachineError
 from declarative_agent_sdk.agents_control.router import ChannelRouter, EventBus
 from declarative_agent_sdk.agents_control.store import Store, DEFAULT_DB_PATH
@@ -69,6 +70,9 @@ class ControlPlane:
         self.driver = MachineDriver()
         self.bus = EventBus()
         self.router = ChannelRouter(self.store, self.bus)
+        # Holds the previous /metrics reading per endpoint so throughput can be
+        # reported over the window between polls, not just since boot.
+        self.sampler = model_metrics.Sampler()
         self.token = token if token is not None else os.environ.get("AGENTS_CONTROL_TOKEN", "")
         self.public_url = public_url.rstrip("/")
         self.app = create_app(self)
@@ -134,6 +138,7 @@ class ControlPlane:
 
 def create_app(cp: "ControlPlane") -> Starlette:
     store, driver, bus, router = cp.store, cp.driver, cp.bus, cp.router
+    sampler = cp.sampler
 
     # ------------------------------------------------------------------ auth
 
@@ -404,6 +409,9 @@ def create_app(cp: "ControlPlane") -> Starlette:
         result["tools"] = str(tools)
         result["sdk_source"] = result.get("sdk_source") or ""
         result["description"] = str(payload.get("description") or "")
+        # Kept so the board can read this model server's /metrics and /slots
+        # later; install.sh --list never reports it back.
+        result["endpoint"] = str(payload.get("endpoint") or "")
         agent = await in_thread(store.upsert_agent, int(machine["id"]), result)
         bus.publish({"type": "agents"})
         return JSONResponse({"agent": agent, "result": result})
@@ -441,6 +449,14 @@ def create_app(cp: "ControlPlane") -> Starlette:
             driver.read_agent_files, machine, str(agent["prefix"] or "")
         )
         parsed = agent_config.parse(files["yaml"])
+        # agent.yaml is the authority on where the model runs, so a read is
+        # also the chance to correct the stored endpoint — including for agents
+        # installed before the board tracked one.
+        endpoint = str((parsed.get("endpoint") or {}).get("url") or "") \
+            if isinstance(parsed.get("endpoint"), dict) else ""
+        if endpoint != str(agent["endpoint"] or ""):
+            await in_thread(store.set_agent_endpoint, int(agent["id"]), endpoint)
+            agent = dict(agent, endpoint=endpoint)
         status = await in_thread(
             driver.supervisor_action, machine, str(agent["prefix"] or ""),
             agent["name"], "status",
@@ -460,6 +476,61 @@ def create_app(cp: "ControlPlane") -> Starlette:
             "framework": agent_config.runtime_of(
                 str(parsed.get("agent_framework") or parsed.get("backend") or "lean")),
             "status": status,
+        })
+
+    @guard
+    async def agent_metrics(request: Request) -> Response:
+        """
+        What each agent's model server is doing, grouped by endpoint.
+
+        Grouped rather than listed per agent because that is the shape of the
+        underlying fact: two agents pointed at one single-slot server are not
+        two independent model servers, and their turns serialise. The grouping
+        makes that visible instead of showing the same numbers twice.
+
+        Endpoints are learned at create time and corrected whenever an
+        agent.yaml is read; an agent with none reports as unknown rather than
+        being silently dropped.
+        """
+        agents = await in_thread(store.agents)
+        # Two different questions, so two different sources: the agent knows
+        # how much history it prefixes to a request, the server knows what it
+        # did with the one it received.
+        contexts = await model_metrics.contexts_for(agents)
+        groups: Dict[str, Any] = {}
+        for agent in agents:
+            endpoint = str(agent.get("endpoint") or "")
+            entry = groups.setdefault(endpoint, {"endpoint": endpoint, "agents": []})
+            entry["agents"].append({
+                "id": agent["id"], "qualified": agent["qualified"],
+                "model": agent["model"], "provider": agent["provider"],
+                "ready": bool(agent["ready"]),
+                "context": contexts.get(int(agent["id"]), {}),
+            })
+
+        reports = await model_metrics.probe_all(
+            [e for e in groups if e], sampler=sampler,
+        )
+        by_url = {str(r.get("endpoint")): r for r in reports}
+        servers = []
+        for endpoint, entry in sorted(groups.items()):
+            report = dict(by_url.get(endpoint) or {})
+            if not endpoint:
+                report = {
+                    "endpoint": "", "reachable": False,
+                    "error": "no endpoint recorded — open ⚙ Settings for one of "
+                             "these agents and the board will learn it",
+                }
+            report["agents"] = entry["agents"]
+            # Two agents on one endpoint share its slots; say so once here
+            # rather than leaving it to be inferred from the numbers.
+            report["shared"] = len(entry["agents"]) > 1
+            servers.append(report)
+        return JSONResponse({
+            "servers": servers,
+            # Flat, keyed by agent id, so the agents table can show a context
+            # column without walking the grouping.
+            "contexts": {str(k): v for k, v in contexts.items()},
         })
 
     @guard
@@ -819,6 +890,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
               machine_interfaces, methods=["POST"]),
         Route("/api/agents", create_agent, methods=["POST"]),
         Route("/api/agents/{agent_id:int}", delete_agent, methods=["DELETE"]),
+        Route("/api/agents/metrics", agent_metrics),
         Route("/api/agents/{agent_id:int}/config", get_agent_config),
         Route("/api/agents/{agent_id:int}/config", put_agent_config, methods=["PUT"]),
         Route("/api/agents/{agent_id:int}/action", agent_action, methods=["POST"]),

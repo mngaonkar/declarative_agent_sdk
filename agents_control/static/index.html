@@ -108,7 +108,17 @@
         <button class="btn primary" id="new-agent">Create agent</button>
       </div>
     </header>
-    <div class="scroll"><table class="grid" id="agents-table"></table></div>
+    <div class="scroll">
+      <table class="grid" id="agents-table"></table>
+      <section class="servers" id="model-servers">
+        <div class="servers-head">
+          <h2>Model servers</h2>
+          <p class="sub">Live from each endpoint's <code>/metrics</code>, <code>/slots</code>
+             and <code>/props</code> — refreshed while this tab is open</p>
+        </div>
+        <div id="server-cards"></div>
+      </section>
+    </div>
   </main>
 
   <!-- ─── machines view ───────────────────────────────────────────────── -->

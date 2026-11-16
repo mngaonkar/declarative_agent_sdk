@@ -193,6 +193,19 @@ class LeanAIAgent(BaseAgent):
         async for ev in _drain(self._loop.run(query, sid)):
             yield _loop_event_to_agent_event(ev)
 
+    def context_report(self) -> Dict[str, Any]:
+        """
+        How big the prompt this agent prefixes to every request has grown.
+
+        Read over HTTP by agents-control, which cannot see it any other way:
+        the history lives in this process, and a model server only knows about
+        whichever request it was last handed.
+        """
+        report = self._loop.context_report()
+        report["agent"] = self.name
+        report["model"] = getattr(self._client, "model", "")
+        return report
+
     async def tool_confirmation(
         self,
         context_id: str,

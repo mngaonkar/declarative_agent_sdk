@@ -4,6 +4,7 @@ const state = {
   machines: [], agents: [], channels: [], settings: {}, defaults: {},
   channelId: null, messages: [], members: [], halted: false, autoApprove: '',
   typing: new Set(), approvals: new Map(), lastId: 0, needsAuth: false,
+  contexts: {},
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -22,7 +23,7 @@ const el = (tag, cls, text) => {
  * process started. Edit the tree without restarting and the new board asks the
  * old server for routes it does not have — which it answers with a bare 404.
  */
-const EXPECTS_API = 19;
+const EXPECTS_API = 20;
 
 /** An agent's address on the board. The bare name is unique only per machine. */
 const fqn = (agent) => agent.qualified || `${agent.name}.${agent.machine_name}`;
@@ -412,15 +413,17 @@ function scrollDown() {
 function renderAgents() {
   const table = $('#agents-table');
   table.innerHTML = '';
-  table.append(headRow(['Agent (name.machine)', 'Machine', 'Runtime', 'URL', 'State', '']));
+  table.append(headRow(
+    ['Agent (name.machine)', 'Machine', 'Runtime', 'Context', 'URL', 'State', '']));
   if (!state.agents.length) {
-    table.append(emptyRow(6, 'No agents. Register a machine, then create one.'));
+    table.append(emptyRow(7, 'No agents. Register a machine, then create one.'));
     return;
   }
   state.agents.forEach((agent) => {
     const row = el('tr');
     row.append(cell(fqn(agent), 'mono'), cell(agent.machine_name));
     row.append(cell(`${agent.framework} · ${agent.provider} · ${agent.model || '—'}`));
+    row.append(contextCell(state.contexts[String(agent.id)]));
     const url = el('td', 'mono');
     if (agent.url) {
       const link = el('a', '', agent.url);
@@ -461,6 +464,214 @@ async function deleteAgent(agent) {
     load();
   } catch (error) { toast(error.message, true); }
 }
+
+/* ── model servers ──────────────────────────────────────────────────────
+ * The numbers that explain a slow turn, read from the model server rather
+ * than guessed at from the board: how big a prompt each request carries, how
+ * fast tokens come out, and whether two agents are queueing for one slot.
+ * Polled only while the Agents tab is open and the page is visible — this
+ * costs three HTTP calls per endpoint per tick, and nobody needs them while
+ * they are reading the board.
+ */
+
+const compact = (value) => {
+  const n = Number(value);
+  if (value === null || value === undefined || !Number.isFinite(n)) return '—';
+  if (Math.abs(n) >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+};
+
+/**
+ * What this agent prefixes to every model request, as the agent reports it.
+ *
+ * Not the same number as a server card's prompt tokens: this is the history
+ * the agent is carrying right now, which is knowable between requests, while
+ * the card shows what one server was last handed.
+ */
+function contextCell(report) {
+  const td = el('td');
+  if (!report || report.supported === false) {
+    td.append(el('span', 'dim', '—'));
+    if (report?.error) td.title = report.error;
+    return td;
+  }
+  const top = report.top;
+  if (!top) {
+    td.append(el('span', 'dim', 'no history yet'));
+    td.title = 'This agent has not been addressed since it started.';
+    return td;
+  }
+  const hot = report.history_limit && top.messages >= report.history_limit;
+  const value = el('span', `mono${hot ? ' warn-text' : ''}`,
+                   `~${compact(top.prompt_tokens)} tok`);
+  td.append(value);
+  const note = [`${top.messages} msgs`];
+  if (report.history_limit) note.push(`limit ${report.history_limit}`);
+  if (report.session_count > 1) note.push(`${report.session_count} sessions`);
+  if (top.elided_messages) note.push(`${top.elided_messages} trimmed`);
+  td.append(el('div', 'note', note.join(' · ')));
+  td.title = `~${top.prompt_tokens} tokens estimated from ${top.prompt_chars} `
+    + `characters: ${report.system_prompt_chars} of system prompt plus `
+    + `${top.chars} of history. Sent on every request in this session.`;
+  return td;
+}
+
+function stat(key, value, note, cls) {
+  const box = el('div', `stat${cls ? ` ${cls}` : ''}`);
+  box.append(el('span', 'k', key));
+  box.append(el('span', `v${value.hot ? ' hot' : ''}`, value.text ?? String(value)));
+  if (note) box.append(el('span', 'n', note));
+  return box;
+}
+
+function bar(fraction, hot) {
+  const outer = el('div', 'bar');
+  const fill = el('i', hot ? 'hot' : '');
+  fill.style.width = `${Math.min(100, Math.max(0, fraction * 100)).toFixed(1)}%`;
+  outer.append(fill);
+  return outer;
+}
+
+function serverCard(server) {
+  const card = el('div', 'server-card');
+  const head = el('div', 'card-head');
+  head.append(el('strong', '', server.model || 'model unknown'));
+  if (server.url) head.append(el('span', 'mono', server.url));
+  if (server.shared) {
+    const tag = el('span', 'tag warn', 'shared');
+    tag.title = 'More than one agent uses this server. If it has one slot, '
+      + 'their turns queue behind each other.';
+    head.append(tag);
+  }
+  if (!server.reachable) head.append(el('span', 'tag bad', 'unreachable'));
+  card.append(head);
+
+  const served = el('div', 'served');
+  (server.agents || []).forEach((agent) => {
+    served.append(el('span', `tag ${agent.ready ? 'ok' : 'bad'}`, agent.qualified));
+  });
+  card.append(served);
+
+  if (server.error) {
+    card.append(el('p', 'note', server.error));
+    return card;
+  }
+
+  const stats = el('div', 'stats');
+  const ctx = server.context;
+  if (ctx) {
+    // The headline: what the agent actually sends up on each request. While a
+    // request is in the slot this is that request; afterwards the slot still
+    // holds the last one, which is said rather than implied.
+    const window = ctx.n_ctx ? ` / ${compact(ctx.n_ctx)}` : '';
+    const parts = [ctx.live ? 'in flight' : 'last request'];
+    if (ctx.live && ctx.cached) {
+      parts.push(`${compact(ctx.cached)} from cache, ${compact(ctx.processed)} computed`);
+    }
+    if (ctx.fill !== undefined) parts.push(`${(ctx.fill * 100).toFixed(0)}% of window`);
+    const hot = (ctx.fill || 0) > 0.6;
+    const box = stat('Prompt tokens', { text: `${compact(ctx.tokens)}${window}`, hot },
+                     parts.join(' · '), 'wide');
+    if (ctx.fill !== undefined) box.append(bar(ctx.fill, hot));
+    stats.append(box);
+
+    if (ctx.live && ctx.decoded !== undefined) {
+      const cap = ctx.max_tokens === -1 ? 'no cap' : `cap ${compact(ctx.max_tokens)}`;
+      stats.append(stat('Generated', compact(ctx.decoded), cap));
+    } else if (ctx.max_tokens !== undefined) {
+      stats.append(stat('Output cap',
+        { text: ctx.max_tokens === -1 ? 'none' : compact(ctx.max_tokens),
+          hot: ctx.max_tokens === -1 },
+        ctx.max_tokens === -1 ? 'a model may run on until it chooses to stop' : ''));
+    }
+  }
+
+  const m = server.metrics || {};
+  const recent = server.recent || {};
+  // A windowed rate when the poll window contained a finished request, else
+  // the server's lifetime average — labelled, because they differ a lot: the
+  // lifetime figure carries every slow high-context turn ever served.
+  [['Decode', 'decode_rate', 'decode_rate', 'tok/s out'],
+   ['Prefill', 'prefill_rate', 'prefill_rate', 'tok/s in']].forEach(
+    ([label, recentKey, lifetimeKey, unit]) => {
+      const windowed = recent[recentKey];
+      const value = windowed ?? m[lifetimeKey];
+      if (value === undefined) return;
+      const note = windowed !== undefined
+        ? `${unit} · last ${Math.round(recent.window_seconds)}s`
+        : `${unit} · lifetime`;
+      stats.append(stat(label, value.toFixed(1), note));
+    });
+
+  if (server.cache_hit_ratio !== undefined) {
+    stats.append(stat('Prefix cache', `${(server.cache_hit_ratio * 100).toFixed(0)}%`,
+                      'of prompt tokens reused'));
+  }
+  if (ctx && ctx.slots_total) {
+    stats.append(stat('Slots', `${ctx.slots_busy}/${ctx.slots_total}`,
+                      ctx.slots_total === 1 ? 'one at a time' : 'in parallel'));
+  }
+  if (m.deferred !== undefined) {
+    stats.append(stat('Queued', { text: compact(m.deferred), hot: m.deferred > 0 },
+                      'requests waiting for a slot'));
+  }
+  card.append(stats);
+
+  [server.metrics_note, server.slots_note].filter(Boolean).forEach((note) => {
+    card.append(el('p', 'note card-note', note));
+  });
+  return card;
+}
+
+function renderServers(servers) {
+  const host = $('#server-cards');
+  host.innerHTML = '';
+  if (!servers.length) {
+    host.append(el('p', 'note', 'No agents yet, so no model servers to read.'));
+    return;
+  }
+  servers.forEach((server) => host.append(serverCard(server)));
+}
+
+let serverTimer = null;
+let serverFailures = 0;
+
+async function pollServers() {
+  if (document.hidden) return;
+  try {
+    const data = await api('/api/agents/metrics');
+    serverFailures = 0;
+    state.contexts = data.contexts || {};
+    renderServers(data.servers || []);
+    renderAgents();            // the Context column comes from this same poll
+  } catch (error) {
+    serverFailures += 1;
+    // Three in a row means the board itself is unhappy; stop asking rather
+    // than hammering it, and say why on the card.
+    if (serverFailures >= 3) {
+      stopServerPolling();
+      $('#server-cards').innerHTML = '';
+      $('#server-cards').append(el('p', 'note', `Gave up reading endpoints: ${error.message}`));
+    }
+  }
+}
+
+function startServerPolling() {
+  if (serverTimer) return;
+  serverFailures = 0;
+  pollServers();
+  serverTimer = setInterval(pollServers, 5000);
+}
+
+function stopServerPolling() {
+  if (serverTimer) clearInterval(serverTimer);
+  serverTimer = null;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && serverTimer) pollServers();
+});
 
 /* ── agent config editor ────────────────────────────────────────────── */
 
@@ -829,6 +1040,7 @@ document.querySelectorAll('.view-tab').forEach((tab) => {
     document.querySelectorAll('.view-tab').forEach((t) => t.classList.toggle('active', t === tab));
     ['board', 'agents', 'machines', 'settings'].forEach((view) =>
       $(`#view-${view}`).classList.toggle('hidden', view !== tab.dataset.view));
+    if (tab.dataset.view === 'agents') startServerPolling(); else stopServerPolling();
   };
 });
 

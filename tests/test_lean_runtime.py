@@ -901,3 +901,84 @@ class TestMalformedToolCall:
             "workspace_directory": str(tmp_path / "w"),
         })
         assert agent._client.retry_malformed_tool_calls == 1
+
+
+class TestContextReport:
+    """
+    The size of what the agent prefixes to every request.
+
+    A model server can only report the request it was handed; the history that
+    makes that request big lives in this process, which is why the agent has to
+    answer for it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _workspace(self, tmp_path):
+        self.tmp_path = tmp_path
+
+    def _loop(self, **kwargs):
+        skills = SkillRegistry(root=str(self.tmp_path / "skills"))
+        (self.tmp_path / "skills").mkdir(exist_ok=True)
+        tools = LeanToolRegistry(skills, workspace=str(self.tmp_path / "ws"))
+        return LeanLoop(client=MagicMock(), tools=tools, skills=skills,
+                        instruction="be brief", **kwargs)
+
+    def test_a_fresh_agent_reports_its_system_prompt_only(self):
+        report = self._loop().context_report()
+        assert report["sessions"] == []
+        assert report["system_prompt_chars"] > 0
+
+    def test_history_is_measured_per_session(self):
+        loop = self._loop()
+        loop._history["a"] = [{"role": "user", "content": "x" * 400}]
+        loop._history["b"] = [{"role": "user", "content": "y" * 4000}]
+        report = loop.context_report()
+        # largest first, because that is the one a row should show
+        assert [s["session"] for s in report["sessions"]] == ["b", "a"]
+        assert report["sessions"][0]["chars"] == 4000
+        assert report["sessions"][0]["messages"] == 1
+
+    def test_tool_call_arguments_count_toward_the_prompt(self):
+        """
+        A write_file call carries the whole file in its arguments. Counting
+        only `content` would miss exactly the thing that makes history big.
+        """
+        loop = self._loop()
+        loop._history["s"] = [{
+            "role": "assistant", "content": "",
+            "tool_calls": [{"function": {"name": "write_file",
+                                         "arguments": "{\"content\": \"" + "z" * 5000 + "\"}"}}],
+        }]
+        assert loop.context_report()["sessions"][0]["chars"] > 5000
+
+    def test_the_prompt_includes_the_system_preamble(self):
+        loop = self._loop()
+        loop._history["s"] = [{"role": "user", "content": "x" * 100}]
+        session = loop.context_report()["sessions"][0]
+        assert session["prompt_chars"] == session["chars"] + loop.context_report()[
+            "system_prompt_chars"]
+
+    def test_elided_messages_are_counted(self):
+        """So a shrinking history is visibly the trimming, not lost work."""
+        from declarative_agent_sdk.agents.lean.runtime.loop import _elide_mark
+        loop = self._loop()
+        loop._history["s"] = [
+            {"role": "tool", "content": f"head {_elide_mark(9000)}"},
+            {"role": "tool", "content": "small"},
+        ]
+        assert loop.context_report()["sessions"][0]["elided_messages"] == 1
+
+    def test_the_limits_are_reported_with_the_sizes(self):
+        """A number without its limit does not say whether it is a problem."""
+        report = self._loop(history_limit=12, tool_payload_keep=2,
+                            tool_payload_max_chars=500).context_report()
+        assert report["history_limit"] == 12
+        assert report["tool_payload_keep"] == 2
+        assert report["tool_payload_max_chars"] == 500
+
+    def test_no_message_content_is_returned(self):
+        """Sizes are diagnostics; transcripts are not."""
+        loop = self._loop()
+        loop._history["s"] = [{"role": "user", "content": "the secret is swordfish"}]
+        import json as _json
+        assert "swordfish" not in _json.dumps(loop.context_report())

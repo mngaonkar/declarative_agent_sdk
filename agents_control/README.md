@@ -167,6 +167,81 @@ for an agent you have not added yet is exactly when you need it. Agents outside
 the channel are dimmed and marked `+ add to channel`; picking one joins it and
 then inserts the mention, so what you typed can actually be dispatched.
 
+## Why a turn was slow
+
+The Agents tab reads the two numbers that actually explain a slow turn, so
+diagnosing one no longer starts with ssh and curl. They answer different
+questions and come from different places, which is why both are shown.
+
+**Context, per agent.** Each lean agent serves `GET /context` on its A2A port,
+reporting the size of what it prefixes to every model request: its system
+prompt plus the history it has retained for each session. Sizes only — no
+message content leaves the agent process. The **Context** column shows the
+largest session's estimated prompt tokens, its message count, and the
+`history_limit` it is measured against. This is the figure that explains a
+conversation getting slower as it goes on, and nothing outside the agent
+process knows it between requests.
+
+Token counts there are estimated at four characters per token and labelled `~`.
+Exact counts would need the agent to tokenise its whole history on every poll,
+and the question being asked — *is this context big?* — does not need that
+precision.
+
+**Throughput, per model server.** Under the table, one card per distinct
+endpoint, read from llama.cpp's `/props`, `/metrics` and `/slots`:
+
+| Shown | From | Means |
+|---|---|---|
+| Prompt tokens | `/slots` → `n_prompt_tokens` | what the request in the slot carries, with the share that came from the prefix cache, against the server's window |
+| Generated | `/slots` → `n_decoded` | tokens produced so far on the live request, and the cap it is running against |
+| Decode / Prefill | `/metrics` deltas | tok/s over the window between polls, falling back to the server's lifetime average when no request finished in that window |
+| Prefix cache | `/metrics` | share of prompt tokens reused rather than recomputed |
+| Slots · Queued | `/slots`, `/metrics` | how many requests run at once, and how many are waiting |
+
+A card marked **shared** serves more than one agent. On a single-slot server
+that means their turns queue behind each other, which is worth seeing before
+concluding that one agent is slow.
+
+The cards are polled every 5s, but only while the Agents tab is open and the
+page is visible — three HTTP calls per endpoint per tick is not something to
+run behind the board.
+
+### Reading them together
+
+The two numbers are close but not interchangeable, and the difference is
+informative:
+
+- the agent's figure is *what it will send next*, known between requests;
+- the card's figure is *what that server was last handed*, which on a shared
+  endpoint may be the other agent's request.
+
+A card reporting far more prompt tokens than any agent claims to carry means
+something other than history is filling the prompt — tool schemas, or a skill
+catalogue that grew.
+
+### When a number is missing
+
+Each source fails independently and says which:
+
+- **`—` in the Context column** — the agent is not running, or predates the
+  `/context` route. Recreate it from a tree that has this change; the tooltip
+  says which of the two it was.
+- **no card, or an unreachable one** — the endpoint is down, or the board never
+  learned it. Endpoints are recorded when an agent is created and corrected
+  every time its `agent.yaml` is read, so opening **⚙ Settings** once on an
+  agent created before this change teaches the board where its model runs.
+- **`/metrics returned 404`** — llama.cpp was started without `--metrics`.
+  Everything else still reads.
+- **`/slots returned 501`** — the server runs with `--no-slots`, so prompt size
+  is unavailable. Throughput still reads.
+- **a rate labelled `lifetime`** — no request finished inside the poll window.
+  The lifetime average includes every slow high-context turn the server ever
+  did, so treat it as a floor, not as current speed.
+
+Non-llama.cpp servers are read where their names are recognised (vLLM's
+`vllm:*` counters map onto the same card); anything else reports *no recognised
+metrics* rather than failing.
+
 ## Which SDK an agent runs
 
 `install.sh` installs the SDK **from GitHub** by default
@@ -556,6 +631,7 @@ approvals — which are, by design, denied rather than resumed.
 | GET/POST | `/api/channels/{id}/messages` | transcript / post and dispatch |
 | POST | `/api/channels/{id}/halt` | kill switch |
 | POST | `/api/channels/{id}/auto-approve` | `""` \| `"safe"` \| `"all"` |
+| GET | `/api/agents/metrics` | model-server stats per endpoint, context per agent |
 | POST | `/api/approvals/{id}` | approve or deny a tool call |
 | GET/PUT | `/api/settings` | defaults and timeouts |
 | GET | `/api/peer/roster` · `/api/peer/preflight` · POST `/api/peer/log` | used by `send_to_agent` |

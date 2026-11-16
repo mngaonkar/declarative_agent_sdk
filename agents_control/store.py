@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS agents (
     framework   TEXT NOT NULL DEFAULT 'lean',
     provider    TEXT NOT NULL DEFAULT '',
     model       TEXT NOT NULL DEFAULT '',
+    -- where the model actually runs, so /metrics and /slots can be read
+    endpoint    TEXT NOT NULL DEFAULT '',
     tools       TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     ready       INTEGER NOT NULL DEFAULT 0,
@@ -207,7 +209,8 @@ class Store:
     def _migrate(self) -> None:
         """Add columns introduced after a store was first created."""
         agent_columns = {row["name"] for row in self._rows("PRAGMA table_info(agents)")}
-        for column, ddl in (("prefix", "TEXT NOT NULL DEFAULT ''"),):
+        for column, ddl in (("prefix", "TEXT NOT NULL DEFAULT ''"),
+                            ("endpoint", "TEXT NOT NULL DEFAULT ''")):
             if column not in agent_columns:
                 self._write(f"ALTER TABLE agents ADD COLUMN {column} {ddl}")
                 logger.info(f"store: added agents.{column}")
@@ -343,14 +346,17 @@ class Store:
         self._write(
             """
             INSERT INTO agents (machine_id, name, prefix, url, agent_card, port, framework,
-                                provider, model, tools, description, ready, problems, created)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                provider, model, endpoint, tools, description,
+                                ready, problems, created)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(machine_id, name) DO UPDATE SET
                 prefix = CASE WHEN excluded.prefix = ''
                               THEN agents.prefix ELSE excluded.prefix END,
                 url = excluded.url, agent_card = excluded.agent_card,
                 port = excluded.port, framework = excluded.framework,
                 provider = excluded.provider, model = excluded.model,
+                endpoint = CASE WHEN excluded.endpoint = ''
+                                THEN agents.endpoint ELSE excluded.endpoint END,
                 tools = CASE WHEN excluded.tools = '' THEN agents.tools ELSE excluded.tools END,
                 description = CASE WHEN excluded.description = ''
                                    THEN agents.description ELSE excluded.description END,
@@ -361,11 +367,23 @@ class Store:
                 str(meta.get("url") or ""), str(meta.get("agent_card") or ""),
                 meta.get("port"), str(meta.get("framework") or "lean"),
                 str(meta.get("provider") or ""), str(meta.get("model") or ""),
+                str(meta.get("endpoint") or ""),
                 str(tools or ""), str(meta.get("description") or ""),
                 int(bool(meta.get("ready"))), str(problems or ""), _now(),
             ),
         )
         return self.agent_by_name(machine_id, name) or {}
+
+    def set_agent_endpoint(self, agent_id: int, endpoint: str) -> None:
+        """
+        Record where an agent's model runs.
+
+        Called when an agent is created and again whenever its ``agent.yaml``
+        is read, which is how agents installed before this column existed
+        acquire an endpoint without being reinstalled.
+        """
+        self._write("UPDATE agents SET endpoint = ? WHERE id = ?",
+                    (str(endpoint or ""), agent_id))
 
     def agent(self, agent_id: int) -> Optional[Dict[str, Any]]:
         return self._row(

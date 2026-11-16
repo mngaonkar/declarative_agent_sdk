@@ -3,8 +3,10 @@
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
+import httpx
 import pytest
 from a2a.types import TaskState
 from starlette.testclient import TestClient
@@ -21,6 +23,7 @@ from declarative_agent_sdk.agents_control.router import (
     mentions,
     resolve_member,
 )
+from declarative_agent_sdk.agents_control import metrics
 from declarative_agent_sdk.agents_control.server import ControlPlane
 from declarative_agent_sdk.agents_control.store import Store
 
@@ -3384,3 +3387,485 @@ class TestTranscriptSlots:
 
         prompt = router._prompt_for(cid, "a.here", "now convert it", "you")
         assert "workspace/p.md" in prompt
+# ---------------------------------------------------------------------------
+# model-server metrics
+# ---------------------------------------------------------------------------
+
+LLAMACPP_METRICS = """\
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 1.13378e+06
+# HELP llamacpp:prompt_tokens_cached_total Number of prompt tokens reused
+# TYPE llamacpp:prompt_tokens_cached_total counter
+llamacpp:prompt_tokens_cached_total 7.80234e+06
+llamacpp:prompt_seconds_total 857.147
+llamacpp:tokens_predicted_total 1.26773e+06
+llamacpp:tokens_predicted_seconds_total 27871.3
+llamacpp:predicted_tokens_seconds 46.9731
+llamacpp:prompt_tokens_seconds 1323.7
+llamacpp:requests_processing 0
+llamacpp:requests_deferred 0
+llamacpp:n_busy_slots_per_decode 1
+llamacpp:spec_decode_num_drafts_total 0
+"""
+
+# The shape /slots really returns, taken from a running server mid-request.
+BUSY_SLOT = [{
+    "id": 0, "n_ctx": 131072, "is_processing": True, "id_task": 1269278,
+    "n_prompt_tokens": 18144, "n_prompt_tokens_processed": 346,
+    "n_prompt_tokens_cache": 17487,
+    "params": {"n_predict": 32768, "temperature": 1.0},
+    "next_token": [{"has_next_token": True, "n_remain": 32457, "n_decoded": 311}],
+}]
+
+IDLE_SLOT = [dict(BUSY_SLOT[0], is_processing=False, n_prompt_tokens=21559,
+                  n_prompt_tokens_cache=0, n_prompt_tokens_processed=0,
+                  next_token=[{"n_remain": -1, "n_decoded": 0}])]
+
+
+class TestMetricsParsing:
+    def test_counters_and_gauges_are_read(self):
+        raw = metrics.parse_prometheus(LLAMACPP_METRICS)
+        assert raw["llamacpp:prompt_tokens_total"] == pytest.approx(1133780)
+        assert raw["llamacpp:requests_deferred"] == 0
+
+    def test_comments_are_not_metrics(self):
+        raw = metrics.parse_prometheus(LLAMACPP_METRICS)
+        assert not any(k.startswith("#") or k == "HELP" for k in raw)
+
+    def test_labelled_series_still_parse(self):
+        raw = metrics.parse_prometheus('vllm:prompt_tokens_total{model="x"} 42\n')
+        assert raw["vllm:prompt_tokens_total"] == 42
+
+    def test_nan_and_junk_are_skipped(self):
+        raw = metrics.parse_prometheus("a:b NaN\nnonsense\nc:d 3\n")
+        assert "c:d" in raw and "a:b" not in raw
+
+    def test_names_are_normalised(self):
+        values = metrics.normalise(metrics.parse_prometheus(LLAMACPP_METRICS))
+        assert values["predicted_tokens"] == pytest.approx(1267730)
+        assert values["decode_rate"] == pytest.approx(46.9731)
+
+    def test_vllm_maps_onto_the_same_shape(self):
+        values = metrics.normalise(metrics.parse_prometheus(
+            "vllm:generation_tokens_total 10\nvllm:num_requests_waiting 2\n"))
+        assert values == {"predicted_tokens": 10.0, "deferred": 2.0}
+
+    @pytest.mark.parametrize("endpoint,expected", [
+        ("http://h:30081/v1", "http://h:30081"),
+        ("http://h:30081/v1/", "http://h:30081"),
+        ("http://h:30081/v1/chat/completions", "http://h:30081"),
+        ("http://h:11434/api", "http://h:11434"),
+        ("http://h:30081", "http://h:30081"),
+        ("", ""),
+    ])
+    def test_the_api_suffix_comes_off(self, endpoint, expected):
+        """Configs point at /v1; /metrics and /slots live at the root."""
+        assert metrics.base_url(endpoint) == expected
+
+
+class TestSlotContext:
+    def test_a_live_request_reports_its_prompt_size(self):
+        """The question 'what context is it passing?' is answered here."""
+        ctx = metrics._slot_context(BUSY_SLOT)
+        assert ctx["live"] is True
+        assert ctx["tokens"] == 18144
+        assert ctx["cached"] == 17487
+        assert ctx["processed"] == 346
+        assert ctx["fill"] == pytest.approx(18144 / 131072, abs=1e-4)
+        assert ctx["decoded"] == 311
+        assert ctx["max_tokens"] == 32768
+
+    def test_an_idle_slot_keeps_the_last_prompt_but_not_the_zeros(self):
+        """
+        llama.cpp zeroes the cache split when the request ends. Reporting that
+        as 'nothing was cached' would be a false claim about the model.
+        """
+        ctx = metrics._slot_context(IDLE_SLOT)
+        assert ctx["live"] is False
+        assert ctx["tokens"] == 21559
+        assert "cached" not in ctx and "decoded" not in ctx
+
+    def test_the_busy_slot_wins_over_an_idle_one(self):
+        ctx = metrics._slot_context(IDLE_SLOT + BUSY_SLOT)
+        assert ctx["tokens"] == 18144
+
+    def test_slots_are_counted(self):
+        ctx = metrics._slot_context(BUSY_SLOT + IDLE_SLOT)
+        assert (ctx["slots_busy"], ctx["slots_total"]) == (1, 2)
+
+    def test_no_slots_is_not_an_error(self):
+        assert metrics._slot_context([]) == {}
+        assert metrics._slot_context({"error": "disabled"}) == {}
+
+
+class TestWindowedRates:
+    """
+    Lifetime throughput hides the thing being diagnosed: 46 tok/s averaged over
+    every high-context turn ever served says nothing about this one.
+    """
+
+    def test_a_window_gives_tokens_per_second_of_model_time(self):
+        before = {"at": time.time() - 30,
+                  "metrics": {"predicted_tokens": 1000.0, "predicted_seconds": 20.0}}
+        rates = metrics._rates({"predicted_tokens": 1600.0, "predicted_seconds": 30.0},
+                               before)
+        assert rates["decode_rate"] == pytest.approx(60.0)   # 600 tokens / 10s
+        assert rates["decode_tokens"] == 600
+
+    def test_a_window_with_no_completion_reports_nothing(self):
+        """Counters move only when a request finishes — absent, not 0 tok/s."""
+        before = {"at": time.time() - 30, "metrics": {"predicted_tokens": 1000.0,
+                                                      "predicted_seconds": 20.0}}
+        rates = metrics._rates({"predicted_tokens": 1000.0, "predicted_seconds": 20.0},
+                               before)
+        assert "decode_rate" not in rates
+
+    def test_a_restarted_server_does_not_invent_a_rate(self):
+        before = {"at": time.time() - 30, "metrics": {"predicted_tokens": 9000.0,
+                                                      "predicted_seconds": 90.0}}
+        assert "decode_rate" not in metrics._rates(
+            {"predicted_tokens": 10.0, "predicted_seconds": 1.0}, before)
+
+    def test_a_stale_sample_is_not_a_window(self):
+        before = {"at": time.time() - (metrics.SAMPLE_MAX_AGE + 60),
+                  "metrics": {"predicted_tokens": 1.0, "predicted_seconds": 1.0}}
+        assert metrics._rates({"predicted_tokens": 500.0, "predicted_seconds": 10.0},
+                              before) == {}
+
+    def test_the_first_reading_has_no_window(self):
+        assert metrics._rates({"predicted_tokens": 5.0}, None) == {}
+
+    def test_the_sampler_hands_back_the_previous_reading(self):
+        sampler = metrics.Sampler()
+        assert sampler.take("http://h", {"predicted_tokens": 1.0}) is None
+        before = sampler.take("http://h", {"predicted_tokens": 2.0})
+        assert before["metrics"] == {"predicted_tokens": 1.0}
+
+    def test_endpoints_are_sampled_apart(self):
+        sampler = metrics.Sampler()
+        sampler.take("http://a", {"predicted_tokens": 1.0})
+        assert sampler.take("http://b", {"predicted_tokens": 9.0}) is None
+
+
+class TestProbe:
+    """Against a stub server, so the suite does not need a GPU box."""
+
+    @staticmethod
+    def _handler(routes):
+        def handle(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path not in routes:
+                return httpx.Response(404)
+            status, payload = routes[path]
+            if isinstance(payload, str):
+                return httpx.Response(status, text=payload)
+            return httpx.Response(status, json=payload)
+        return handle
+
+    async def _probe(self, routes, sampler=None):
+        transport = httpx.MockTransport(self._handler(routes))
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await metrics.probe(client, "http://box:30081/v1", sampler)
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_server_reports_everything(self):
+        report = await self._probe({
+            "/props": (200, {"model_alias": "qwen:IQ3_S", "total_slots": 1,
+                             "default_generation_settings": {"n_ctx": 131072}}),
+            "/metrics": (200, LLAMACPP_METRICS),
+            "/slots": (200, BUSY_SLOT),
+        })
+        assert report["reachable"] is True
+        assert report["model"] == "qwen:IQ3_S"
+        assert report["n_ctx"] == 131072
+        assert report["context"]["tokens"] == 18144
+        assert report["metrics"]["decode_rate"] == pytest.approx(46.9731)
+        # 7.80M reused against 1.13M computed
+        assert report["cache_hit_ratio"] == pytest.approx(0.873, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_endpoint_is_a_result_not_an_exception(self):
+        def refuse(request):
+            raise httpx.ConnectError("connection refused")
+        transport = httpx.MockTransport(refuse)
+        async with httpx.AsyncClient(transport=transport) as client:
+            report = await metrics.probe(client, "http://box:30081/v1")
+        assert report["reachable"] is False
+        assert "ConnectError" in report["error"]
+
+    @pytest.mark.asyncio
+    async def test_metrics_disabled_costs_only_the_metrics(self):
+        """llama.cpp needs --metrics; without it the rest still reads."""
+        report = await self._probe({
+            "/props": (200, {"model_alias": "m", "total_slots": 1}),
+            "/metrics": (404, "not found"),
+            "/slots": (200, BUSY_SLOT),
+        })
+        assert "--metrics" in report["metrics_note"]
+        assert report["context"]["tokens"] == 18144
+        assert "metrics" not in report
+
+    @pytest.mark.asyncio
+    async def test_no_slots_costs_only_the_context(self):
+        report = await self._probe({
+            "/props": (200, {"model_alias": "m"}),
+            "/metrics": (200, LLAMACPP_METRICS),
+            "/slots": (501, "slots disabled"),
+        })
+        assert "--no-slots" in report["slots_note"]
+        assert "context" not in report
+        assert report["metrics"]["decode_rate"] == pytest.approx(46.9731)
+
+    @pytest.mark.asyncio
+    async def test_a_server_with_no_known_metrics_says_so(self):
+        report = await self._probe({
+            "/props": (200, {}),
+            "/metrics": (200, "some_other_project_tokens 5\n"),
+            "/slots": (404, ""),
+        })
+        assert report["metrics_note"] == "no recognised metrics at /metrics"
+
+    @pytest.mark.asyncio
+    async def test_a_blank_endpoint_is_reported_not_fetched(self):
+        async with httpx.AsyncClient() as client:
+            report = await metrics.probe(client, "")
+        assert report["reachable"] is False
+        assert report["error"] == "no endpoint configured"
+
+    @pytest.mark.asyncio
+    async def test_probe_all_dedupes_shared_endpoints(self):
+        """Two agents on one server is one server, read once."""
+        seen = []
+
+        async def fake(client, endpoint, sampler=None, timeout=4.0):
+            seen.append(endpoint)
+            return {"endpoint": endpoint}
+
+        original = metrics.probe
+        metrics.probe = fake
+        try:
+            out = await metrics.probe_all(["http://a/v1", "http://a/v1", "http://b/v1", ""])
+        finally:
+            metrics.probe = original
+        assert sorted(seen) == ["http://a/v1", "http://b/v1"]
+        assert len(out) == 2
+
+
+class TestMetricsRoute:
+    @pytest.fixture
+    def two_agents(self, plane):
+        """Two agents sharing one endpoint, which is the interesting case."""
+        store = plane.store
+        machine = store.add_machine("box", "box", ssh_user="u")
+        for name in ("researcher", "reviewer"):
+            store.upsert_agent(int(machine["id"]), {
+                "name": name, "model": "qwen", "provider": "vllm", "ready": True,
+                "endpoint": "http://10.0.0.147:30081/v1",
+            })
+        return plane
+
+    def test_the_endpoint_is_remembered_from_the_agent_record(self, two_agents):
+        agents = two_agents.store.agents()
+        assert {a["endpoint"] for a in agents} == {"http://10.0.0.147:30081/v1"}
+
+    def test_a_blank_endpoint_does_not_erase_a_known_one(self, two_agents):
+        """install.sh --list reports no endpoint; a refresh must not lose it."""
+        store = two_agents.store
+        machine = store.machines()[0]
+        store.upsert_agent(int(machine["id"]), {"name": "researcher", "ready": True})
+        assert store.agent_by_name(int(machine["id"]), "researcher")["endpoint"] == \
+            "http://10.0.0.147:30081/v1"
+
+    def test_agents_are_grouped_by_server_and_marked_shared(self, two_agents, monkeypatch):
+        async def fake_probe_all(endpoints, sampler=None, timeout=4.0):
+            return [{"endpoint": endpoints[0], "reachable": True, "model": "qwen",
+                     "context": {"tokens": 18144, "n_ctx": 131072, "live": True}}]
+        monkeypatch.setattr(metrics, "probe_all", fake_probe_all)
+
+        client = TestClient(two_agents.app)
+        servers = client.get("/api/agents/metrics", headers=AUTH).json()["servers"]
+        assert len(servers) == 1
+        assert servers[0]["shared"] is True
+        assert servers[0]["context"]["tokens"] == 18144
+        assert {a["qualified"] for a in servers[0]["agents"]} == \
+            {"researcher.box", "reviewer.box"}
+
+    def test_an_agent_with_no_endpoint_is_listed_as_unknown(self, plane, monkeypatch):
+        """Dropping it would hide the agent; it is the endpoint that is missing."""
+        async def nothing(endpoints, sampler=None, timeout=4.0):
+            return []
+        monkeypatch.setattr(metrics, "probe_all", nothing)
+        machine = plane.store.add_machine("box", "b", ssh_user="u")
+        plane.store.upsert_agent(int(machine["id"]), {"name": "solo", "ready": True})
+
+        servers = TestClient(plane.app).get(
+            "/api/agents/metrics", headers=AUTH).json()["servers"]
+        assert len(servers) == 1
+        assert servers[0]["reachable"] is False
+        assert "no endpoint recorded" in servers[0]["error"]
+        assert servers[0]["agents"][0]["qualified"] == "solo.box"
+
+    def test_it_needs_the_token(self, client):
+        assert client.get("/api/agents/metrics").status_code == 401
+
+    def test_the_route_is_not_swallowed_by_the_agent_id_route(self, client):
+        """'/api/agents/metrics' must not be read as an agent called 'metrics'."""
+        assert client.get("/api/agents/metrics", headers=AUTH).status_code == 200
+
+    def test_the_agents_tab_renders_the_cards(self):
+        root = Path(__file__).resolve().parents[1] / "agents_control" / "static"
+        html = (root / "index.html").read_text()
+        app_js = (root / "app.js").read_text()
+        assert 'id="server-cards"' in html
+        assert "/api/agents/metrics" in app_js
+        # polled only while the tab is open, and stopped when it is not
+        assert "startServerPolling" in app_js and "stopServerPolling" in app_js
+
+
+class TestAgentContext:
+    """
+    The per-agent figure: how much history it prefixes to every request.
+
+    Distinct from a server card, which reports whatever request that server
+    last handled — on a shared endpoint that could be either agent's.
+    """
+
+    @staticmethod
+    def _reply(payload, status=200):
+        def handle(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/context"
+            if isinstance(payload, str):
+                return httpx.Response(status, text=payload)
+            return httpx.Response(status, json=payload)
+        return httpx.MockTransport(handle)
+
+    async def _read(self, transport):
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await metrics.agent_context(client, "http://box:8001/")
+
+    @pytest.mark.asyncio
+    async def test_the_largest_session_is_surfaced(self):
+        report = await self._read(self._reply({
+            "supported": True, "history_limit": 48,
+            "sessions": [{"session": "a", "messages": 34, "chars": 112000,
+                          "prompt_tokens": 28100},
+                         {"session": "b", "messages": 2, "chars": 90}],
+        }))
+        assert report["top"]["prompt_tokens"] == 28100
+        assert report["session_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_an_agent_with_no_history_is_not_an_error(self):
+        report = await self._read(self._reply({"supported": True, "sessions": []}))
+        assert report["supported"] is True and report["top"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_older_agent_without_the_route_is_told_apart(self):
+        """404 means 'reinstall me', not 'I am broken'."""
+        report = await self._read(self._reply("nope", status=404))
+        assert report["supported"] is False
+        assert "reinstall" in report["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_agent_reports_the_connection(self):
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+        report = await self._read(httpx.MockTransport(refuse))
+        assert report["supported"] is False and "ConnectError" in report["error"]
+
+    @pytest.mark.asyncio
+    async def test_an_agent_with_no_address_is_not_fetched(self):
+        async with httpx.AsyncClient() as client:
+            report = await metrics.agent_context(client, "")
+        assert report["error"] == "no address for this agent"
+
+    @pytest.mark.asyncio
+    async def test_contexts_are_keyed_by_agent_id(self):
+        async def fake(client, url, timeout=4.0):
+            return {"supported": True, "url": url}
+        original = metrics.agent_context
+        metrics.agent_context = fake
+        try:
+            out = await metrics.contexts_for([{"id": 7, "url": "http://a:1"},
+                                              {"id": 9, "url": "http://b:1"}])
+        finally:
+            metrics.agent_context = original
+        assert out[7]["url"] == "http://a:1" and out[9]["url"] == "http://b:1"
+
+    def test_the_route_returns_it_per_agent(self, plane, monkeypatch):
+        async def fake_contexts(agents, timeout=4.0):
+            return {int(a["id"]): {"supported": True, "top": {"prompt_tokens": 28100}}
+                    for a in agents}
+        async def no_servers(endpoints, sampler=None, timeout=4.0):
+            return []
+        monkeypatch.setattr(metrics, "contexts_for", fake_contexts)
+        monkeypatch.setattr(metrics, "probe_all", no_servers)
+
+        machine = plane.store.add_machine("box", "b", ssh_user="u")
+        agent = plane.store.upsert_agent(int(machine["id"]),
+                                         {"name": "researcher", "url": "http://b:8001"})
+        data = TestClient(plane.app).get("/api/agents/metrics", headers=AUTH).json()
+        assert data["contexts"][str(agent["id"])]["top"]["prompt_tokens"] == 28100
+
+    def test_the_agents_table_has_a_context_column(self):
+        app_js = (Path(__file__).resolve().parents[1]
+                  / "agents_control" / "static" / "app.js").read_text()
+        assert "contextCell" in app_js
+        assert "'Context'" in app_js
+
+
+class TestAgentContextRoute:
+    """The agent's own side of it."""
+
+    @pytest.fixture
+    def served(self, tmp_path):
+        from declarative_agent_sdk.agents.lean.agent import LeanAIAgent
+        from declarative_agent_sdk.transports.a2a.server import AIAgentServer
+        agent = LeanAIAgent(
+            name="researcher", description="d", instruction_file=None, tools=[],
+            model="qwen", provider="vllm", endpoint_url="http://box:30081/v1",
+            workspace_directory=str(tmp_path / "ws"),
+            skills_directory=str(tmp_path / "skills"),
+        )
+        return agent, TestClient(AIAgentServer(agent, port=8111).app)
+
+    def test_it_reports_sizes(self, served):
+        agent, client = served
+        agent._loop._history["s"] = [{"role": "user", "content": "x" * 8000}]
+        data = client.get("/context").json()
+        assert data["supported"] is True
+        assert data["agent"] == "researcher"
+        assert data["sessions"][0]["chars"] == 8000
+        assert data["sessions"][0]["prompt_tokens"] > 2000
+
+    def test_it_does_not_leak_the_conversation(self, served):
+        agent, client = served
+        agent._loop._history["s"] = [{"role": "user", "content": "swordfish"}]
+        assert "swordfish" not in client.get("/context").text
+
+    def test_a_runtime_that_cannot_answer_says_so(self, tmp_path):
+        """adk and deepagent keep history elsewhere; that is reported, not faked."""
+        from declarative_agent_sdk.transports.a2a.server import AIAgentServer
+
+        class Mute:
+            name = "mute"
+            agent_card = None
+
+        from declarative_agent_sdk.agents.lean.agent import LeanAIAgent
+        agent = LeanAIAgent(name="m", description="d", instruction_file=None,
+                            tools=[], model="q", provider="vllm",
+                            endpoint_url="http://b:1/v1",
+                            workspace_directory=str(tmp_path / "ws"),
+                            skills_directory=str(tmp_path / "sk"))
+        server = AIAgentServer(agent, port=8112)
+        # stand in for a runtime without the method
+        object.__setattr__(server, "_agent", Mute())
+        data = TestClient(server.app).get("/context").json()
+        assert data["supported"] is False
+        assert "lean runtime does" in data["note"]
+
+    def test_the_agent_card_still_serves(self, served):
+        """The new route must not displace the A2A surface."""
+        _, client = served
+        assert client.get("/.well-known/agent-card.json").status_code == 200
