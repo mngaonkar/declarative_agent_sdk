@@ -72,6 +72,12 @@ EDITABLE_PROPERTIES: List[Dict[str, Any]] = [
      "help": "Recent tool interactions whose arguments and results stay in full. "
              "Older ones keep the call, the path and the result; the file "
              "contents are elided. 0 disables."},
+    {"key": "retry_malformed_tool_calls", "label": "Retry a malformed tool call",
+     "type": "int", "runtimes": ["lean"],
+     "help": "A quantized model emitting a whole document as one escaped JSON "
+             "string sometimes breaks the string, and the server rejects the "
+             "call. 0 loses the turn with an explanation; 1 tries again, at "
+             "the cost of another full generation."},
     {"key": "tool_payload_max_chars", "label": "Tool payload limit (chars)",
      "type": "int", "runtimes": ["lean"],
      "help": "Size above which an aged payload is elided. A written file is on "

@@ -280,6 +280,26 @@ chain started by one message stops after three hops with a note in the channel.
 It is checked in the same place every hop passes through, so nothing can route
 around it.
 
+## When a tool call comes back malformed
+
+A tool call's arguments are generated **token by token, as one escaped JSON
+string** — so asking an agent for a 25 KB document in a single `write_file`
+call asks the model for ~7,000 tokens of unbroken escaping. A quantized model
+loses track of it sooner or later; llama.cpp then cannot parse the call out of
+the model's text and answers 500, and the turn is lost after minutes of
+generation.
+
+Measured on one agent: writes of 3.4–5.5 KB all succeeded, while the 21.8 KB,
+24.8 KB and 27.7 KB single-shot writes failed. The fix is in the agent's
+instructions, not in config — tell it to write sections of a few KB and
+assemble them with `exec_command`.
+
+The SDK does two things about it: the error says what broke and what to change
+rather than forwarding server JSON, and `retry_malformed_tool_calls` (default
+`0`) can try again. The default is off because a retry is another full-length
+generation — minutes on a local model — and smaller writes fix the cause rather
+than paying for it twice.
+
 ## Which settings reach which runtime
 
 Twelve of the editor's settings apply to all three runtimes. The rest belong to

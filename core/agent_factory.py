@@ -157,6 +157,7 @@ class AgentFactory:
                 ("tool_payload_keep", common.tool_payload_keep),
                 ("tool_payload_max_chars", common.tool_payload_max_chars),
                 ("request_timeout", common.request_timeout),
+                ("retry_malformed_tool_calls", common.retry_malformed_tool_calls),
                 # Only when the YAML sets it. Passing None explicitly beat
                 # LeanAIAgent's own default of 4096 and left the request with
                 # no cap at all, so a model free-ran until it chose to stop —

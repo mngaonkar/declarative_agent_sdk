@@ -89,6 +89,7 @@ class LeanAIAgent(BaseAgent):
         api_key: Optional[str] = None,
         temperature: Optional[float] = 0.7,
         request_timeout: Optional[float] = None,
+        retry_malformed_tool_calls: Optional[int] = None,
         max_tool_iterations: int = 32,
         max_step_retries: int = 3,
         max_no_tool_continues: int = 4,
@@ -151,6 +152,8 @@ class LeanAIAgent(BaseAgent):
             temperature=temperature,
             max_tokens=max_output_tokens,
             **({} if request_timeout is None else {"timeout": float(request_timeout)}),
+            **({} if retry_malformed_tool_calls is None
+               else {"retry_malformed_tool_calls": int(retry_malformed_tool_calls)}),
         )
         self._loop = LeanLoop(
             client=self._client,

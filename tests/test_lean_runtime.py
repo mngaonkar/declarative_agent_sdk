@@ -775,3 +775,129 @@ class TestToolPayloadElision:
         untouched = copy.deepcopy(history)
         assert loop._elide_old_payloads(history) == 0
         assert history == untouched
+
+
+# ---------------------------------------------------------------------------
+# a tool call the model emitted malformed
+# ---------------------------------------------------------------------------
+
+MALFORMED_500 = (
+    '{"error":{"code":500,"message":"Failed to parse tool call arguments as JSON: '
+    '[json.exception.parse_error.101] parse error at line 1, column 11549: syntax '
+    'error while parsing value - invalid string: missing closing quote"}}'
+)
+
+
+class TestMalformedToolCall:
+    """
+    llama.cpp parses tool calls out of the model's own text. Asked for a 25 KB
+    document as one escaped JSON string, a 3-bit model lost track of the
+    escaping after ~11,549 characters and the server answered 500 — six minutes
+    of generation discarded, and the user shown raw server JSON.
+    """
+
+    @staticmethod
+    def _client(**kwargs):
+        from declarative_agent_sdk.agents.lean.runtime.llm import LeanLLMClient
+        return LeanLLMClient(model="m", api_key="k",
+                             base_url="http://127.0.0.1:9/v1", **kwargs)
+
+    @staticmethod
+    def _raiser(monkeypatch, body, calls):
+        from declarative_agent_sdk.agents.lean.runtime import llm
+        import io
+
+        def boom(*args, **kwargs):
+            calls.append(1)
+            raise llm.urllib.error.HTTPError(
+                "u", 500, "err", {}, io.BytesIO(body.encode()))
+
+        monkeypatch.setattr(llm.urllib.request, "urlopen", boom)
+
+    def test_it_is_recognised(self):
+        from declarative_agent_sdk.agents.lean.runtime.llm import _is_malformed_tool_call
+
+        assert _is_malformed_tool_call(MALFORMED_500)
+        assert not _is_malformed_tool_call('{"error":{"message":"out of memory"}}')
+
+    def test_the_message_says_what_to_do(self, monkeypatch):
+        from declarative_agent_sdk.agents.lean.runtime import llm
+
+        calls = []
+        self._raiser(monkeypatch, MALFORMED_500, calls)
+        with pytest.raises(llm.LLMError) as excinfo:
+            self._client().chat([{"role": "user", "content": "write it"}])
+
+        message = str(excinfo.value)
+        assert "11,549 characters" in message          # where it broke
+        assert "smaller sections" in message           # what to change
+        assert "parse_error" not in message            # not raw server JSON
+
+    def test_it_is_not_retried_by_default(self, monkeypatch):
+        """A retry is another full-length generation — minutes, locally."""
+        from declarative_agent_sdk.agents.lean.runtime import llm
+
+        calls = []
+        self._raiser(monkeypatch, MALFORMED_500, calls)
+        with pytest.raises(llm.LLMError):
+            self._client().chat([{"role": "user", "content": "x"}])
+        assert len(calls) == 1
+
+    def test_opting_in_retries_that_many_times(self, monkeypatch):
+        from declarative_agent_sdk.agents.lean.runtime import llm
+
+        calls = []
+        self._raiser(monkeypatch, MALFORMED_500, calls)
+        with pytest.raises(llm.LLMError):
+            self._client(retry_malformed_tool_calls=2).chat(
+                [{"role": "user", "content": "x"}])
+        assert len(calls) == 3                         # the attempt plus two retries
+
+    def test_a_retry_that_succeeds_returns_the_message(self, monkeypatch):
+        from declarative_agent_sdk.agents.lean.runtime import llm
+        import io, json as jsonlib
+
+        calls = []
+
+        class Ok:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self):
+                return jsonlib.dumps(
+                    {"choices": [{"message": {"content": "second time lucky"}}]}
+                ).encode()
+
+        def flaky(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise llm.urllib.error.HTTPError(
+                    "u", 500, "err", {}, io.BytesIO(MALFORMED_500.encode()))
+            return Ok()
+
+        monkeypatch.setattr(llm.urllib.request, "urlopen", flaky)
+        message = self._client(retry_malformed_tool_calls=1).chat(
+            [{"role": "user", "content": "x"}])
+        assert message["content"] == "second time lucky"
+        assert len(calls) == 2
+
+    def test_other_server_errors_keep_their_detail(self, monkeypatch):
+        from declarative_agent_sdk.agents.lean.runtime import llm
+
+        calls = []
+        self._raiser(monkeypatch, '{"error":{"message":"out of memory"}}', calls)
+        with pytest.raises(llm.LLMError, match="out of memory"):
+            self._client(retry_malformed_tool_calls=2).chat(
+                [{"role": "user", "content": "x"}])
+        assert len(calls) == 1, "an unrelated 500 must not consume retries"
+
+    def test_the_knob_reaches_the_client(self, tmp_path):
+        from declarative_agent_sdk.core.agent_factory import AgentFactory
+
+        agent = AgentFactory.from_dict({
+            "name": "p", "agent_framework": "lean", "provider": "vllm",
+            "model": "m", "endpoint": {"url": "http://127.0.0.1:9/v1"},
+            "retry_malformed_tool_calls": 1,
+            "skills_directory": str(tmp_path / "s"),
+            "workspace_directory": str(tmp_path / "w"),
+        })
+        assert agent._client.retry_malformed_tool_calls == 1

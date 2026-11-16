@@ -32,6 +32,9 @@ class CommonAgentConfig:
     # Seconds to wait on one model call. A local model writing something long
     # needs far more than a hosted one answering a question.
     request_timeout: Optional[float] = None
+    # Retries for a tool call the model emitted malformed. Off by default: a
+    # retry is another full-length generation.
+    retry_malformed_tool_calls: Optional[int] = None
     tools: List[Any] = field(default_factory=list)
     tools_approval_required: bool = True
     skills: Optional[List[str]] = None
@@ -93,6 +96,7 @@ def parse_common_config(
         max_tokens=max_tokens,
         temperature=temperature,
         request_timeout=request_timeout,
+        retry_malformed_tool_calls=config.get("retry_malformed_tool_calls"),
         tools=list(config.get("tools") or []),
         tools_approval_required=config.get("tools_approval_required", True),
         skills=config.get("skills"),

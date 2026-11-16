@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,39 @@ class LLMError(Exception):
 # this request" with the real cause only in the log.
 DEFAULT_REQUEST_TIMEOUT = 300.0
 
+# llama.cpp parses tool calls out of the model's own text. When the model is
+# asked for a whole document as one escaped JSON string and loses track of the
+# escaping part-way, the server cannot read the call back and answers 500.
+# Nothing is misconfigured when this happens: the generation ran to length and
+# the model simply fumbled a quote.
+_MALFORMED_TOOL_CALL = (
+    "failed to parse tool call arguments",
+    "parse error at line",
+)
+
+
+def _is_malformed_tool_call(detail: str) -> bool:
+    lowered = (detail or "").lower()
+    return all(marker in lowered for marker in _MALFORMED_TOOL_CALL)
+
+
+def _malformed_tool_call_message(detail: str) -> str:
+    """Say what broke and what to do, rather than forwarding server JSON."""
+    column = re.search(r"column (\d+)", detail or "")
+    where = (
+        f"after about {int(column.group(1)):,} characters"
+        if column else "part-way through"
+    )
+    return (
+        f"the model's tool call was malformed: it broke the JSON string {where}, "
+        f"so the server could not read the call back. A quantized model asked "
+        f"for a whole document in one tool call commonly loses track of the "
+        f"escaping — have the agent write smaller sections (a few KB per "
+        f"write_file call) rather than one large one. Set "
+        f"retry_malformed_tool_calls to try again on this error, bearing in "
+        f"mind a retry costs another full generation."
+    )
+
 
 class LeanLLMClient:
     """Minimal chat-completions client (no streaming required for tool loop)."""
@@ -36,6 +70,7 @@ class LeanLLMClient:
         temperature: Optional[float] = 0.7,
         max_tokens: Optional[int] = 4096,
         timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        retry_malformed_tool_calls: int = 0,
     ) -> None:
         self.model = model
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -43,6 +78,9 @@ class LeanLLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
+        # Off by default: a retry is another full-length generation, which on a
+        # local model is minutes. Opt in where losing the turn costs more.
+        self.retry_malformed_tool_calls = retry_malformed_tool_calls
         self._token_key = "max_tokens"
         self._send_temperature = temperature is not None
 
@@ -88,7 +126,8 @@ class LeanLLMClient:
         url = f"{self.base_url}/chat/completions"
 
         last_detail = ""
-        for _ in range(3):
+        tool_call_retries = int(self.retry_malformed_tool_calls or 0)
+        for _ in range(3 + tool_call_retries):
             body = json.dumps(self._payload(messages, tools)).encode("utf-8")
             req = urllib.request.Request(url, data=body, headers=headers, method="POST")
             try:
@@ -100,6 +139,15 @@ class LeanLLMClient:
                 last_detail = detail
                 if exc.code == 400 and self._adapt(detail):
                     continue
+                if _is_malformed_tool_call(detail):
+                    if tool_call_retries > 0:
+                        tool_call_retries -= 1
+                        logger.warning(
+                            "[llm] malformed tool call from the model; retrying "
+                            f"({tool_call_retries} left after this)"
+                        )
+                        continue
+                    raise LLMError(_malformed_tool_call_message(detail)) from exc
                 raise LLMError(f"HTTP {exc.code} from API: {detail}") from exc
             except TimeoutError as exc:
                 # Deliberately not retried: a timeout has already cost the full
