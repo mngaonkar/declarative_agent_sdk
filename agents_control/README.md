@@ -280,6 +280,31 @@ chain started by one message stops after three hops with a note in the channel.
 It is checked in the same place every hop passes through, so nothing can route
 around it.
 
+## Which settings reach which runtime
+
+Twelve of the editor's settings apply to all three runtimes. The rest belong to
+one, and the form hides the ones that do not apply to the agent's framework —
+it re-decides as soon as you change the Framework dropdown, before anything is
+saved.
+
+| Setting | lean | adk | deepagent |
+|---|:--:|:--:|:--:|
+| description, framework, provider, model, `endpoint.url`, temperature, `max_tokens`, tools, approval, instruction file, skills dir, workspace dir | ✓ | ✓ | ✓ |
+| `request_timeout` | ✓ | | |
+| `max_tool_iterations` | ✓ | | |
+| `history_limit` | ✓ | | |
+| `tool_payload_keep` / `tool_payload_max_chars` | ✓ | | |
+| `enable_truncation`, `context_window`, `truncate_strategy`, `safety_margin` | | ✓ | ✓ |
+
+The split is not arbitrary: the loop budgets are lean's own — it is the only
+runtime whose loop this SDK writes — while adk and deepagent manage context by
+truncating oversized input, which is theirs. Offering every knob to every agent
+meant the YAML accepted a setting the runtime never read: the agent started,
+nothing changed, and nothing said why.
+
+Framework aliases are normalised through the SDK's own resolver, so a legacy
+`backend: langchain` selects the deepagent rows rather than matching none.
+
 ## How a dispatch talks to an agent
 
 The board uses A2A's **submit-and-poll**, not a streaming connection:

@@ -451,7 +451,14 @@ def create_app(cp: "ControlPlane") -> Starlette:
             "yaml": files["yaml"],
             "instructions": files["instructions"],
             "properties": agent_config.properties(parsed),
+            # The whole schema, each row carrying the runtimes it reaches, so
+            # the form can re-decide when the framework dropdown changes
+            # without another round trip.
             "schema": agent_config.EDITABLE_PROPERTIES,
+            # Normalised, so a legacy `backend: langchain` still selects the
+            # deepagent rows rather than matching none of them.
+            "framework": agent_config.runtime_of(
+                str(parsed.get("agent_framework") or parsed.get("backend") or "lean")),
             "status": status,
         })
 

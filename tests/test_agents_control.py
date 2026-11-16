@@ -2011,17 +2011,26 @@ class TestBoardScriptWiring:
             f"{offenders} — scope the lookup to the cloned form instead"
         )
 
-    def test_every_form_field_the_script_reads_exists_in_the_markup(self):
-        """A renamed input would otherwise fail only when the form is opened."""
+    def test_every_form_field_the_script_reads_exists(self):
+        """
+        A renamed input would otherwise fail only when the form is opened.
+
+        Two sources are legitimate: a `name=` in the markup, and a key in the
+        config editor's schema — those inputs are built at runtime from
+        EDITABLE_PROPERTIES rather than written in HTML.
+        """
         import re
+
+        from declarative_agent_sdk.agents_control.config import EDITABLE_PROPERTIES
 
         html = self._static("index.html")
         app_js = self._static("app.js")
 
         declared = set(re.findall(r'name="([^"]+)"', html))
+        declared |= {prop["key"] for prop in EDITABLE_PROPERTIES}
         used = set(re.findall(r"form\.elements\.([A-Za-z_][A-Za-z0-9_]*)", app_js))
         missing = sorted(used - declared)
-        assert not missing, f"app.js reads form fields that no markup declares: {missing}"
+        assert not missing, f"app.js reads form fields nothing declares: {missing}"
 
     def test_uncaught_failures_are_surfaced(self):
         app_js = self._static("app.js")
@@ -3039,3 +3048,79 @@ class TestRelayOncePerTurn:
         await watched(channel["id"], agent, "go", "you")
         await asyncio.sleep(0)
         assert sorted(reached) == ["editor", "reviewer"]
+
+
+# ---------------------------------------------------------------------------
+# which settings reach which runtime
+# ---------------------------------------------------------------------------
+
+class TestPerRuntimeProperties:
+    """
+    The loop budgets are lean's own and truncation is adk/deepagent's. Offering
+    all of them to every agent meant the YAML accepted a knob the runtime never
+    read — the agent started, nothing changed, and nothing said why.
+    """
+
+    @staticmethod
+    def _keys(framework):
+        from declarative_agent_sdk.agents_control.config import properties_for
+        return {prop["key"] for prop in properties_for(framework)}
+
+    def test_lean_only_knobs_are_hidden_from_the_others(self):
+        lean, adk = self._keys("lean"), self._keys("adk")
+        for key in ("history_limit", "max_tool_iterations", "request_timeout",
+                    "tool_payload_keep", "tool_payload_max_chars"):
+            assert key in lean
+            assert key not in adk, f"{key} does not reach adk"
+
+    def test_truncation_belongs_to_adk_and_deepagent(self):
+        lean, adk, deep = self._keys("lean"), self._keys("adk"), self._keys("deepagent")
+        for key in ("enable_truncation", "context_window", "truncate_strategy",
+                    "safety_margin"):
+            assert key in adk and key in deep
+            assert key not in lean
+
+    def test_the_common_settings_reach_everything(self):
+        shared = self._keys("lean") & self._keys("adk") & self._keys("deepagent")
+        for key in ("description", "agent_framework", "provider", "model",
+                    "endpoint.url", "temperature", "max_tokens", "tools",
+                    "tools_approval_required", "instruction_file",
+                    "skills_directory", "workspace_directory"):
+            assert key in shared, f"{key} should apply to every runtime"
+
+    def test_an_unknown_framework_falls_back_to_lean(self):
+        assert self._keys("nonsense") == self._keys("lean")
+
+    def test_the_api_reports_the_framework(self, client, plane, tmp_path):
+        prefix = tmp_path / "a"
+        prefix.mkdir()
+        (prefix / "agent.yaml").write_text("name: a\nagent_framework: deepagent\n")
+        (prefix / "instructions.md").write_text("hi\n")
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        agent = plane.store.upsert_agent(machine["id"], {
+            "name": "a", "prefix": str(prefix), "url": "http://x"})
+
+        data = client.get(f"/api/agents/{agent['id']}/config", headers=AUTH).json()
+        assert data["framework"] == "deepagent"
+        # the whole schema still ships, so the form can re-decide on change
+        assert any(p["key"] == "history_limit" for p in data["schema"])
+
+    def test_every_runtime_only_knob_declares_its_runtimes(self):
+        """A new lean-only knob added without the marker would silently mislead."""
+        from declarative_agent_sdk.agents_control.config import EDITABLE_PROPERTIES
+
+        lean_only = {"history_limit", "max_tool_iterations", "request_timeout",
+                     "tool_payload_keep", "tool_payload_max_chars"}
+        for prop in EDITABLE_PROPERTIES:
+            if prop["key"] in lean_only:
+                assert prop.get("runtimes") == ["lean"], prop["key"]
+
+    def test_the_board_hides_the_rows_it_should(self):
+        app_js = (
+            Path(__file__).resolve().parents[1]
+            / "agents_control" / "static" / "app.js"
+        ).read_text()
+        assert "appliesTo" in app_js
+        assert "prop.runtimes" in app_js
+        # and re-decides when the dropdown changes, before anything is saved
+        assert "agent_framework" in app_js and "showFor" in app_js

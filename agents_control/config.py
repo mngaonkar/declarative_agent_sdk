@@ -28,12 +28,20 @@ FRAMEWORKS = ("lean", "adk", "deepagent")
 
 # What the Agents screen offers as a form. Adding a row here is all it takes to
 # make another property editable; the UI renders whatever this says.
+# What the Agents screen offers as a form. Adding a row here is all it takes to
+# make another property editable; the UI renders whatever this says.
+#
+# `runtimes` names the frameworks a property reaches. Omitted means all three.
+# It matters because the loop budgets are lean's own: set history_limit on an
+# adk agent and the YAML accepts it, the agent starts, and nothing reads it —
+# the editor would be offering a knob that does nothing.
 EDITABLE_PROPERTIES: List[Dict[str, Any]] = [
     {"key": "description", "label": "Description", "type": "text",
      "help": "One line, shown on the agent card."},
     {"key": "agent_framework", "label": "Framework", "type": "choice",
      "choices": list(FRAMEWORKS),
-     "help": "Changing this swaps the whole runtime loop."},
+     "help": "Changing this swaps the whole runtime loop, and with it which "
+             "of the fields below apply."},
     {"key": "provider", "label": "Provider", "type": "choice",
      "choices": ["openai", "google", "anthropic", "vllm", "litellm"],
      "help": "A new provider usually needs a key in the agent's own .env."},
@@ -41,9 +49,11 @@ EDITABLE_PROPERTIES: List[Dict[str, Any]] = [
     {"key": "endpoint.url", "label": "Endpoint URL", "type": "text",
      "help": "OpenAI-compatible base URL (vLLM, Ollama). Empty removes it."},
     {"key": "temperature", "label": "Temperature", "type": "number", "step": "0.05"},
-    {"key": "max_tokens", "label": "Max output tokens", "type": "int"},
+    {"key": "max_tokens", "label": "Max output tokens", "type": "int",
+     "help": "The ceiling on one reply. Unset means the runtime default; on a "
+             "local model at ~45 tok/s, 8192 is about three minutes."},
     {"key": "request_timeout", "label": "Model call timeout (s)", "type": "number",
-     "step": "10",
+     "step": "10", "runtimes": ["lean"],
      "help": "One model call, not one turn. A local model asked for something "
              "long needs several minutes; the default is 300."},
     {"key": "tools", "label": "Tools", "type": "list",
@@ -52,19 +62,62 @@ EDITABLE_PROPERTIES: List[Dict[str, Any]] = [
     {"key": "instruction_file", "label": "Instruction file", "type": "text"},
     {"key": "skills_directory", "label": "Skills directory", "type": "text"},
     {"key": "workspace_directory", "label": "Workspace directory", "type": "text"},
-    {"key": "max_tool_iterations", "label": "Max tool iterations", "type": "int"},
+    {"key": "max_tool_iterations", "label": "Max tool iterations", "type": "int",
+     "runtimes": ["lean"]},
     {"key": "history_limit", "label": "History limit", "type": "int",
+     "runtimes": ["lean"],
      "help": "Messages of conversation kept. Counts messages, not size."},
     {"key": "tool_payload_keep", "label": "Tool payloads kept verbatim", "type": "int",
+     "runtimes": ["lean"],
      "help": "Recent tool interactions whose arguments and results stay in full. "
              "Older ones keep the call, the path and the result; the file "
              "contents are elided. 0 disables."},
     {"key": "tool_payload_max_chars", "label": "Tool payload limit (chars)",
-     "type": "int",
+     "type": "int", "runtimes": ["lean"],
      "help": "Size above which an aged payload is elided. A written file is on "
              "disk already — carrying it in context too is what pushed one "
              "prompt to 97k tokens."},
+    # adk and deepagent have no loop budget; input truncation is their only
+    # context control, and it was not reachable from here at all.
+    {"key": "enable_truncation", "label": "Truncate oversized input", "type": "bool",
+     "runtimes": ["adk", "deepagent"],
+     "help": "Trim input that exceeds the context window instead of failing."},
+    {"key": "context_window", "label": "Context window (tokens)", "type": "int",
+     "runtimes": ["adk", "deepagent"],
+     "help": "Used by truncation to decide what fits."},
+    {"key": "truncate_strategy", "label": "Truncate from", "type": "choice",
+     "choices": ["end", "start", "middle"], "runtimes": ["adk", "deepagent"]},
+    {"key": "safety_margin", "label": "Truncation safety margin", "type": "int",
+     "runtimes": ["adk", "deepagent"],
+     "help": "Tokens held back from the context window."},
 ]
+
+
+def runtime_of(framework: str) -> str:
+    """
+    Normalise a framework name to lean / adk / deepagent.
+
+    Through the SDK's own resolver, so the aliases a real agent.yaml may carry
+    — `backend: langchain`, `simple`, `google_adk` — land on the right runtime
+    instead of matching none of them. Anything unrecognised is lean, which is
+    also the SDK's default.
+    """
+    from declarative_agent_sdk.core.agent_factory import resolve_agent_framework
+
+    try:
+        return resolve_agent_framework({"agent_framework": framework or "lean"})
+    except ValueError:
+        return "lean"
+
+
+def properties_for(framework: str) -> List[Dict[str, Any]]:
+    """The editable properties that actually reach a given runtime."""
+    wanted = runtime_of(framework)
+    return [
+        prop for prop in EDITABLE_PROPERTIES
+        if "runtimes" not in prop or wanted in prop["runtimes"]
+    ]
+
 
 _EDITABLE_KEYS = {prop["key"] for prop in EDITABLE_PROPERTIES}
 
