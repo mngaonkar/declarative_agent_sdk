@@ -16,6 +16,7 @@ conversation, the board has to store it.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -145,6 +146,39 @@ def _decode_interfaces(row: Dict[str, Any]) -> Dict[str, Any]:
         except json.JSONDecodeError:
             row["interfaces"] = []
     return row
+
+
+_TOOL_IN_APPROVAL = re.compile(r"wants to run ([A-Za-z_][A-Za-z0-9_]*)\(")
+
+
+def _summarise_approvals(rows: List[Dict[str, Any]]) -> str:
+    """
+    One line for a run of approval bookkeeping.
+
+    The full argument text of a past tool call is not worth replaying: the
+    agent either still has it in its own history, or it has been restarted and
+    is about to look at the files anyway. What it needs to know is that the
+    calls happened and whether they were allowed.
+    """
+    counts: Dict[str, int] = {}
+    for row in rows:
+        found = _TOOL_IN_APPROVAL.search(str(row["text"] or ""))
+        if found:
+            name = found.group(1)
+            counts[name] = counts.get(name, 0) + 1
+    verdicts = " ".join(str(row["text"] or "") for row in rows)
+    if "auto-denied" in verdicts:
+        outcome = "some denied"
+    elif "timed out" in verdicts:
+        outcome = "some timed out — denied"
+    else:
+        outcome = "approved"
+    if not counts:
+        return f"[{len(rows)} tool-approval lines, {outcome}]"
+    tools = ", ".join(
+        name if n == 1 else f"{name} x{n}" for name, n in sorted(counts.items())
+    )
+    return f"[tool calls: {tools} — {outcome}]"
 
 
 def _now() -> str:
@@ -508,16 +542,71 @@ class Store:
         )
         return list(reversed(rows))
 
-    def recent_transcript(self, channel_id: int, limit: int = 8) -> str:
+    # Tool-approval bookkeeping. Two of these are written per tool call, so a
+    # turn with four calls buries the conversation it belongs to.
+    _APPROVAL_MARKS = (
+        " wants to run ",
+        "auto-approved for @",
+        "auto-denied",
+        "Approval for ",
+    )
+
+    @classmethod
+    def _is_approval_line(cls, text: str) -> bool:
+        return any(mark in text for mark in cls._APPROVAL_MARKS)
+
+    def recent_transcript(
+        self, channel_id: int, limit: int = 8, exclude_id: Optional[int] = None
+    ) -> str:
         """
         Recent channel lines, for prepending to a dispatch.
 
         Needed because an agent restarted by supervisord has lost its own
         history; without this the thread silently resets mid-conversation.
+
+        ``limit`` counts *conversation* messages — what people and agents
+        actually said. It used to count rows, which meant tool-approval
+        bookkeeping competed with the conversation for the same slots: one
+        observed dispatch spent six of its eight on "wants to run" and
+        "auto-approved" pairs, and replayed a single reply. Those lines are now
+        summarised instead, so raising the limit buys more conversation.
+
+        ``exclude_id`` leaves out one message — the one being dispatched, which
+        the caller appends itself and which would otherwise appear twice.
         """
-        rows = self.messages(channel_id, limit=limit)
-        lines = []
-        for row in rows:
+        if limit <= 0:
+            return ""
+
+        # Over-fetch, because the bookkeeping between two conversation lines is
+        # unbounded and no longer spends the budget.
+        rows = self.messages(channel_id, limit=max(limit * 6, 40))
+        kept: List[Dict[str, Any]] = []
+        conversation = 0
+        for row in reversed(rows):                      # newest first
+            if exclude_id is not None and int(row["id"]) == int(exclude_id):
+                continue
+            if row["sender_kind"] != "system":
+                if conversation >= limit:
+                    break
+                conversation += 1
+            kept.append(row)
+        kept.reverse()
+
+        lines: List[str] = []
+        pending: List[Dict[str, Any]] = []              # a run of approval lines
+
+        def flush() -> None:
+            if pending:
+                lines.append(f"system: {_summarise_approvals(pending)}")
+                pending.clear()
+
+        for row in kept:
+            text = str(row["text"] or "")
+            if row["sender_kind"] == "system" and self._is_approval_line(text):
+                pending.append(row)
+                continue
+            flush()
             who = row["sender"] if row["sender_kind"] != "system" else "system"
-            lines.append(f"{who}: {row['text']}")
+            lines.append(f"{who}: {text}")
+        flush()
         return "\n".join(lines)

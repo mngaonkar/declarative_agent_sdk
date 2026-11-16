@@ -205,7 +205,10 @@ class ChannelRouter:
             if member is None:
                 self._post(channel_id, "system", "system", error)
                 continue
-            self._spawn(channel_id, self.dispatch(channel_id, member, text, sender))
+            self._spawn(channel_id, self.dispatch(
+                channel_id, member, text, sender,
+                message_id=int(message["id"]),
+            ))
             dispatched.append(member["qualified"])
         return {"message": message, "dispatched": dispatched}
 
@@ -217,7 +220,10 @@ class ChannelRouter:
 
     # ------------------------------------------------------------- dispatch
 
-    def _prompt_for(self, channel_id: int, agent_name: str, text: str, sender: str) -> str:
+    def _prompt_for(
+        self, channel_id: int, agent_name: str, text: str, sender: str,
+        message_id: Optional[int] = None,
+    ) -> str:
         """
         What the agent actually receives.
 
@@ -248,7 +254,11 @@ class ChannelRouter:
             "costs a model call.",
         ]
         if limit:
-            transcript = self.store.recent_transcript(channel_id, limit)
+            # The message being dispatched is already stored, and this prompt
+            # appends it below as "<sender> says:". Replaying it in the history
+            # too made every dispatch carry the question twice.
+            transcript = self.store.recent_transcript(
+                channel_id, limit, exclude_id=message_id)
             if transcript:
                 parts.append(f"\nRecent channel history:\n{transcript}")
         parts.append(f"\n{sender} says:\n{text}")
@@ -357,7 +367,7 @@ class ChannelRouter:
 
     async def dispatch(
         self, channel_id: int, agent: Dict[str, Any], text: str, sender: str,
-        depth: int = 0,
+        depth: int = 0, message_id: Optional[int] = None,
     ) -> None:
         """
         Run one turn against one agent, by submitting and polling.
@@ -389,7 +399,7 @@ class ChannelRouter:
             agent_url=url,
             poll_timeout=int(number("poll_request_timeout_seconds", 60)),
         )
-        prompt = self._prompt_for(channel_id, name, text, sender)
+        prompt = self._prompt_for(channel_id, name, text, sender, message_id)
         hint = self._where_to_look(agent)
 
         # Every approval this dispatch raised, so none is left pending if the
