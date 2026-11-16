@@ -30,7 +30,11 @@
 set -euo pipefail
 
 PYTHON_VERSION="3.14"          # pinned: several dependencies have no 3.15 wheels
-SERVICE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# A supervised agent gets this PATH and nothing else — a login shell's PATH is
+# not inherited. /Library/TeX/texbin is here because an agent asked to turn
+# Markdown into a PDF finds pandoc on the Homebrew prefix and then fails on a
+# missing pdflatex, which reads as "no toolchain installed".
+SERVICE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Library/TeX/texbin:/snap/bin:$HOME/.local/bin"
 
 REPO_URL="https://github.com/mngaonkar/declarative_agent_sdk"
 GIT_URL="git+${REPO_URL}.git"

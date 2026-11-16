@@ -221,6 +221,16 @@ through `exec_command`. Keep it on a trusted network, firewall it, or bind one
 private interface with `--host 10.0.0.5`. The installer warns whenever it binds
 every interface.
 
+**A supervised agent gets a fixed PATH, not your login shell's.** It is
+`/opt/homebrew/bin`, `/usr/local/bin`, the system directories,
+`/Library/TeX/texbin`, `/snap/bin` and `$HOME/.local/bin`. Anything installed
+outside those is invisible to the agent however well it works in your terminal
+— which an agent reports as "that tool is not installed". TeX is on the list
+because an agent asked for a PDF finds pandoc on the Homebrew prefix and then
+fails on a missing `pdflatex`, which looks like the same thing. Changing it
+means editing `SERVICE_PATH` in `install.sh` and reinstalling, or editing
+`environment=` in the agent's `conf.d/<name>.conf` and restarting it.
+
 **supervisord gives `exec_command` *fewer* restrictions than systemd did.** The
 old per-agent unit set `NoNewPrivileges=true` (no sudo, no setuid) and
 `PrivateTmp=true` (a namespaced `/tmp`). supervisord has no equivalent, so

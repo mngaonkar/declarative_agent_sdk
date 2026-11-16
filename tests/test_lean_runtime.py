@@ -982,3 +982,85 @@ class TestContextReport:
         loop._history["s"] = [{"role": "user", "content": "the secret is swordfish"}]
         import json as _json
         assert "swordfish" not in _json.dumps(loop.context_report())
+
+
+class TestSilentFinish:
+    """
+    A turn that ends with only `[[decision:done]]` used to surface as the
+    literal string "(done)", which is indistinguishable from a crash, an empty
+    reply, and work that failed without saying so.
+    """
+
+    def _loop(self, tmp_path, client):
+        skills = SkillRegistry(root=str(tmp_path / "skills"))
+        (tmp_path / "skills").mkdir(exist_ok=True)
+        tools = LeanToolRegistry(skills, workspace=str(tmp_path / "ws"))
+        return LeanLoop(client=client, tools=tools, skills=skills,
+                        tools_approval_required=False)
+
+    def test_it_asks_once_for_the_answer(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.side_effect = [
+            {"role": "assistant", "content": "[[decision:done]]"},
+            {"role": "assistant",
+             "content": "The PDF is at workspace/paper.pdf. [[decision:done]]"},
+        ]
+        events = list(self._loop(tmp_path, client).run("make a pdf", "s"))
+        final = [e for e in events if e.kind == "final"]
+        assert len(final) == 1
+        assert "workspace/paper.pdf" in final[0].text
+        assert client.chat.call_count == 2
+
+    def test_the_nudge_explains_that_the_user_saw_nothing(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.side_effect = [
+            {"role": "assistant", "content": "[[decision:done]]"},
+            {"role": "assistant", "content": "Here it is. [[decision:done]]"},
+        ]
+        list(self._loop(tmp_path, client).run("go", "s"))
+        sent = client.chat.call_args_list[1].args[0]
+        assert any("user saw" in str(m.get("content", "")) for m in sent)
+
+    def test_a_second_empty_answer_names_what_ran(self, tmp_path: Path):
+        """So the user knows where to look instead of reading '(done)'."""
+        client = MagicMock()
+        client.chat.side_effect = [
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "1", "type": "function",
+                             "function": {"name": "list_dir",
+                                          "arguments": '{"path": "."}'}}]},
+            {"role": "assistant", "content": "[[decision:done]]"},
+            {"role": "assistant", "content": "[[decision:done]]"},
+        ]
+        events = list(self._loop(tmp_path, client).run("go", "s"))
+        final = [e for e in events if e.kind == "final"][-1]
+        assert "(done)" not in final.text
+        assert "list_dir" in final.text
+        assert "no final answer" in final.text
+
+    def test_with_no_tools_either_it_says_that(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.side_effect = [
+            {"role": "assistant", "content": "[[decision:done]]"},
+            {"role": "assistant", "content": "[[decision:done]]"},
+        ]
+        events = list(self._loop(tmp_path, client).run("go", "s"))
+        final = [e for e in events if e.kind == "final"][-1]
+        assert "without running any tools" in final.text
+
+    def test_an_ask_decision_is_left_alone(self, tmp_path: Path):
+        """'[[decision:ask]]' with no text already had a sensible answer."""
+        client = MagicMock()
+        client.chat.return_value = {"role": "assistant", "content": "[[decision:ask]]"}
+        events = list(self._loop(tmp_path, client).run("go", "s"))
+        final = [e for e in events if e.kind == "final"][-1]
+        assert final.text == "I need your help to proceed."
+        assert client.chat.call_count == 1
+
+    def test_a_normal_answer_is_untouched(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.return_value = {
+            "role": "assistant", "content": "All set. [[decision:done]]"}
+        events = list(self._loop(tmp_path, client).run("go", "s"))
+        assert [e for e in events if e.kind == "final"][-1].text.startswith("All set")
+        assert client.chat.call_count == 1
