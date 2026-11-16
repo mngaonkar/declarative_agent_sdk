@@ -193,7 +193,7 @@ class TestRouterDispatchRules:
         store, router, channel, _ = setup
         seen = {}
 
-        async def fake_dispatch(channel_id, agent, text, sender):
+        async def fake_dispatch(channel_id, agent, text, sender, **kwargs):
             seen.update(agent=agent["name"], text=text, sender=sender)
 
         monkeypatch.setattr(router, "dispatch", fake_dispatch)
@@ -1120,7 +1120,7 @@ class TestQualifiedDispatch:
 
         seen = {}
 
-        async def fake_dispatch(channel_id, agent, text, sender):
+        async def fake_dispatch(channel_id, agent, text, sender, **kwargs):
             seen["url"] = agent["url"]
 
         monkeypatch.setattr(router, "dispatch", fake_dispatch)
@@ -1318,7 +1318,7 @@ class TestBoardRelay:
         sent = []
 
         def install(router):
-            async def fake_dispatch(channel_id, agent, text, sender, depth=0):
+            async def fake_dispatch(channel_id, agent, text, sender, depth=0, **kwargs):
                 sent.append({
                     "to": agent["qualified"], "sender": sender,
                     "text": text, "depth": depth,
@@ -1412,7 +1412,7 @@ class TestBoardRelay:
         store, router, channel, _ = board
         depths = []
 
-        async def fake_dispatch(channel_id, agent, text, sender, depth=0):
+        async def fake_dispatch(channel_id, agent, text, sender, depth=0, **kwargs):
             depths.append(depth)
 
         monkeypatch.setattr(router, "dispatch", fake_dispatch)
@@ -1439,7 +1439,7 @@ class TestBoardSayApi:
         plane, channel, _ = board
         dispatched = []
 
-        async def fake_dispatch(channel_id, agent, text, sender, depth=0):
+        async def fake_dispatch(channel_id, agent, text, sender, depth=0, **kwargs):
             dispatched.append(agent["qualified"])
 
         monkeypatch.setattr(plane.router, "dispatch", fake_dispatch)
@@ -3245,3 +3245,142 @@ class TestAutoApprove:
         assert 'id="auto-approve"' in html
         assert "auto-approve`" in app_js
         assert "armed" in app_js          # visibly on, not a quiet default
+
+
+class TestTranscriptSlots:
+    """
+    What the board replays to an agent that has been restarted.
+
+    Measured on a real board: one dispatch spent seven of its eight slots on
+    tool-approval bookkeeping and replayed a single conversation message —
+    which was the human's own question, already appended below as
+    "you says:". The agent was handed its own question twice and no history.
+    """
+
+    @pytest.fixture
+    def channel(self, store):
+        return store.add_channel("dev")
+
+    @staticmethod
+    def _tool_call(store, channel_id, tool="exec_command"):
+        """The two lines the board writes per tool call."""
+        store.add_message(channel_id, "system", "system",
+                          f"@a.here wants to run {tool}(command='ls')")
+        store.add_message(channel_id, "system", "system",
+                          f"{tool} auto-approved for @a.here.")
+
+    def test_bookkeeping_no_longer_spends_the_budget(self, store, channel):
+        cid = int(channel["id"])
+        for i in range(4):
+            store.add_message(cid, "human", "you", f"question {i}")
+            self._tool_call(store, cid)
+            store.add_message(cid, "agent", "a.here", f"answer {i}")
+
+        text = store.recent_transcript(cid, 8)
+        # all eight conversation messages survive
+        for i in range(4):
+            assert f"question {i}" in text
+            assert f"answer {i}" in text
+
+    def test_an_approval_run_collapses_to_one_line(self, store, channel):
+        cid = int(channel["id"])
+        store.add_message(cid, "human", "you", "go")
+        for _ in range(17):
+            self._tool_call(store, cid)
+        store.add_message(cid, "agent", "a.here", "done")
+
+        text = store.recent_transcript(cid, 8)
+        assert "[tool calls: exec_command x17 — approved]" in text
+        assert "wants to run" not in text
+        assert "auto-approved" not in text
+
+    def test_each_tool_is_counted_separately(self, store, channel):
+        cid = int(channel["id"])
+        store.add_message(cid, "human", "you", "go")
+        self._tool_call(store, cid, "exec_command")
+        self._tool_call(store, cid, "web_request")
+        self._tool_call(store, cid, "web_request")
+        assert "exec_command, web_request x2" in store.recent_transcript(cid, 8)
+
+    def test_a_denial_is_not_reported_as_approved(self, store, channel):
+        """The outcome is the part an agent has to get right."""
+        cid = int(channel["id"])
+        store.add_message(cid, "human", "you", "go")
+        store.add_message(cid, "system", "system",
+                          "@a.here wants to run exec_command(command='rm x')")
+        store.add_message(cid, "system", "system",
+                          "exec_command auto-denied (shell commands still need a person)")
+        assert "some denied" in store.recent_transcript(cid, 8)
+
+    def test_a_timeout_is_reported_as_denied(self, store, channel):
+        cid = int(channel["id"])
+        store.add_message(cid, "human", "you", "go")
+        store.add_message(cid, "system", "system",
+                          "@a.here wants to run exec_command(command='ls')")
+        store.add_message(cid, "system", "system",
+                          "Approval for exec_command timed out after 300s — denied.")
+        assert "timed out" in store.recent_transcript(cid, 8)
+
+    def test_other_system_lines_are_kept_verbatim(self, store, channel):
+        """
+        A dispatch failure is not bookkeeping — it is the explanation for why
+        an agent went quiet, and summarising it away would lose the only
+        record the agent sees.
+        """
+        cid = int(channel["id"])
+        store.add_message(cid, "human", "you", "go")
+        store.add_message(cid, "system", "system",
+                          "@a.here could not be reached: A2AClientError")
+        text = store.recent_transcript(cid, 8)
+        assert "could not be reached: A2AClientError" in text
+
+    def test_the_dispatched_message_is_not_replayed(self, store, channel):
+        """It is appended by _prompt_for as '<sender> says:' already."""
+        cid = int(channel["id"])
+        store.add_message(cid, "agent", "a.here", "earlier answer")
+        asked = store.add_message(cid, "human", "you", "the new question")
+        text = store.recent_transcript(cid, 8, exclude_id=int(asked["id"]))
+        assert "the new question" not in text
+        assert "earlier answer" in text
+
+    def test_without_an_exclusion_nothing_is_dropped(self, store, channel):
+        cid = int(channel["id"])
+        store.add_message(cid, "human", "you", "the new question")
+        assert "the new question" in store.recent_transcript(cid, 8)
+
+    def test_a_zero_limit_sends_no_history(self, store, channel):
+        cid = int(channel["id"])
+        store.add_message(cid, "human", "you", "hi")
+        assert store.recent_transcript(cid, 0) == ""
+
+    def test_order_is_oldest_first(self, store, channel):
+        cid = int(channel["id"])
+        for i in range(3):
+            store.add_message(cid, "human", "you", f"m{i}")
+        text = store.recent_transcript(cid, 8)
+        assert text.index("m0") < text.index("m1") < text.index("m2")
+
+    def test_the_prompt_carries_the_question_exactly_once(self, store):
+        """End to end, through the prompt the agent actually receives."""
+        router = ChannelRouter(store, EventBus())
+        channel = store.add_channel("dev")
+        cid = int(channel["id"])
+        store.add_message(cid, "agent", "a.here", "an earlier reply")
+        asked = store.add_message(cid, "human", "you", "please convert the paper")
+
+        prompt = router._prompt_for(cid, "a.here", "please convert the paper", "you",
+                                    message_id=int(asked["id"]))
+        assert prompt.count("please convert the paper") == 1
+        assert "an earlier reply" in prompt
+
+    def test_a_restarted_agent_still_gets_the_thread(self, store):
+        """The whole point of the block: continuity across a bounce."""
+        router = ChannelRouter(store, EventBus())
+        channel = store.add_channel("dev")
+        cid = int(channel["id"])
+        store.add_message(cid, "human", "you", "write the paper")
+        self._tool_call(store, cid)
+        store.add_message(cid, "agent", "a.here", "the paper is at workspace/p.md")
+
+        prompt = router._prompt_for(cid, "a.here", "now convert it", "you")
+        assert "workspace/p.md" in prompt
