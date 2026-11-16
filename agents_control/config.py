@@ -53,7 +53,17 @@ EDITABLE_PROPERTIES: List[Dict[str, Any]] = [
     {"key": "skills_directory", "label": "Skills directory", "type": "text"},
     {"key": "workspace_directory", "label": "Workspace directory", "type": "text"},
     {"key": "max_tool_iterations", "label": "Max tool iterations", "type": "int"},
-    {"key": "history_limit", "label": "History limit", "type": "int"},
+    {"key": "history_limit", "label": "History limit", "type": "int",
+     "help": "Messages of conversation kept. Counts messages, not size."},
+    {"key": "tool_payload_keep", "label": "Tool payloads kept verbatim", "type": "int",
+     "help": "Recent tool interactions whose arguments and results stay in full. "
+             "Older ones keep the call, the path and the result; the file "
+             "contents are elided. 0 disables."},
+    {"key": "tool_payload_max_chars", "label": "Tool payload limit (chars)",
+     "type": "int",
+     "help": "Size above which an aged payload is elided. A written file is on "
+             "disk already — carrying it in context too is what pushed one "
+             "prompt to 97k tokens."},
 ]
 
 _EDITABLE_KEYS = {prop["key"] for prop in EDITABLE_PROPERTIES}

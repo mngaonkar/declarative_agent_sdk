@@ -564,3 +564,214 @@ class TestLLMTimeout:
         assert events, "the turn produced nothing at all"
         assert events[-1].kind == "error"
         assert "timed out after 300s" in events[-1].text
+
+
+# ---------------------------------------------------------------------------
+# the output cap
+# ---------------------------------------------------------------------------
+
+class TestOutputCap:
+    """
+    agent.yaml without max_tokens left the request with no cap at all: the
+    factory passed None explicitly, which beat LeanAIAgent's own default of
+    4096, and `_payload` omits the key when it is None. A model then free-ran
+    until it chose to stop — seen at 19,672 tokens for a one-line question.
+    """
+
+    @staticmethod
+    def _agent(tmp_path, **extra):
+        from declarative_agent_sdk.core.agent_factory import AgentFactory
+
+        return AgentFactory.from_dict({
+            "name": "probe", "agent_framework": "lean", "provider": "vllm",
+            "model": "m", "endpoint": {"url": "http://127.0.0.1:9/v1"},
+            "skills_directory": str(tmp_path / "skills"),
+            "workspace_directory": str(tmp_path / "ws"),
+            **extra,
+        })
+
+    def test_the_runtime_default_applies_when_yaml_is_silent(self, tmp_path):
+        agent = self._agent(tmp_path)
+        assert agent._client.max_tokens == 4096
+
+    def test_the_request_carries_a_cap(self, tmp_path):
+        agent = self._agent(tmp_path)
+        payload = agent._client._payload([{"role": "user", "content": "x"}], None)
+        assert payload["max_tokens"] == 4096
+
+    def test_yaml_still_wins(self, tmp_path):
+        agent = self._agent(tmp_path, max_tokens=1024)
+        assert agent._client.max_tokens == 1024
+
+    def test_endpoint_max_tokens_is_honoured(self, tmp_path):
+        agent = self._agent(tmp_path, endpoint={"url": "http://127.0.0.1:9/v1",
+                                                "max_tokens": 2048})
+        assert agent._client.max_tokens == 2048
+
+
+# ---------------------------------------------------------------------------
+# aged tool payloads
+# ---------------------------------------------------------------------------
+
+class TestToolPayloadElision:
+    """
+    An agent that writes files carries their contents twice: on disk, and in
+    write_file's arguments, which are re-sent with every later model call. One
+    researcher held the same 25 KB paper in context three times — 23,660 tokens
+    of a 97k prompt, and the reason it kept reciting the paper instead of
+    answering the question.
+    """
+
+    PAPER = "# Small LLMs on Small GPUs\n" + ("Body text. " * 2500)   # ~27 KB
+
+    def _loop(self, tmp_path, **kwargs):
+        from declarative_agent_sdk.agents.lean.runtime.loop import LeanLoop
+        from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
+        from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
+
+        skills = SkillRegistry(root=str(tmp_path / "skills"))
+        tools = LeanToolRegistry(skills, workspace=str(tmp_path / "ws"))
+        return LeanLoop(client=object(), tools=tools, skills=skills,
+                        instruction="", tools_approval_required=False, **kwargs)
+
+    def _write_call(self, path, content, call_id="c1"):
+        import json
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": call_id,
+                "function": {"name": "write_file",
+                             "arguments": json.dumps({"path": path, "content": content})},
+            }],
+        }
+
+    def _history(self, turns=4):
+        history = [{"role": "user", "content": "write the paper"}]
+        for i in range(turns):
+            history.append(self._write_call(f"workspace/p{i}.md", self.PAPER, f"c{i}"))
+            history.append({"role": "tool", "tool_call_id": f"c{i}",
+                            "content": f"wrote {len(self.PAPER)} bytes"})
+        return history
+
+    def test_old_file_contents_are_elided(self, tmp_path):
+        loop = self._loop(tmp_path, tool_payload_keep=1, tool_payload_max_chars=2000)
+        history = self._history(turns=4)
+        before = sum(len(str(m)) for m in history)
+
+        removed = loop._elide_old_payloads(history)
+
+        after = sum(len(str(m)) for m in history)
+        assert removed > 0
+        assert after < before / 2, f"only shrank from {before} to {after}"
+
+    def test_the_path_survives(self, tmp_path):
+        """It is what lets the agent read the file back."""
+        import json
+
+        loop = self._loop(tmp_path, tool_payload_keep=0, tool_payload_max_chars=2000)
+        history = self._history(turns=2)
+        loop._elide_old_payloads(history)
+
+        args = json.loads(history[1]["tool_calls"][0]["function"]["arguments"])
+        assert args["path"] == "workspace/p0.md"
+        assert "elided" in args["content"]
+        assert str(len(self.PAPER)) in args["content"]   # says how much went
+
+    def test_recent_interactions_are_untouched(self, tmp_path):
+        """An agent editing a file now still needs to see what it just wrote."""
+        import json
+
+        loop = self._loop(tmp_path, tool_payload_keep=2, tool_payload_max_chars=2000)
+        history = self._history(turns=4)
+        loop._elide_old_payloads(history)
+
+        newest = json.loads(history[-2]["tool_calls"][0]["function"]["arguments"])
+        oldest = json.loads(history[1]["tool_calls"][0]["function"]["arguments"])
+        assert newest["content"] == self.PAPER
+        assert "elided" in oldest["content"]
+
+    def test_it_is_idempotent(self, tmp_path):
+        """
+        The property that makes it cache-safe: a prefix cache is a prefix match,
+        so an elision recomputed each turn would invalidate the cache each turn.
+        """
+        import copy
+
+        loop = self._loop(tmp_path, tool_payload_keep=1, tool_payload_max_chars=2000)
+        history = self._history(turns=4)
+
+        loop._elide_old_payloads(history)
+        once = copy.deepcopy(history)
+        assert loop._elide_old_payloads(history) == 0, "a second pass changed bytes"
+        assert history == once
+
+    def test_the_tool_chain_stays_valid(self, tmp_path):
+        from declarative_agent_sdk.agents.lean.runtime.loop import _tool_chain_valid
+
+        loop = self._loop(tmp_path, tool_payload_keep=0, tool_payload_max_chars=2000)
+        history = self._history(turns=3)
+        loop._elide_old_payloads(history)
+        assert _tool_chain_valid(history)
+        for message in history:
+            for call in message.get("tool_calls") or []:
+                assert call["id"]                      # ids are what pair them
+
+    def test_long_tool_results_are_shortened_with_a_head(self, tmp_path):
+        loop = self._loop(tmp_path, tool_payload_keep=0, tool_payload_max_chars=500)
+        history = [
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "function": {"name": "exec_command",
+                                          "arguments": '{"command": "ls"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "x" * 9000},
+        ]
+        loop._elide_old_payloads(history)
+        content = history[1]["content"]
+        assert len(content) < 500
+        assert content.startswith("xxx")               # a head is kept
+        assert "elided" in content
+
+    def test_zero_disables_it(self, tmp_path):
+        import copy
+
+        loop = self._loop(tmp_path, tool_payload_max_chars=0)
+        history = self._history(turns=4)
+        untouched = copy.deepcopy(history)
+        assert loop._elide_old_payloads(history) == 0
+        assert history == untouched
+
+    def test_small_payloads_are_left_alone(self, tmp_path):
+        import copy
+
+        loop = self._loop(tmp_path, tool_payload_keep=0, tool_payload_max_chars=2000)
+        history = [
+            self._write_call("workspace/note.md", "short note"),
+            {"role": "tool", "tool_call_id": "c1", "content": "wrote 10 bytes"},
+        ]
+        untouched = copy.deepcopy(history)
+        assert loop._elide_old_payloads(history) == 0
+        assert history == untouched
+
+    def test_arguments_that_are_not_json_still_shrink(self, tmp_path):
+        loop = self._loop(tmp_path, tool_payload_keep=0, tool_payload_max_chars=500)
+        history = [
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "function": {"name": "odd", "arguments": "y" * 9000}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ]
+        loop._elide_old_payloads(history)
+        assert len(history[0]["tool_calls"][0]["function"]["arguments"]) < 500
+
+    def test_conversation_is_never_touched(self, tmp_path):
+        """It sheds payload, not dialogue — the opposite of lowering history_limit."""
+        import copy
+
+        loop = self._loop(tmp_path, tool_payload_keep=0, tool_payload_max_chars=200)
+        long_answer = "Here is my reasoning. " * 200
+        history = [
+            {"role": "user", "content": "what do you think?"},
+            {"role": "assistant", "content": long_answer},
+        ]
+        untouched = copy.deepcopy(history)
+        assert loop._elide_old_payloads(history) == 0
+        assert history == untouched

@@ -44,6 +44,10 @@ class CommonAgentConfig:
     max_step_retries: Optional[int] = None
     max_no_tool_continues: Optional[int] = None
     history_limit: Optional[int] = None
+    # Aged tool payloads (lean): interactions kept verbatim, and the size above
+    # which older ones are elided.
+    tool_payload_keep: Optional[int] = None
+    tool_payload_max_chars: Optional[int] = None
     context_window: Optional[int] = None
     enable_truncation: bool = False
     truncate_strategy: str = "end"
@@ -100,6 +104,8 @@ def parse_common_config(
         max_step_retries=config.get("max_step_retries"),
         max_no_tool_continues=config.get("max_no_tool_continues"),
         history_limit=config.get("history_limit"),
+        tool_payload_keep=config.get("tool_payload_keep"),
+        tool_payload_max_chars=config.get("tool_payload_max_chars"),
         context_window=config.get("context_window"),
         enable_truncation=config.get("enable_truncation", False),
         truncate_strategy=config.get("truncate_strategy", "end"),

@@ -369,6 +369,7 @@ building the agent — then list the name in `tools:` like any builtin.
 | `workspace_directory` | string | `workspace` | Scratch / outputs |
 | `publish_url` | string | — | A2A agent card URL |
 | `max_tool_iterations` / `max_step_retries` / `max_no_tool_continues` / `history_limit` | int | runtime default | Loop limits |
+| `tool_payload_keep` / `tool_payload_max_chars` | int | `3` / `2000` | **lean.** Recent tool interactions kept verbatim, and the size above which older ones are elided. A file the agent wrote is on disk already; carrying it in context too is what turns a 7k prompt into 97k. `0` disables |
 | `enable_truncation` / `context_window` / `truncate_strategy` / `safety_margin` | | `false` / — / `end` / `100` | Optional token truncation |
 
 ### Examples

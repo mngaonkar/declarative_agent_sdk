@@ -166,6 +166,10 @@ LeanAIAgent.__init__
     │  model call does not stall the server: without it the A2A endpoint
     │  answers nothing while the model works — no status, no tasks/get, not
     │  even the next message/send
+    ├─ _elide_old_payloads                 aged write_file/exec payloads are
+    │  replaced in place, once: the call, its id, the path and the result
+    │  stay, the file contents go. Permanent so the prefix cache survives —
+    │  an elision recomputed per turn would invalidate it per turn
     ├─ LeanToolRegistry                    Skill, list_skills, FS tools, run_script
     ├─ register builtin + YAML tools       add_callable (type-coerce LLM args)
     ├─ LeanLLMClient                       OpenAI-compatible /chat/completions
