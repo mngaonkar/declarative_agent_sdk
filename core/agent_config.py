@@ -32,6 +32,9 @@ class CommonAgentConfig:
     # Seconds to wait on one model call. A local model writing something long
     # needs far more than a hosted one answering a question.
     request_timeout: Optional[float] = None
+    # Retries for a tool call the model emitted malformed. Off by default: a
+    # retry is another full-length generation.
+    retry_malformed_tool_calls: Optional[int] = None
     tools: List[Any] = field(default_factory=list)
     tools_approval_required: bool = True
     skills: Optional[List[str]] = None
@@ -44,6 +47,10 @@ class CommonAgentConfig:
     max_step_retries: Optional[int] = None
     max_no_tool_continues: Optional[int] = None
     history_limit: Optional[int] = None
+    # Aged tool payloads (lean): interactions kept verbatim, and the size above
+    # which older ones are elided.
+    tool_payload_keep: Optional[int] = None
+    tool_payload_max_chars: Optional[int] = None
     context_window: Optional[int] = None
     enable_truncation: bool = False
     truncate_strategy: str = "end"
@@ -89,6 +96,7 @@ def parse_common_config(
         max_tokens=max_tokens,
         temperature=temperature,
         request_timeout=request_timeout,
+        retry_malformed_tool_calls=config.get("retry_malformed_tool_calls"),
         tools=list(config.get("tools") or []),
         tools_approval_required=config.get("tools_approval_required", True),
         skills=config.get("skills"),
@@ -100,6 +108,8 @@ def parse_common_config(
         max_step_retries=config.get("max_step_retries"),
         max_no_tool_continues=config.get("max_no_tool_continues"),
         history_limit=config.get("history_limit"),
+        tool_payload_keep=config.get("tool_payload_keep"),
+        tool_payload_max_chars=config.get("tool_payload_max_chars"),
         context_window=config.get("context_window"),
         enable_truncation=config.get("enable_truncation", False),
         truncate_strategy=config.get("truncate_strategy", "end"),

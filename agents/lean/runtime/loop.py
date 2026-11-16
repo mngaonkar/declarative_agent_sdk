@@ -178,6 +178,10 @@ class LeanLoop:
         max_step_retries: int = 3,
         max_no_tool_continues: int = 4,
         history_limit: int = 48,
+        # Aged tool payloads: how many interactions stay verbatim, and the size
+        # above which older ones are elided. 0 disables.
+        tool_payload_keep: int = 3,
+        tool_payload_max_chars: int = 2000,
         tools_approval_required: bool = True,
         auto_approve: Optional[set] = None,
     ) -> None:
@@ -189,6 +193,8 @@ class LeanLoop:
         self.max_step_retries = max(1, max_step_retries)
         self.max_no_tool_continues = max(1, max_no_tool_continues)
         self.history_limit = history_limit
+        self.tool_payload_keep = tool_payload_keep
+        self.tool_payload_max_chars = tool_payload_max_chars
         self.tools_approval_required = tools_approval_required
         self.auto_approve = set(auto_approve or AUTO_APPROVE_TOOLS)
 
@@ -224,6 +230,49 @@ class LeanLoop:
         # Last resort: fill any remaining holes rather than send an invalid list.
         _close_open_tool_calls(trimmed, reason="Dropped by history trim.")
         return trimmed
+
+    def _elide_old_payloads(self, history: List[Dict[str, Any]]) -> int:
+        """
+        Shrink the file-sized payloads in older tool interactions, permanently.
+
+        An agent that writes files carries their contents twice: on disk, where
+        they are useful, and in `write_file`'s arguments, which are re-sent with
+        every later model call. One researcher ended up with the same 25 KB
+        paper in context three times — 23,660 tokens of a 97k prompt — which is
+        both the cost and the reason it kept reciting the document instead of
+        answering the question.
+
+        What goes is only the oversized *values*: the call, its id, the path and
+        the result line all stay, so the tool chain stays valid and the agent
+        still knows what it did and where to re-read it.
+
+        The edit is made in the stored history and never revisited. That matters
+        for more than tidiness: a prefix cache is a prefix match, so an elision
+        recomputed on every turn would invalidate the cache every turn. Done
+        once, the prefix settles after a single slow turn and stays cached.
+
+        Returns the number of characters removed.
+        """
+        keep = int(self.tool_payload_keep or 0)
+        limit = int(self.tool_payload_max_chars or 0)
+        if limit <= 0:
+            return 0
+
+        # Walk backwards, leaving the most recent `keep` interactions intact —
+        # an agent editing a file now still needs to see what it just wrote.
+        seen = 0
+        removed = 0
+        for message in reversed(history):
+            is_tool_turn = message.get("role") == "tool" or message.get("tool_calls")
+            if not is_tool_turn:
+                continue
+            seen += 1
+            if seen <= keep:
+                continue
+            removed += _elide_message(message, limit)
+        if removed:
+            logger.debug(f"[loop] elided {removed} chars of aged tool payloads")
+        return removed
 
     def _needs_approval(self, tool_name: str) -> bool:
         if not self.tools_approval_required:
@@ -378,6 +427,9 @@ class LeanLoop:
                 history=history,
                 reason="Closed incomplete tool batch before model call.",
             )
+
+            # `messages` holds the same dicts as `history`, so this reaches both.
+            self._elide_old_payloads(history)
 
             try:
                 message = self.client.chat(messages, tools=self.tools.schemas())
@@ -728,6 +780,60 @@ def _mirror_tool_inserts(
     extra = [m for m in inserts if m.get("tool_call_id") not in answered]
     if extra:
         history[j:j] = extra
+
+
+ELIDED_HEAD = 160
+
+
+def _elide_mark(dropped: int) -> str:
+    """Deterministic, so re-sending the same history is byte-identical."""
+    return f"[{dropped} chars elided — read the file or re-run the tool if needed]"
+
+
+def _elide_message(message: Dict[str, Any], limit: int) -> int:
+    """Shrink oversized strings in one tool message. Returns chars removed."""
+    removed = 0
+    if message.get("role") == "tool":
+        content = message.get("content")
+        if isinstance(content, str) and len(content) > limit:
+            head = content[:ELIDED_HEAD]
+            message["content"] = f"{head}\n{_elide_mark(len(content) - len(head))}"
+            removed += len(content) - len(message["content"])
+        return removed
+
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        arguments = function.get("arguments")
+        if not isinstance(arguments, str) or len(arguments) <= limit:
+            continue
+        before = len(arguments)
+        function["arguments"] = _elide_arguments(arguments, limit)
+        removed += before - len(function["arguments"])
+    return removed
+
+
+def _elide_arguments(arguments: str, limit: int) -> str:
+    """
+    Replace the big values in a tool call's JSON arguments.
+
+    Short fields survive — `path` is what lets the agent find the file again —
+    so only values over the limit are dropped.
+    """
+    try:
+        parsed = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError):
+        # Not JSON after all: keep a head and mark the rest.
+        head = arguments[:ELIDED_HEAD]
+        return f"{head}{_elide_mark(len(arguments) - len(head))}"
+    if not isinstance(parsed, dict):
+        head = arguments[:ELIDED_HEAD]
+        return f"{head}{_elide_mark(len(arguments) - len(head))}"
+
+    for key, value in parsed.items():
+        if isinstance(value, str) and len(value) > limit:
+            parsed[key] = _elide_mark(len(value))
+    # sort_keys=False keeps the author's order, which keeps the bytes stable.
+    return json.dumps(parsed, sort_keys=False, ensure_ascii=False)
 
 
 def _tool_chain_valid(messages: List[Dict[str, Any]]) -> bool:

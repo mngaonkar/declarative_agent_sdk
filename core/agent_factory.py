@@ -154,7 +154,16 @@ class AgentFactory:
                 ("max_step_retries", common.max_step_retries),
                 ("max_no_tool_continues", common.max_no_tool_continues),
                 ("history_limit", common.history_limit),
+                ("tool_payload_keep", common.tool_payload_keep),
+                ("tool_payload_max_chars", common.tool_payload_max_chars),
                 ("request_timeout", common.request_timeout),
+                ("retry_malformed_tool_calls", common.retry_malformed_tool_calls),
+                # Only when the YAML sets it. Passing None explicitly beat
+                # LeanAIAgent's own default of 4096 and left the request with
+                # no cap at all, so a model free-ran until it chose to stop —
+                # observed at 19,672 tokens and counting for a one-line
+                # question.
+                ("max_output_tokens", common.max_tokens),
             )
             if value is not None
         }
@@ -169,7 +178,6 @@ class AgentFactory:
             skills=common.skills,
             model=common.model,
             provider=common.provider or "openai",
-            max_output_tokens=common.max_tokens,
             endpoint_url=common.endpoint_url,
             temperature=common.temperature,
             publish_url=common.publish_url,

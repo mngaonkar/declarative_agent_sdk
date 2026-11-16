@@ -280,6 +280,51 @@ chain started by one message stops after three hops with a note in the channel.
 It is checked in the same place every hop passes through, so nothing can route
 around it.
 
+## When a tool call comes back malformed
+
+A tool call's arguments are generated **token by token, as one escaped JSON
+string** — so asking an agent for a 25 KB document in a single `write_file`
+call asks the model for ~7,000 tokens of unbroken escaping. A quantized model
+loses track of it sooner or later; llama.cpp then cannot parse the call out of
+the model's text and answers 500, and the turn is lost after minutes of
+generation.
+
+Measured on one agent: writes of 3.4–5.5 KB all succeeded, while the 21.8 KB,
+24.8 KB and 27.7 KB single-shot writes failed. The fix is in the agent's
+instructions, not in config — tell it to write sections of a few KB and
+assemble them with `exec_command`.
+
+The SDK does two things about it: the error says what broke and what to change
+rather than forwarding server JSON, and `retry_malformed_tool_calls` (default
+`0`) can try again. The default is off because a retry is another full-length
+generation — minutes on a local model — and smaller writes fix the cause rather
+than paying for it twice.
+
+## Which settings reach which runtime
+
+Twelve of the editor's settings apply to all three runtimes. The rest belong to
+one, and the form hides the ones that do not apply to the agent's framework —
+it re-decides as soon as you change the Framework dropdown, before anything is
+saved.
+
+| Setting | lean | adk | deepagent |
+|---|:--:|:--:|:--:|
+| description, framework, provider, model, `endpoint.url`, temperature, `max_tokens`, tools, approval, instruction file, skills dir, workspace dir | ✓ | ✓ | ✓ |
+| `request_timeout` | ✓ | | |
+| `max_tool_iterations` | ✓ | | |
+| `history_limit` | ✓ | | |
+| `tool_payload_keep` / `tool_payload_max_chars` | ✓ | | |
+| `enable_truncation`, `context_window`, `truncate_strategy`, `safety_margin` | | ✓ | ✓ |
+
+The split is not arbitrary: the loop budgets are lean's own — it is the only
+runtime whose loop this SDK writes — while adk and deepagent manage context by
+truncating oversized input, which is theirs. Offering every knob to every agent
+meant the YAML accepted a setting the runtime never read: the agent started,
+nothing changed, and nothing said why.
+
+Framework aliases are normalised through the SDK's own resolver, so a legacy
+`backend: langchain` selects the deepagent rows rather than matching none.
+
 ## How a dispatch talks to an agent
 
 The board uses A2A's **submit-and-poll**, not a streaming connection:
@@ -330,6 +375,7 @@ What this buys, beyond not timing out:
 | board | `poll_interval_seconds` → `poll_max_interval_seconds` | 2s → 10s | poll cadence |
 | board | `poll_request_timeout_seconds` | 60s | one submit or `tasks/get` call |
 | board | `approval_timeout_seconds` | 300s | how long a human has to click |
+| channel | **Approvals** selector (header) | ask every time | which tools skip the click |
 
 The reply timeout is a budget on the agent's *work*: waiting for an approval
 does not spend it, and a quiet agent is not a stalled one. A client timeout now
@@ -391,6 +437,31 @@ board closes that stream, the human decides, and the decision opens the next
 leg. Holding an HTTP request open across a human decision ran the client's read
 timeout down while the agent sat waiting for an answer, and the turn died at
 *requesting tool confirmation* every time.
+
+### Auto-approval, per channel
+
+Clicking Approve for every `web_request` in a long research run is the whole of
+the friction, so the channel header carries an **Approvals** selector:
+
+| Level | What happens |
+|---|---|
+| *ask every time* (default) | every gated tool waits for a human |
+| *auto, except shell* | approved immediately, unless the tool runs commands — `exec_command`, `exec_async`, `check_exec_async`, `run_script` |
+| *auto, everything* | approved immediately, no exceptions |
+
+It sits on the **channel**, not the agent, for three reasons: you can revoke it
+mid-run with one click, it does not follow the agent into other channels, and it
+needs no restart. The agent-side `tools_approval_required: false` is the blunt
+version — all-or-nothing, every channel, and only after a reinstall.
+
+Every automatic decision is still written into the transcript
+(`web_request auto-approved for @researcher.here`), because who approved a tool
+call is part of the record even when the answer was a standing one. A refusal
+under *auto, except shell* is posted too — otherwise an agent waiting on a
+denied `exec_command` looks like it stalled.
+
+The selector turns amber while it is on. Nothing is auto-approved on a channel
+you have not armed, and the level survives a restart of the board.
 
 Two consequences of a dispatch timing out, both now stated in the channel:
 
@@ -484,6 +555,7 @@ approvals — which are, by design, denied rather than resumed.
 | POST/DELETE | `/api/channels/{id}/members[/{agent_id}]` | membership |
 | GET/POST | `/api/channels/{id}/messages` | transcript / post and dispatch |
 | POST | `/api/channels/{id}/halt` | kill switch |
+| POST | `/api/channels/{id}/auto-approve` | `""` \| `"safe"` \| `"all"` |
 | POST | `/api/approvals/{id}` | approve or deny a tool call |
 | GET/PUT | `/api/settings` | defaults and timeouts |
 | GET | `/api/peer/roster` · `/api/peer/preflight` · POST `/api/peer/log` | used by `send_to_agent` |

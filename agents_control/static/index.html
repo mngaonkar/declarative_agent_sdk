@@ -52,6 +52,14 @@
         <p class="sub" id="channel-topic"></p>
       </div>
       <div class="head-actions">
+        <label class="head-field" id="auto-approve-wrap" hidden>
+          <span>Approvals</span>
+          <select id="auto-approve">
+            <option value="">ask every time</option>
+            <option value="safe">auto, except shell</option>
+            <option value="all">auto, everything</option>
+          </select>
+        </label>
         <button id="halt-btn" class="btn danger" hidden>Stop</button>
         <button id="delete-channel" class="btn ghost" hidden>Delete channel</button>
       </div>

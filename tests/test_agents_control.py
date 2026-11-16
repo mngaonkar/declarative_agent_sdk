@@ -2011,17 +2011,26 @@ class TestBoardScriptWiring:
             f"{offenders} — scope the lookup to the cloned form instead"
         )
 
-    def test_every_form_field_the_script_reads_exists_in_the_markup(self):
-        """A renamed input would otherwise fail only when the form is opened."""
+    def test_every_form_field_the_script_reads_exists(self):
+        """
+        A renamed input would otherwise fail only when the form is opened.
+
+        Two sources are legitimate: a `name=` in the markup, and a key in the
+        config editor's schema — those inputs are built at runtime from
+        EDITABLE_PROPERTIES rather than written in HTML.
+        """
         import re
+
+        from declarative_agent_sdk.agents_control.config import EDITABLE_PROPERTIES
 
         html = self._static("index.html")
         app_js = self._static("app.js")
 
         declared = set(re.findall(r'name="([^"]+)"', html))
+        declared |= {prop["key"] for prop in EDITABLE_PROPERTIES}
         used = set(re.findall(r"form\.elements\.([A-Za-z_][A-Za-z0-9_]*)", app_js))
         missing = sorted(used - declared)
-        assert not missing, f"app.js reads form fields that no markup declares: {missing}"
+        assert not missing, f"app.js reads form fields nothing declares: {missing}"
 
     def test_uncaught_failures_are_surfaced(self):
         app_js = self._static("app.js")
@@ -3039,3 +3048,200 @@ class TestRelayOncePerTurn:
         await watched(channel["id"], agent, "go", "you")
         await asyncio.sleep(0)
         assert sorted(reached) == ["editor", "reviewer"]
+
+
+# ---------------------------------------------------------------------------
+# which settings reach which runtime
+# ---------------------------------------------------------------------------
+
+class TestPerRuntimeProperties:
+    """
+    The loop budgets are lean's own and truncation is adk/deepagent's. Offering
+    all of them to every agent meant the YAML accepted a knob the runtime never
+    read — the agent started, nothing changed, and nothing said why.
+    """
+
+    @staticmethod
+    def _keys(framework):
+        from declarative_agent_sdk.agents_control.config import properties_for
+        return {prop["key"] for prop in properties_for(framework)}
+
+    def test_lean_only_knobs_are_hidden_from_the_others(self):
+        lean, adk = self._keys("lean"), self._keys("adk")
+        for key in ("history_limit", "max_tool_iterations", "request_timeout",
+                    "tool_payload_keep", "tool_payload_max_chars"):
+            assert key in lean
+            assert key not in adk, f"{key} does not reach adk"
+
+    def test_truncation_belongs_to_adk_and_deepagent(self):
+        lean, adk, deep = self._keys("lean"), self._keys("adk"), self._keys("deepagent")
+        for key in ("enable_truncation", "context_window", "truncate_strategy",
+                    "safety_margin"):
+            assert key in adk and key in deep
+            assert key not in lean
+
+    def test_the_common_settings_reach_everything(self):
+        shared = self._keys("lean") & self._keys("adk") & self._keys("deepagent")
+        for key in ("description", "agent_framework", "provider", "model",
+                    "endpoint.url", "temperature", "max_tokens", "tools",
+                    "tools_approval_required", "instruction_file",
+                    "skills_directory", "workspace_directory"):
+            assert key in shared, f"{key} should apply to every runtime"
+
+    def test_an_unknown_framework_falls_back_to_lean(self):
+        assert self._keys("nonsense") == self._keys("lean")
+
+    def test_the_api_reports_the_framework(self, client, plane, tmp_path):
+        prefix = tmp_path / "a"
+        prefix.mkdir()
+        (prefix / "agent.yaml").write_text("name: a\nagent_framework: deepagent\n")
+        (prefix / "instructions.md").write_text("hi\n")
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        agent = plane.store.upsert_agent(machine["id"], {
+            "name": "a", "prefix": str(prefix), "url": "http://x"})
+
+        data = client.get(f"/api/agents/{agent['id']}/config", headers=AUTH).json()
+        assert data["framework"] == "deepagent"
+        # the whole schema still ships, so the form can re-decide on change
+        assert any(p["key"] == "history_limit" for p in data["schema"])
+
+    def test_every_runtime_only_knob_declares_its_runtimes(self):
+        """A new lean-only knob added without the marker would silently mislead."""
+        from declarative_agent_sdk.agents_control.config import EDITABLE_PROPERTIES
+
+        lean_only = {"history_limit", "max_tool_iterations", "request_timeout",
+                     "tool_payload_keep", "tool_payload_max_chars"}
+        for prop in EDITABLE_PROPERTIES:
+            if prop["key"] in lean_only:
+                assert prop.get("runtimes") == ["lean"], prop["key"]
+
+    def test_the_board_hides_the_rows_it_should(self):
+        app_js = (
+            Path(__file__).resolve().parents[1]
+            / "agents_control" / "static" / "app.js"
+        ).read_text()
+        assert "appliesTo" in app_js
+        assert "prop.runtimes" in app_js
+        # and re-decides when the dropdown changes, before anything is saved
+        assert "agent_framework" in app_js and "showFor" in app_js
+
+
+# ---------------------------------------------------------------------------
+# auto-approval, per channel
+# ---------------------------------------------------------------------------
+
+class TestAutoApprove:
+    """
+    Clicking Approve for every web_request in a long research run is the whole
+    of the friction. The setting lives on the channel, not the agent:
+    `tools_approval_required: false` is all-or-nothing, needs a restart, and
+    follows the agent into every channel it joins.
+    """
+
+    @pytest.fixture
+    def board(self, store):
+        router = ChannelRouter(store, EventBus())
+        channel = store.add_channel("dev")
+        return router, store, channel["id"]
+
+    @staticmethod
+    def _approval(channel_id, tool):
+        from declarative_agent_sdk.agents_control.router import PendingApproval
+        return PendingApproval(channel_id, "researcher.here", tool, {},
+                               task_id="t", context_id="c", function_id="f")
+
+    def test_asking_is_the_default(self, board):
+        router, store, channel_id = board
+        assert store.auto_approve(channel_id) == ""
+        assert router._auto_decision(channel_id, self._approval(channel_id, "web_request")) is None
+
+    def test_safe_approves_a_fetch(self, board):
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "safe")
+        for tool in ("web_request", "write_file", "tavily_search"):
+            assert router._auto_decision(channel_id, self._approval(channel_id, tool)) is True
+
+    def test_safe_still_refuses_shell(self, board):
+        """Running commands is a different decision from fetching a page."""
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "safe")
+        for tool in ("exec_command", "exec_async", "run_script"):
+            assert router._auto_decision(channel_id, self._approval(channel_id, tool)) is False
+
+    def test_all_approves_shell_too(self, board):
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "all")
+        assert router._auto_decision(channel_id, self._approval(channel_id, "exec_command")) is True
+
+    @pytest.mark.asyncio
+    async def test_an_auto_decision_skips_the_wait(self, board):
+        router, store, channel_id = board
+        store.update_settings({"approval_timeout_seconds": 600})
+        store.set_auto_approve(channel_id, "safe")
+        approval = self._approval(channel_id, "web_request")
+        router.pending[approval.id] = approval
+
+        # nobody resolves it; without auto-approval this would block 600s
+        assert await asyncio.wait_for(
+            router._await_decision(channel_id, "researcher.here", approval),
+            timeout=2) is True
+        assert router.pending == {}
+
+    @pytest.mark.asyncio
+    async def test_it_is_recorded_in_the_transcript(self, board):
+        """An approval nobody saw still belongs in the record."""
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "safe")
+        approval = self._approval(channel_id, "web_request")
+        router.pending[approval.id] = approval
+        await router._await_decision(channel_id, "researcher.here", approval)
+        assert "auto-approved" in store.messages(channel_id)[-1]["text"]
+
+    @pytest.mark.asyncio
+    async def test_a_safe_refusal_is_visible(self, board):
+        """Otherwise it looks like the agent stalled."""
+        router, store, channel_id = board
+        store.set_auto_approve(channel_id, "safe")
+        approval = self._approval(channel_id, "exec_command")
+        router.pending[approval.id] = approval
+        assert await router._await_decision(channel_id, "x", approval) is False
+        assert "shell commands still need a person" in store.messages(channel_id)[-1]["text"]
+
+    def test_the_level_is_validated(self, board):
+        router, store, channel_id = board
+        with pytest.raises(ValueError, match="unknown auto-approve level"):
+            store.set_auto_approve(channel_id, "yolo")
+
+    def test_it_survives_a_restart(self, tmp_path):
+        path = str(tmp_path / "s.db")
+        store = Store(path)
+        channel = store.add_channel("dev")
+        store.set_auto_approve(channel["id"], "all")
+        store.close()
+        assert Store(path).auto_approve(channel["id"]) == "all"
+
+    def test_the_api_sets_and_reports_it(self, client, plane):
+        channel = client.post("/api/channels", json={"name": "dev"},
+                              headers=AUTH).json()["channel"]
+        response = client.post(f"/api/channels/{channel['id']}/auto-approve",
+                               json={"level": "safe"}, headers=AUTH)
+        assert response.status_code == 200
+        read = client.get(f"/api/channels/{channel['id']}/messages", headers=AUTH).json()
+        assert read["auto_approve"] == "safe"
+        # and the change is announced, because who approves is part of the record
+        assert any("except shell" in m["text"] for m in read["messages"])
+
+    def test_a_bad_level_is_rejected(self, client):
+        channel = client.post("/api/channels", json={"name": "dev"},
+                              headers=AUTH).json()["channel"]
+        assert client.post(f"/api/channels/{channel['id']}/auto-approve",
+                           json={"level": "yolo"}, headers=AUTH).status_code == 400
+
+    def test_the_board_shows_it_next_to_stop(self):
+        html = (Path(__file__).resolve().parents[1]
+                / "agents_control" / "static" / "index.html").read_text()
+        app_js = (Path(__file__).resolve().parents[1]
+                  / "agents_control" / "static" / "app.js").read_text()
+        assert 'id="auto-approve"' in html
+        assert "auto-approve`" in app_js
+        assert "armed" in app_js          # visibly on, not a quiet default

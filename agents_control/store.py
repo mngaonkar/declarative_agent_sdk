@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS channels (
     name    TEXT NOT NULL UNIQUE,
     topic   TEXT NOT NULL DEFAULT '',
     halted  INTEGER NOT NULL DEFAULT 0,
+    -- '' ask every time | 'safe' everything but shell | 'all'
+    auto_approve TEXT NOT NULL DEFAULT '',
     created TEXT NOT NULL
 );
 
@@ -175,6 +177,12 @@ class Store:
             if column not in agent_columns:
                 self._write(f"ALTER TABLE agents ADD COLUMN {column} {ddl}")
                 logger.info(f"store: added agents.{column}")
+
+        channel_columns = {row["name"] for row in self._rows("PRAGMA table_info(channels)")}
+        for column, ddl in (("auto_approve", "TEXT NOT NULL DEFAULT ''"),):
+            if column not in channel_columns:
+                self._write(f"ALTER TABLE channels ADD COLUMN {column} {ddl}")
+                logger.info(f"store: added channels.{column}")
 
         machine_columns = {row["name"] for row in self._rows("PRAGMA table_info(machines)")}
         for column, ddl in (("interfaces", "TEXT NOT NULL DEFAULT '[]'"),):
@@ -408,6 +416,17 @@ class Store:
 
     def set_halted(self, channel_id: int, halted: bool) -> None:
         self._write("UPDATE channels SET halted = ? WHERE id = ?", (int(halted), channel_id))
+
+    def set_auto_approve(self, channel_id: int, level: str) -> None:
+        """'' ask every time, 'safe' everything but shell, 'all' everything."""
+        if level not in ("", "safe", "all"):
+            raise ValueError(f"unknown auto-approve level: {level!r}")
+        self._write("UPDATE channels SET auto_approve = ? WHERE id = ?",
+                    (level, channel_id))
+
+    def auto_approve(self, channel_id: int) -> str:
+        row = self.channel(channel_id)
+        return str(row["auto_approve"]) if row else ""
 
     def is_halted(self, channel_id: int) -> bool:
         row = self.channel(channel_id)

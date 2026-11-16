@@ -2,7 +2,7 @@
 
 const state = {
   machines: [], agents: [], channels: [], settings: {}, defaults: {},
-  channelId: null, messages: [], members: [], halted: false,
+  channelId: null, messages: [], members: [], halted: false, autoApprove: '',
   typing: new Set(), approvals: new Map(), lastId: 0, needsAuth: false,
 };
 
@@ -22,7 +22,7 @@ const el = (tag, cls, text) => {
  * process started. Edit the tree without restarting and the new board asks the
  * old server for routes it does not have — which it answers with a bare 404.
  */
-const EXPECTS_API = 16;
+const EXPECTS_API = 19;
 
 /** An agent's address on the board. The bare name is unique only per machine. */
 const fqn = (agent) => agent.qualified || `${agent.name}.${agent.machine_name}`;
@@ -217,6 +217,7 @@ async function selectChannel(id) {
   state.messages = data.messages;
   state.members = data.members;
   state.halted = data.halted;
+  state.autoApprove = data.auto_approve || '';
   state.lastId = state.messages.length ? state.messages[state.messages.length - 1].id : 0;
   renderSidebar();
   renderBoardHeader();
@@ -237,6 +238,13 @@ function renderBoardHeader() {
   const halt = $('#halt-btn');
   halt.textContent = state.halted ? 'Resume' : 'Stop';
   halt.className = state.halted ? 'btn' : 'btn danger';
+
+  // Auto-approval is a standing decision, so it is shown next to Stop rather
+  // than buried in Settings — and coloured when it is on, because "nobody is
+  // being asked any more" should be visible from across the room.
+  $('#auto-approve-wrap').hidden = !channel;
+  $('#auto-approve').value = state.autoApprove;
+  $('#auto-approve-wrap').classList.toggle('armed', Boolean(state.autoApprove));
   renderMentionHint();
 }
 
@@ -519,8 +527,27 @@ async function openAgentConfig(agent) {
   });
   wrap.append(tabs, bodies);
 
-  // Properties: rendered from the schema the server sent
+  // Properties: rendered from the schema the server sent.
+  //
+  // A row names the runtimes it reaches; the loop budgets are lean's own and
+  // the truncation settings are adk/deepagent's. Showing all of them would
+  // offer knobs that the YAML accepts and the agent never reads.
   const form = el('form', 'form');
+  const rows = [];
+  const appliesTo = (prop, framework) =>
+    !prop.runtimes || prop.runtimes.includes(framework);
+  const showFor = (framework) => {
+    rows.forEach(({ prop, label }) => {
+      const on = appliesTo(prop, framework);
+      label.classList.toggle('hidden', !on);
+    });
+    const hidden = rows.filter(({ prop }) => !appliesTo(prop, framework)).length;
+    frameworkNote.textContent = hidden
+      ? `${hidden} setting(s) hidden — they belong to the other runtimes.`
+      : '';
+  };
+  const frameworkNote = el('small', 'note');
+
   data.schema.forEach((prop) => {
     const value = data.properties[prop.key];
     const label = el('label', prop.type === 'bool' ? 'check' : '');
@@ -547,8 +574,18 @@ async function openAgentConfig(agent) {
       label.append(document.createTextNode(prop.label), field);
     }
     if (prop.help) label.append(el('small', '', prop.help));
+    if (prop.runtimes) {
+      label.append(el('small', 'drift', `${prop.runtimes.join(' / ')} only`));
+    }
     form.append(label);
+    rows.push({ prop, label, field });
   });
+
+  // Re-decide as soon as the framework changes, before anything is saved.
+  form.elements.agent_framework.addEventListener('change', (event) =>
+    showFor(String(event.target.value || '').toLowerCase()));
+  form.append(frameworkNote);
+  showFor(data.framework || 'lean');
   panes['Properties'].append(form);
   panes['Properties'].append(el('p', 'note',
     'Saving this form rewrites agent.yaml, which keeps the header comment but ' +
@@ -833,6 +870,20 @@ $('#halt-btn').onclick = async () => {
       method: 'POST', body: JSON.stringify({ halted: !state.halted }),
     });
   } catch (error) { toast(error.message, true); }
+};
+
+$('#auto-approve').onchange = async (event) => {
+  const level = event.target.value;
+  try {
+    await api(`/api/channels/${state.channelId}/auto-approve`, {
+      method: 'POST', body: JSON.stringify({ level }),
+    });
+    state.autoApprove = level;
+    renderBoardHeader();
+  } catch (error) {
+    toast(error.message, true);
+    event.target.value = state.autoApprove;      // put it back
+  }
 };
 
 $('#member-add-btn').onclick = async () => {
