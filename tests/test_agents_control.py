@@ -59,9 +59,9 @@ class TestStore:
     def test_settings_are_seeded(self, store):
         settings = store.settings()
         assert settings["default_framework"] == "lean"
-        # web_request, exec_command, send_to_agent ... are core, so the
-        # default extra-tools list is empty
-        assert settings["default_tools"] == ""
+        # web_request, exec_command, send_to_agent ... are core, so there is
+        # no default tools list to seed
+        assert "default_tools" not in settings
 
     def test_update_settings_ignores_unknown_keys(self, store):
         updated = store.update_settings({"default_model": "gpt-4o", "nonsense": 1})

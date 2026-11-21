@@ -25,12 +25,14 @@ import json
 import re
 import os
 import shlex
+import time
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from declarative_agent_sdk.core.agent_logging import get_logger
+from declarative_agent_sdk.agents_control.logbook import tail_lines
 
 logger = get_logger(__name__)
 
@@ -588,8 +590,24 @@ class MachineDriver:
         # not exist and would stop with "--env-file not found".
         if env_path:
             command += f" --env-file {env_path}"
+        where = machine.get("name")
+        logger.info(
+            f"installing agent '{name}' on '{where}' "
+            f"(framework {framework}, provider {provider}, sdk {sdk_source}"
+            f"{', reinstall' if prefix else ''})"
+        )
+        started = time.monotonic()
         try:
             out = self.run(machine, command, timeout=timeout)
+        except MachineError as exc:
+            # install.sh reports progress and the reason on stderr; keep the
+            # end of it, which is where the reason is.
+            logger.error(
+                f"install of '{name}' on '{where}' failed after "
+                f"{time.monotonic() - started:.0f}s: {exc}\n"
+                + "\n".join(tail_lines(exc.stderr, 40))
+            )
+            raise
         finally:
             if env_path:
                 # The key now lives in the agent's own 0600 .env; this copy goes.
@@ -600,7 +618,18 @@ class MachineDriver:
 
         result = _parse_json(out) or {}
         if not result:
+            logger.error(f"install of '{name}' on '{where}' returned no JSON:\n"
+                         + "\n".join(tail_lines(out, 40)))
             raise MachineError(f"install.sh returned no JSON for agent '{name}'", stderr=out)
+        took = time.monotonic() - started
+        if result.get("ready") is False:
+            logger.warning(
+                f"agent '{name}' installed on '{where}' in {took:.0f}s but is not ready: "
+                + "; ".join(str(p) for p in result.get("problems") or []))
+        else:
+            logger.info(
+                f"agent '{name}' installed on '{where}' in {took:.0f}s "
+                f"({result.get('url') or 'no url'}, {result.get('service_state') or 'unknown'})")
         return result
 
     # ------------------------------------------------- an agent's own config
@@ -912,8 +941,99 @@ class MachineDriver:
             f"{self._script_path(machine, 'uninstall')} "
             f"{' '.join(shlex.quote(a) for a in args)}"
         )
+        logger.info(f"removing agent '{name}' from '{machine.get('name')}'"
+                    f"{' (purge)' if purge else ''}")
         out = self.run(machine, command, timeout=timeout)
         return _parse_json(out) or {"name": name, "removed": True}
+
+    # ------------------------------------------------------------ agent logs
+
+    LOG_STREAMS = ("stdout", "stderr", "supervisor")
+
+    def agent_logs(
+        self,
+        machine: Dict[str, Any],
+        prefix: str,
+        name: str,
+        stream: str = "stderr",
+        lines: int = 200,
+        timeout: int = 60,
+    ) -> Dict[str, Any]:
+        """
+        The last ``lines`` of one of an agent's logs, read on its machine.
+
+        ``stdout`` / ``stderr`` are the files supervisord writes for the
+        program (install.sh names them); ``supervisor`` is supervisord's own
+        log, shared by every agent on the machine, which is where a program
+        that will not start says why. The SDK logs to stderr, so that is the
+        default.
+        """
+        path = self._log_path(prefix, name, stream)
+        lines = max(1, min(int(lines or 200), 5000))
+        quoted = shlex.quote(path)
+        marker = "__AGENTS_CONTROL_NO_LOG__"
+        out = self.run(
+            machine,
+            f"if [ -f {quoted} ]; then tail -n {lines} {quoted}; else echo {marker}; fi",
+            timeout=timeout,
+        )
+        exists = out.strip() != marker
+        return {
+            "stream": stream,
+            "path": path,
+            "exists": exists,
+            "lines": lines,
+            "text": out if exists else "",
+        }
+
+    # supervisord rotates program logs at 10MB; this leaves room for a
+    # supervisord.log that has grown past that, without unbounded transfers.
+    LOG_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+    def agent_log_file(
+        self,
+        machine: Dict[str, Any],
+        prefix: str,
+        name: str,
+        stream: str = "stderr",
+        timeout: int = 300,
+    ) -> Dict[str, Any]:
+        """
+        The whole of one of an agent's logs, for download.
+
+        Bounded to the last LOG_DOWNLOAD_BYTES; ``truncated`` says when the
+        file was larger. Raises LookupError when the file does not exist.
+        """
+        path = self._log_path(prefix, name, stream)
+        quoted = shlex.quote(path)
+        cap = self.LOG_DOWNLOAD_BYTES
+        marker = "__AGENTS_CONTROL_NO_LOG__"
+        out = self.run(
+            machine,
+            f"if [ -f {quoted} ]; then wc -c < {quoted}; tail -c {cap} {quoted}; "
+            f"else echo {marker}; fi",
+            timeout=timeout,
+        )
+        if out.strip() == marker:
+            raise LookupError(f"{path} does not exist on '{machine.get('name')}'")
+        size_line, _, text = out.partition("\n")
+        try:
+            size = int(size_line.strip())
+        except ValueError:
+            size = len(text)
+        return {"path": path, "text": text, "size": size, "truncated": size > cap}
+
+    def _log_path(self, prefix: str, name: str, stream: str) -> str:
+        """Where install.sh / supervisord put each of an agent's logs."""
+        if stream not in self.LOG_STREAMS:
+            raise MachineError(f"unknown log stream '{stream}' — use one of "
+                               f"{', '.join(self.LOG_STREAMS)}")
+        prefix = _require_prefix(prefix)
+        return {
+            "stdout": f"{prefix}/logs/{name}.log",
+            "stderr": f"{prefix}/logs/{name}.err.log",
+            "supervisor": f"{Path(prefix).parent}/supervisor/supervisord.log",
+        }[stream]
 
 
 # ---------------------------------------------------------------------------

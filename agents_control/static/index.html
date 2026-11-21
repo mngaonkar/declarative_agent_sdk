@@ -25,6 +25,7 @@
       <button class="view-tab active" data-view="board">Board</button>
       <button class="view-tab" data-view="agents">Agents</button>
       <button class="view-tab" data-view="machines">Machines</button>
+      <button class="view-tab" data-view="logs">Logs</button>
       <button class="view-tab" data-view="settings">Settings</button>
     </nav>
 
@@ -164,11 +165,6 @@
           </select>
           <small>What a new agent installs. <code>git</code> cannot see unpushed work.</small>
         </label>
-        <label>Default tools <input name="default_tools" type="text">
-          <small>Comma-separated extras. Built in for every agent, no need to list:
-            <code>web_request</code>, <code>exec_command</code>, <code>send_to_agent</code>,
-            <code>share_file</code>, <code>read_shared</code>.</small>
-        </label>
         <label class="check"><input name="default_approval" type="checkbox">
           Require tool approval by default
           <small>Off means agents run <code>exec_command</code> without asking.</small>
@@ -195,6 +191,52 @@
         <div class="form-actions"><button class="btn primary" type="submit">Save</button></div>
       </form>
     </div>
+  </main>
+
+  <!-- ─── logs view ───────────────────────────────────────────────────── -->
+  <main class="pane hidden" id="view-logs">
+    <header class="pane-head">
+      <div>
+        <h1>Logs</h1>
+        <p class="sub" id="logs-sub">This control plane's own log, live</p>
+      </div>
+      <div class="head-actions logs-tabs">
+        <button class="btn small active" data-logs="control">Control plane</button>
+        <button class="btn small" data-logs="agent">Agents</button>
+      </div>
+    </header>
+
+    <div class="logs-bar" id="logs-bar-control">
+      <select id="log-level" title="Lowest level shown">
+        <option value="">all levels</option>
+        <option value="INFO">info and above</option>
+        <option value="WARNING" selected>warnings and errors</option>
+        <option value="ERROR">errors only</option>
+      </select>
+      <input id="log-filter" type="search" placeholder="filter (text or logger)">
+      <label class="check"><input id="log-follow" type="checkbox" checked> live</label>
+      <button class="btn small ghost" id="log-clear" title="Clear this view (the log itself is kept)">Clear view</button>
+      <button class="btn small" id="log-download" title="Download control.log: everything since it last rotated, unfiltered">Download</button>
+      <span class="logs-path" id="log-path"></span>
+    </div>
+
+    <div class="logs-bar hidden" id="logs-bar-agent">
+      <select id="agent-log-agent" title="Agent"></select>
+      <select id="agent-log-stream" title="Which log">
+        <option value="stderr" selected>stderr (SDK log)</option>
+        <option value="stdout">stdout</option>
+        <option value="supervisor">supervisord (machine)</option>
+      </select>
+      <select id="agent-log-lines" title="Lines from the end">
+        <option>100</option><option selected>300</option><option>1000</option><option>5000</option>
+      </select>
+      <label class="check"><input id="agent-log-follow" type="checkbox"> refresh every 5s</label>
+      <button class="btn small" id="agent-log-refresh">Refresh</button>
+      <button class="btn small" id="agent-log-download" title="Download the whole log file from the agent's machine">Download</button>
+      <span class="logs-path" id="agent-log-path"></span>
+    </div>
+
+    <pre class="log-view" id="log-view"></pre>
   </main>
 </div>
 

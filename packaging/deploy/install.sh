@@ -64,6 +64,18 @@ info() { printf '%s\n' "$*" >&2; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Run a step quietly; if it fails, die with $1 plus the end of what it printed.
+# A bare "installing ... failed" left nothing to act on when it happened on a
+# remote machine, since agents-control only ever sees this script's stderr.
+quiet_or_die() {
+  local what="$1" out
+  shift
+  if ! out="$("$@" 2>&1)"; then
+    die "$what
+$(printf '%s\n' "$out" | tail -n 20 | sed 's/^/    /')"
+  fi
+}
+
 # --- platform --------------------------------------------------------------
 
 OS="$(uname -s)"
@@ -353,10 +365,10 @@ ensure_supervisor_installed() {
 
   if [ ! -x "$SUPERVISOR_VENV/bin/supervisord" ]; then
     info "  installing supervisord"
-    uv venv --python "$PYTHON_VERSION" "$SUPERVISOR_VENV" >/dev/null 2>&1 \
-      || die "could not create the supervisord venv at $SUPERVISOR_VENV"
-    uv pip install --python "$SUPERVISOR_VENV/bin/python" supervisor >/dev/null 2>&1 \
-      || die "could not install supervisor into $SUPERVISOR_VENV"
+    quiet_or_die "could not create the supervisord venv at $SUPERVISOR_VENV" \
+      uv venv --python "$PYTHON_VERSION" "$SUPERVISOR_VENV"
+    quiet_or_die "could not install supervisor into $SUPERVISOR_VENV" \
+      uv pip install --python "$SUPERVISOR_VENV/bin/python" supervisor
   fi
 
   [ -f "$SUPERVISOR_CONF" ] || { write_supervisor_conf; info "  wrote $SUPERVISOR_CONF"; }
@@ -914,16 +926,16 @@ fi
 VENV="$PREFIX/.venv"
 if [ ! -x "$VENV/bin/python" ]; then
   # uv downloads the interpreter if the host has no 3.14.
-  uv venv --python "$PYTHON_VERSION" "$VENV" >/dev/null 2>&1 \
-    || die "could not create a python $PYTHON_VERSION venv at $VENV"
+  quiet_or_die "could not create a python $PYTHON_VERSION venv at $VENV" \
+    uv venv --python "$PYTHON_VERSION" "$VENV"
   info "  created venv on python $PYTHON_VERSION"
 fi
 
 PIP_FLAGS="--upgrade"
 [ "${FORCE_REINSTALL:-0}" -eq 1 ] && PIP_FLAGS="--upgrade --reinstall"
 # shellcheck disable=SC2086
-uv pip install --python "$VENV/bin/python" $PIP_FLAGS "$WHEEL_SPEC" >/dev/null 2>&1 \
-  || die "installing '$WHEEL_SPEC' failed"
+quiet_or_die "installing '$WHEEL_SPEC' failed" \
+  uv pip install --python "$VENV/bin/python" $PIP_FLAGS "$WHEEL_SPEC"
 SDK_VERSION="$("$VENV/bin/declarative-agent" version 2>/dev/null | awk '{print $2}')"
 info "  installed SDK ${SDK_VERSION:-unknown}"
 

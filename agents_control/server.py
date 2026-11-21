@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -34,6 +36,7 @@ from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.agents_control import config as agent_config
 from declarative_agent_sdk.agents_control import catalog as model_catalog
 from declarative_agent_sdk.agents_control import metrics as model_metrics
+from declarative_agent_sdk.agents_control import logbook
 from declarative_agent_sdk.agents_control.machines import (
     MachineDriver, MachineError, key_name_for,
 )
@@ -105,6 +108,8 @@ class ControlPlane:
         public_url: str = "",
     ) -> None:
         self.store = Store(db_path)
+        # Beside the database: ~/.agents-control/logs/control.log by default.
+        self.logbook = logbook.install(str(Path(self.store.path).parent / "logs"))
         self.driver = MachineDriver()
         self.bus = EventBus()
         self.router = ChannelRouter(self.store, self.bus)
@@ -193,20 +198,52 @@ def create_app(cp: "ControlPlane") -> Starlette:
         return bool(supplied) and secrets.compare_digest(supplied, cp.token)
 
     def guard(handler):
+        """
+        Auth, error mapping, and the control plane's request log.
+
+        Changes (POST / PUT / DELETE) are logged with their outcome and how
+        long they took; reads only when they fail, since the board polls
+        several of them every few seconds. Anything unexpected is logged with
+        its traceback and answered as a 500 the board can show, instead of
+        surfacing only in the terminal the service happens to run in.
+        """
         async def wrapped(request: Request):
             if not authorized(request):
+                logger.warning(f"{request.method} {request.url.path}: unauthorized")
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
+            started = time.monotonic()
+            what = f"{request.method} {request.url.path}"
+            mutating = request.method in ("POST", "PUT", "DELETE")
+
+            def took() -> str:
+                return f"{(time.monotonic() - started) * 1000:.0f}ms"
+
             try:
-                return await handler(request)
+                response = await handler(request)
             except MachineError as exc:
-                logger.warning(f"machine command failed: {exc.detail()}")
+                logger.warning(f"{what} -> 502 in {took()}: {exc.detail()}")
                 return JSONResponse(
                     {"error": str(exc), "detail": exc.stderr}, status_code=502
                 )
             except LookupError as exc:
+                logger.warning(f"{what} -> 404: {exc}")
                 return JSONResponse({"error": str(exc)}, status_code=404)
             except ValueError as exc:
+                logger.warning(f"{what} -> 400: {exc}")
                 return JSONResponse({"error": str(exc)}, status_code=400)
+            except Exception as exc:  # noqa: BLE001 - logged, then reported
+                logger.exception(f"{what} -> 500 in {took()}")
+                return JSONResponse(
+                    {"error": f"internal error: {type(exc).__name__}: {exc}",
+                     "detail": "see the Logs tab (control plane) for the traceback"},
+                    status_code=500,
+                )
+            status = getattr(response, "status_code", 200)
+            if status >= 400:
+                logger.warning(f"{what} -> {status} in {took()}")
+            elif mutating:
+                logger.info(f"{what} -> {status} in {took()}")
+            return response
         wrapped.__name__ = getattr(handler, "__name__", "handler")
         return wrapped
 
@@ -440,7 +477,9 @@ def create_app(cp: "ControlPlane") -> Starlette:
                 "per machine — pick another name, or delete that agent first."
             )
         settings = store.settings()
-        tools = payload.get("tools") or settings["default_tools"]
+        # Extras only: the core tools (web_request, exec_command, send_to_agent,
+        # share_file, read_shared, ...) are registered by every runtime.
+        tools = payload.get("tools") or ""
         if isinstance(tools, (list, tuple)):
             tools = ",".join(str(t) for t in tools)
 
@@ -1164,6 +1203,78 @@ def create_app(cp: "ControlPlane") -> Starlette:
         )
         return JSONResponse({"message": message})
 
+    # -- logs -------------------------------------------------------------
+
+    @guard
+    async def control_logs(request: Request) -> Response:
+        """This process's recent log records; ?after=<seq> for only new ones."""
+        q = request.query_params
+        try:
+            after = int(q.get("after") or 0)
+            limit = int(q.get("limit") or 500)
+        except ValueError:
+            raise ValueError("'after' and 'limit' must be integers")
+        return JSONResponse(cp.logbook.read(
+            after=after, level=q.get("level") or "", query=q.get("q") or "", limit=limit))
+
+    @guard
+    async def agent_logs(request: Request) -> Response:
+        """Tail of an agent's stdout / stderr, or its machine's supervisord log."""
+        agent, machine = _agent_and_machine(int(request.path_params["agent_id"]))
+        q = request.query_params
+        try:
+            lines = int(q.get("lines") or 200)
+        except ValueError:
+            raise ValueError("'lines' must be an integer")
+        result = await in_thread(
+            driver.agent_logs, machine, str(agent["prefix"] or ""), agent["name"],
+            stream=q.get("stream") or "stderr", lines=lines,
+        )
+        return JSONResponse(dict(result, agent=agent["name"],
+                                 machine=machine.get("name")))
+
+    def attachment(text: str, filename: str, extra: Optional[Dict[str, str]] = None) -> Response:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
+        headers = {"Content-Disposition": f'attachment; filename="{safe}"'}
+        headers.update(extra or {})
+        return Response(text, media_type="text/plain; charset=utf-8", headers=headers)
+
+    @guard
+    async def control_log_download(request: Request) -> Response:
+        """
+        control.log as a file. Falls back to the in-memory records when there
+        is no file (it could not be created), so a download never comes back
+        empty-handed while the buffer holds something.
+        """
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = cp.logbook.file_path
+        if path and Path(path).is_file():
+            for handler in logging.getLogger().handlers:
+                if getattr(handler, "baseFilename", None) == str(Path(path).resolve()):
+                    handler.flush()
+            text = await in_thread(Path(path).read_text, encoding="utf-8", errors="replace")
+        else:
+            records = cp.logbook.read(limit=logbook.CAPACITY)["records"]
+            text = "".join(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r['ts']))} - "
+                f"{r['logger']} - {r['level']} - {r['message']}\n" for r in records)
+        return attachment(text, f"agents-control-{stamp}.log")
+
+    @guard
+    async def agent_log_download(request: Request) -> Response:
+        """One of an agent's logs, whole (up to the driver's cap), as a file."""
+        agent, machine = _agent_and_machine(int(request.path_params["agent_id"]))
+        stream = request.query_params.get("stream") or "stderr"
+        result = await in_thread(
+            driver.agent_log_file, machine, str(agent["prefix"] or ""), agent["name"],
+            stream=stream,
+        )
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        extra = {"X-Log-Truncated": "1"} if result["truncated"] else {}
+        return attachment(
+            result["text"],
+            f"{agent['name']}.{machine.get('name')}-{stream}-{stamp}.log", extra)
+
     # -- SSE --------------------------------------------------------------
 
     async def events(request: Request) -> Response:
@@ -1203,6 +1314,10 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/files/relay", relay_file),
         Route("/api/agents/{agent_id:int}", delete_agent, methods=["DELETE"]),
         Route("/api/agents/metrics", agent_metrics),
+        Route("/api/logs", control_logs),
+        Route("/api/logs/download", control_log_download),
+        Route("/api/agents/{agent_id:int}/logs", agent_logs),
+        Route("/api/agents/{agent_id:int}/logs/download", agent_log_download),
         Route("/api/agents/{agent_id:int}/config", get_agent_config),
         Route("/api/agents/{agent_id:int}/models", agent_models),
         Route("/api/agents/{agent_id:int}/config", put_agent_config, methods=["PUT"]),

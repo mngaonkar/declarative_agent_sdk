@@ -26,7 +26,7 @@ const el = (tag, cls, text) => {
  * process started. Edit the tree without restarting and the new board asks the
  * old server for routes it does not have — which it answers with a bare 404.
  */
-const EXPECTS_API = 27;
+const EXPECTS_API = 29;
 
 /** An agent's address on the board. The bare name is unique only per machine. */
 const fqn = (agent) => agent.qualified || `${agent.name}.${agent.machine_name}`;
@@ -632,9 +632,12 @@ function renderAgents() {
     const reinstall = el('button', 'btn small', 'Reinstall');
     reinstall.title = 'Re-run install.sh: new SDK code, same config, key, workspace and address';
     reinstall.onclick = () => openReinstall(agent);
+    const logs = el('button', 'btn small', 'Logs');
+    logs.title = "Tail this agent's log on its machine";
+    logs.onclick = () => openAgentLogs(agent.id);
     const remove = el('button', 'btn danger small', 'Delete');
     remove.onclick = () => deleteAgent(agent);
-    actions.append(settings, forget, reinstall, remove);
+    actions.append(settings, logs, forget, reinstall, remove);
     row.append(actions);
     table.append(row);
   });
@@ -1430,14 +1433,252 @@ function fmtArgs(args) {
   return text.length > 120 ? text.slice(0, 119) + '…' : text;
 }
 
+function showView(name) {
+  document.querySelectorAll('.view-tab').forEach((t) =>
+    t.classList.toggle('active', t.dataset.view === name));
+  ['board', 'agents', 'machines', 'logs', 'settings'].forEach((view) =>
+    $(`#view-${view}`).classList.toggle('hidden', view !== name));
+  if (name === 'agents') startServerPolling(); else stopServerPolling();
+  if (name === 'logs') logsView.start(); else logsView.stop();
+}
+
 document.querySelectorAll('.view-tab').forEach((tab) => {
-  tab.onclick = () => {
-    document.querySelectorAll('.view-tab').forEach((t) => t.classList.toggle('active', t === tab));
-    ['board', 'agents', 'machines', 'settings'].forEach((view) =>
-      $(`#view-${view}`).classList.toggle('hidden', view !== tab.dataset.view));
-    if (tab.dataset.view === 'agents') startServerPolling(); else stopServerPolling();
-  };
+  tab.onclick = () => showView(tab.dataset.view);
 });
+
+/* ── logs view ──────────────────────────────────────────────────────── */
+
+/*
+ * Two sources in one pane:
+ *  - control: this process's log ring buffer, polled with ?after=<seq> so each
+ *    poll carries only new records. Filters are applied by the server and a
+ *    change of filter re-reads from the start.
+ *  - agent: the tail of an agent's stdout / stderr / supervisord log, read
+ *    over SSH on demand (and optionally every 5s — each read is an SSH call).
+ * Polling runs only while the tab is open.
+ */
+const logsView = (() => {
+  const CONTROL_MS = 2000;
+  const AGENT_MS = 5000;
+  const MAX_LINES = 3000;  // keep the DOM bounded on a long-lived tab
+  let mode = 'control';
+  let after = 0;
+  let timer = null;
+  const busy = { control: 0, agent: false };  // control: requests in flight
+  let open = false;
+  let wantAgent = null;  // set by an agent row's Logs button
+  let generation = 0;    // bumped by a reset; older control replies are dropped
+
+  const view = () => $('#log-view');
+  const atBottom = () => {
+    const v = view();
+    return v.scrollHeight - v.scrollTop - v.clientHeight < 40;
+  };
+  const stick = (was) => { if (was) view().scrollTop = view().scrollHeight; };
+
+  function stamp(ts) {
+    const d = new Date(ts * 1000);
+    const pad = (n, w = 2) => String(n).padStart(w, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+      `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function appendRecords(records) {
+    if (!records.length) return;
+    const was = atBottom();
+    const frag = document.createDocumentFragment();
+    records.forEach((r) => {
+      const line = el('div', `log-line lvl-${r.level.toLowerCase()}`);
+      line.append(
+        el('span', 'log-ts', stamp(r.ts)),
+        el('span', 'log-lvl', r.level),
+        el('span', 'log-src', r.logger.replace(/^declarative_agent_sdk\./, '')),
+        el('span', 'log-msg', r.message),
+      );
+      frag.append(line);
+    });
+    view().append(frag);
+    while (view().childElementCount > MAX_LINES) view().firstElementChild.remove();
+    stick(was);
+  }
+
+  function placeholder(text) {
+    view().replaceChildren(el('div', 'log-empty', text));
+  }
+
+  async function pollControl(reset = false) {
+    if (busy.control && !reset) return;
+    busy.control += 1;
+    try {
+      if (reset) { generation += 1; after = 0; view().replaceChildren(); }
+      const mine = generation;
+      const params = new URLSearchParams({
+        after: String(after),
+        level: $('#log-level').value,
+        q: $('#log-filter').value.trim(),
+        limit: '1000',
+      });
+      const result = await api(`/api/logs?${params}`);
+      if (mode !== 'control') return;  // switched away while this was in flight
+      if (mine !== generation) return;  // a filter change re-read from the start
+      if (view().querySelector('.log-empty')) view().replaceChildren();
+      appendRecords(result.records || []);
+      if (reset && !(result.records || []).length) placeholder('Nothing logged at this level yet.');
+      after = result.last || after;
+      $('#log-path').textContent = result.file ? `also in ${result.file}` : '';
+    } catch (error) {
+      if (mode === 'control') placeholder(`Could not read the control log: ${error.message}`);
+    } finally { busy.control -= 1; }
+  }
+
+  function fillAgents() {
+    const select = $('#agent-log-agent');
+    const keep = select.value;
+    select.replaceChildren(...state.agents.map((agent) => {
+      const option = el('option', '', fqn(agent));
+      option.value = String(agent.id);
+      return option;
+    }));
+    if (keep && state.agents.some((a) => String(a.id) === keep)) select.value = keep;
+    if (wantAgent != null) { select.value = String(wantAgent); wantAgent = null; }
+  }
+
+  async function pollAgent() {
+    const id = $('#agent-log-agent').value;
+    if (!id) { placeholder('No agents yet. Install one from the Agents tab.'); return; }
+    if (busy.agent) return;
+    busy.agent = true;
+    const button = $('#agent-log-refresh');
+    button.disabled = true;
+    try {
+      const params = new URLSearchParams({
+        stream: $('#agent-log-stream').value,
+        lines: $('#agent-log-lines').value,
+      });
+      const result = await api(`/api/agents/${id}/logs?${params}`);
+      if (mode !== 'agent' || $('#agent-log-agent').value !== id) return;
+      $('#agent-log-path').textContent = `${result.machine}:${result.path}`;
+      if (!result.exists) {
+        placeholder(`${result.path} does not exist on ${result.machine} yet — ` +
+          'the program has not written to it (never started, or not installed by supervisord).');
+        return;
+      }
+      const was = atBottom() || !view().querySelector('.log-text');
+      const pre = el('div', 'log-text', result.text || '(empty)');
+      view().replaceChildren(pre);
+      stick(was);
+    } catch (error) {
+      if (mode === 'agent') placeholder(`Could not read the log: ${error.message}`);
+    } finally {
+      busy.agent = false;
+      button.disabled = false;
+    }
+  }
+
+  function schedule() {
+    clearInterval(timer);
+    timer = null;
+    if (!open) return;
+    if (mode === 'control' && $('#log-follow').checked) {
+      timer = setInterval(() => pollControl(), CONTROL_MS);
+    } else if (mode === 'agent' && $('#agent-log-follow').checked) {
+      timer = setInterval(() => pollAgent(), AGENT_MS);
+    }
+  }
+
+  function setMode(next) {
+    mode = next;
+    document.querySelectorAll('.logs-tabs [data-logs]').forEach((b) =>
+      b.classList.toggle('active', b.dataset.logs === mode));
+    $('#logs-bar-control').classList.toggle('hidden', mode !== 'control');
+    $('#logs-bar-agent').classList.toggle('hidden', mode !== 'agent');
+    $('#logs-sub').textContent = mode === 'control'
+      ? "This control plane's own log, live"
+      : "An agent's log, read on its machine over SSH";
+    view().replaceChildren();
+    if (mode === 'control') pollControl(true);
+    else { fillAgents(); pollAgent(); }
+    schedule();
+  }
+
+  document.querySelectorAll('.logs-tabs [data-logs]').forEach((b) => {
+    b.onclick = () => setMode(b.dataset.logs);
+  });
+  let filterTimer = null;
+  $('#log-level').onchange = () => pollControl(true);
+  $('#log-filter').oninput = () => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => pollControl(true), 300);
+  };
+  $('#log-follow').onchange = schedule;
+  $('#log-clear').onclick = () => view().replaceChildren();
+  ['#agent-log-agent', '#agent-log-stream', '#agent-log-lines'].forEach((sel) => {
+    $(sel).onchange = () => pollAgent();
+  });
+  $('#agent-log-follow').onchange = schedule;
+  $('#agent-log-refresh').onclick = () => pollAgent();
+  $('#log-download').onclick = (event) =>
+    downloadFile('/api/logs/download', event.currentTarget);
+  $('#agent-log-download').onclick = (event) => {
+    const id = $('#agent-log-agent').value;
+    if (!id) { toast('No agent selected', true); return; }
+    const stream = $('#agent-log-stream').value;
+    downloadFile(`/api/agents/${id}/logs/download?stream=${encodeURIComponent(stream)}`,
+      event.currentTarget);
+  };
+
+  return {
+    start() { open = true; setMode(mode); },
+    stop() { open = false; schedule(); },
+    // Takes effect when the tab opens, so only the agent's log is fetched.
+    focusAgent(id) { mode = 'agent'; wantAgent = id; },
+  };
+})();
+
+/*
+ * Save a server response as a file. Fetched rather than linked so the bearer
+ * token goes in a header: a plain <a href> cannot send one, and putting the
+ * token in the URL would leave it in history and the server's access log.
+ */
+async function downloadFile(path, button) {
+  const label = button?.textContent;
+  if (button) { button.disabled = true; button.textContent = 'Downloading…'; }
+  try {
+    const headers = {};
+    const current = token.get();
+    if (current) headers.Authorization = `Bearer ${current}`;
+    const response = await fetch(path, { headers });
+    if (response.status === 401) { state.needsAuth = true; askForToken(); throw new Error('unauthorized'); }
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error([payload.error, payload.detail].filter(Boolean).join('\n') ||
+        `${response.status} ${response.statusText}`);
+    }
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const name = (disposition.match(/filename="([^"]+)"/) || [])[1] || 'log.txt';
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = el('a');
+    link.href = url;
+    link.download = name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    if (response.headers.get('X-Log-Truncated')) {
+      toast(`${name}: the file was larger than 50 MB, so this is its last 50 MB`);
+    }
+  } catch (error) {
+    toast(`Download failed: ${error.message}`, true);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = label; }
+  }
+}
+
+function openAgentLogs(agentId) {
+  logsView.focusAgent(agentId);
+  showView('logs');
+}
 
 $('#modal-close').onclick = closeModal;
 $('#modal-back').onclick = (event) => { if (event.target.id === 'modal-back') closeModal(); };
@@ -1713,7 +1954,7 @@ $('#new-agent').onclick = () => {
   form.elements.endpoint.onchange = loadModels;
   form.elements.api_key.onchange = loadModels;
   applyProvider();
-  form.elements.tools.value = state.settings.default_tools;
+  form.elements.tools.value = '';
   form.elements.sdk_source.value = state.settings.default_sdk_source || 'local';
   form.elements.approval.checked = Boolean(state.settings.default_approval);
 

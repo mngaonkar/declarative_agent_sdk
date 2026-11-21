@@ -105,10 +105,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "default_framework": "lean",
     "default_provider": "openai",
     "default_model": "gpt-4o-mini",
-    # Extra tools only. read_file, write_file, web_request, exec_command,
-    # send_to_agent, share_file, read_shared (and list_agents on a board) are
-    # core: every runtime registers them without being asked.
-    "default_tools": "",
     "default_approval": True,
     # "local" builds a wheel from the working tree this control plane runs and
     # sends it; "git" installs from the repository. Local is the default
