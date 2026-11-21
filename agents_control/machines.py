@@ -506,10 +506,16 @@ class MachineDriver:
         advertise_host: str = "",
         sdk_source: str = "git",
         sdk_ref: str = "",
+        seed_env: bool = True,
+        prefix: str = "",
         timeout: int = 900,
     ) -> Dict[str, Any]:
         """
         Provision one agent. Returns install.sh's JSON result.
+
+        ``seed_env=False`` is for a reinstall: install.sh *replaces* .env with
+        an --env-file, which would drop a key set since, so none is passed and
+        install.sh keeps the file it finds.
 
         ``ready: false`` with ``problems`` is a normal outcome (a missing
         credential, say) and is reported, not raised.
@@ -524,6 +530,10 @@ class MachineDriver:
         script = self._script_path(machine, "install")
 
         args = ["--name", name, "--framework", framework, "--provider", provider, "--json"]
+        if prefix:
+            # A reinstall goes back where the agent is, not to wherever the
+            # default root is today; otherwise a second copy appears beside it.
+            args += ["--prefix", _require_prefix(prefix)]
         if model:
             args += ["--model", model]
         if endpoint:
@@ -550,7 +560,7 @@ class MachineDriver:
         elif sdk_ref:
             args += ["--ref", sdk_ref]
 
-        env_lines = _env_file_lines(provider, api_key, control_env)
+        env_lines = _env_file_lines(provider, api_key, control_env) if seed_env else []
         env_path = ""
         if env_lines:
             env_dir, env_path = self._staged_env_path(machine, name)

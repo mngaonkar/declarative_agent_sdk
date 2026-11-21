@@ -10,7 +10,8 @@
  * to say from whatever that model just read.
  *
  * Deliberately small: no nested lists, no reference links, no HTML
- * passthrough. Blocks are headings, fenced code, bullet/ordered lists,
+ * passthrough. `opts.onLink(token, doc)` may return a node to draw a link
+ * its own way, as `opts.onMention` does for mentions. Blocks are headings, fenced code, bullet/ordered lists,
  * blockquotes, GitHub-style tables, rules and paragraphs; inline is code,
  * bold, italic, strike, links, bare URLs and @mentions.
  */
@@ -249,6 +250,10 @@
           fragment.appendChild(doc.createTextNode(token.raw || token.text));
           return;
         }
+        // A caller may draw some links its own way (the board turns shared-
+        // file links into chips). Only after the scheme check above.
+        const custom = options.onLink && options.onLink(token, doc);
+        if (custom) { fragment.appendChild(custom); return; }
         const anchor = doc.createElement('a');
         anchor.href = token.href;
         anchor.textContent = token.text;

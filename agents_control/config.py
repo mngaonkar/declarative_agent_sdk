@@ -290,12 +290,11 @@ def validate(data: Dict[str, Any], expected_name: str) -> List[str]:
             warnings.append("provider 'vllm' usually needs endpoint.url set")
 
     if data.get("tools_approval_required") is False:
-        tool_list = [str(t) for t in (tools or [])]
-        if any(t in ("exec_command", "exec_async") for t in tool_list):
-            warnings.append(
-                "approval is off and exec_command is enabled — this agent will run "
-                "shell commands without asking"
-            )
+        # exec_command is a core tool: every agent holds it, listed or not.
+        warnings.append(
+            "approval is off and exec_command is a core tool — this agent will run "
+            "shell commands without asking"
+        )
 
     return warnings
 

@@ -120,6 +120,8 @@ class LeanAIAgent(BaseAgent):
 
         Path(workspace_directory).mkdir(parents=True, exist_ok=True)
         Path(skills_directory).mkdir(parents=True, exist_ok=True)
+        # Read by the A2A server to know what share_file may serve from.
+        self.workspace_directory = workspace_directory
 
         self._skills = SkillRegistry(root=skills_directory)
         self._tools = LeanToolRegistry(

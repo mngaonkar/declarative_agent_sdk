@@ -165,7 +165,9 @@
           <small>What a new agent installs. <code>git</code> cannot see unpushed work.</small>
         </label>
         <label>Default tools <input name="default_tools" type="text">
-          <small>Comma-separated. <code>send_to_agent</code> is what lets an agent talk to a peer.</small>
+          <small>Comma-separated extras. Built in for every agent, no need to list:
+            <code>web_request</code>, <code>exec_command</code>, <code>send_to_agent</code>,
+            <code>share_file</code>, <code>read_shared</code>.</small>
         </label>
         <label class="check"><input name="default_approval" type="checkbox">
           Require tool approval by default
@@ -272,7 +274,9 @@
       <small>Only needed when the address to publish differs from the bind address —
              behind NAT, a proxy, or in a container.</small>
     </label>
-    <label>Tools <input name="tools"></label>
+    <label>Extra tools <input name="tools" placeholder="optional, comma-separated">
+      <small>web_request, exec_command, send_to_agent, share_file and read_shared are built in.</small>
+    </label>
     <label>SDK source <select name="sdk_source">
         <option value="local">this working tree (build &amp; send a wheel)</option>
         <option value="git">git (repository branch)</option>

@@ -38,6 +38,7 @@ from google.protobuf.json_format import MessageToDict
 from a2a.types import TaskState
 
 from declarative_agent_sdk.core.agent_logging import get_logger
+from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 from declarative_agent_sdk.transports.a2a.client import AIAgentClient
 from declarative_agent_sdk.agents_control.store import Store
 
@@ -370,16 +371,23 @@ class ChannelRouter:
         """
         agent = self.store.agent_by_qualified(agent_name) or {}
         machine = agent.get("machine_name") or ""
-        tools = [t.strip() for t in str(agent.get("tools") or "").split(",") if t.strip()]
+        extra = [t.strip() for t in str(agent.get("tools") or "").split(",") if t.strip()]
+        # Core tools are registered by every runtime whatever the config lists.
+        tools = list(dict.fromkeys(list(ToolRegistry.core_tool_names()) + extra))
         where = f"the machine '{machine}'" if machine else "your own machine"
-        listed = f" ({', '.join(tools)})" if tools else ""
-        return (
-            f"You run on {where}. Your own tools{listed} act there: use them for "
-            "anything about that machine, its files, or the hosts it can reach "
-            "(a command such as ssh runs from it like any other). @mentions are "
-            "only for the agents listed above — a hostname or user@host is not an "
-            "agent, and the board will not deliver to it."
+        text = (
+            f"You run on {where}. Your own tools ({', '.join(tools)}) act there: "
+            "use them for anything about that machine, its files, or the hosts it "
+            "can reach (a command such as ssh runs from it like any other). "
+            "@mentions are only for the agents listed above — a hostname or "
+            "user@host is not an agent, and the board will not deliver to it."
+            # Other agents cannot open your workspace; say how to hand a file over.
+            " To give another agent a file from your workspace, call share_file "
+            "and put the link it returns in your reply — do not paste the file's "
+            "contents. Read a shared-file link (…/files/…?exp=…&sig=…) with "
+            "read_shared."
         )
+        return text
 
     def _roster_block(self, channel_id: int, agent_name: str) -> str:
         """Who else is in this channel, as the agent sees it."""

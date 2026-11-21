@@ -26,7 +26,7 @@ const el = (tag, cls, text) => {
  * process started. Edit the tree without restarting and the new board asks the
  * old server for routes it does not have — which it answers with a bare 404.
  */
-const EXPECTS_API = 25;
+const EXPECTS_API = 27;
 
 /** An agent's address on the board. The bare name is unique only per machine. */
 const fqn = (agent) => agent.qualified || `${agent.name}.${agent.machine_name}`;
@@ -411,6 +411,82 @@ function appendMessage(message, scroll = true) {
  * AgentMarkdown builds nodes rather than HTML strings — the text came from a
  * model, which is to say from whatever that model just read.
  */
+// A link minted by share_file: …/files/<id>?exp=<unix>&sig=<hex>.
+const SHARED_LINK = /\/files\/[A-Za-z0-9_-]{8,64}\?exp=(\d+)&sig=[0-9a-f]{16,64}$/;
+
+/** A shared-file link as a chip that previews through the board's relay. */
+function sharedFileChip(href) {
+  const match = SHARED_LINK.exec(href);
+  if (!match) return null;
+  const expires = Number(match[1]) * 1000;
+  const left = expires - Date.now();
+  const chip = el('button', `file-chip${left <= 0 ? ' expired' : ''}`);
+  chip.type = 'button';
+  chip.append(el('span', 'icon', '📎'), el('span', 'label', 'shared file'));
+  chip.append(el('span', 'meta', left <= 0 ? 'expired'
+    : `expires in ${left > 3600e3 ? `${Math.round(left / 3600e3)}h` : `${Math.max(1, Math.round(left / 60e3))}m`}`));
+  chip.title = href;
+  chip.onclick = () => previewShared(href);
+  return chip;
+}
+
+/*
+ * Fetch a shared file through /api/files/relay and show it. The token goes in
+ * a header, never in a URL: a link with the board token in it would be a key
+ * to the whole board for whoever it is passed to.
+ */
+async function previewShared(href) {
+  const headers = token.get() ? { Authorization: `Bearer ${token.get()}` } : {};
+  let response;
+  try {
+    response = await fetch(`/api/files/relay?url=${encodeURIComponent(href)}`, { headers });
+  } catch (error) {
+    toast(`Could not fetch the shared file: ${error.message}`, true);
+    return;
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    toast(`Shared file: ${body.error || `${response.status} ${response.statusText}`}`, true);
+    return;
+  }
+  const kind = response.headers.get('content-type') || 'application/octet-stream';
+  const by = response.headers.get('x-shared-by') || 'an agent';
+  const disposition = response.headers.get('content-disposition') || '';
+  const name = (/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition) || [])[1]
+    || href.split('/files/')[1].split('?')[0];
+  const blob = await response.blob();
+
+  const wrap = el('div', 'file-preview');
+  const head = el('div', 'file-head');
+  head.append(el('span', 'note', `${decodeURIComponent(name)} · ${kind.split(';')[0]} · ` +
+                 `${compact(blob.size)} bytes · shared by @${by}`));
+  const save = el('a', 'btn small', 'Download');
+  save.href = URL.createObjectURL(blob);
+  save.download = decodeURIComponent(name);
+  head.append(save);
+  wrap.append(head);
+
+  const textual = /^(text\/|application\/(json|xml|yaml|x-yaml|javascript|toml))/i.test(kind);
+  if (!textual) {
+    wrap.append(el('p', 'note', 'Not a text file — download it to open.'));
+  } else if (blob.size > 2 * 1024 * 1024) {
+    wrap.append(el('p', 'note', 'Too large to preview here — download it instead.'));
+  } else {
+    const text = await blob.text();
+    const markdown = /markdown/i.test(kind) || /\.md$/i.test(name);
+    if (markdown && window.AgentMarkdown) {
+      const body = el('div', 'msg-like');
+      body.append(window.AgentMarkdown.render(text, document));
+      wrap.append(body);
+    } else {
+      const pre = el('pre', 'code');
+      pre.textContent = text;
+      wrap.append(pre);
+    }
+  }
+  openModal(`📎 ${decodeURIComponent(name)}`, wrap);
+}
+
 function renderBody(text) {
   if (window.AgentMarkdown) {
     return window.AgentMarkdown.render(text, document, {
@@ -420,6 +496,7 @@ function renderBody(text) {
         span.textContent = '@' + displaySender(token.name);
         return span;
       },
+      onLink: (link) => sharedFileChip(link.href),
     });
   }
   return document.createTextNode(text);     // md.js failed to load
@@ -552,9 +629,12 @@ function renderAgents() {
       } catch (error) { toast(error.message, true); }
       finally { forget.disabled = false; }
     };
+    const reinstall = el('button', 'btn small', 'Reinstall');
+    reinstall.title = 'Re-run install.sh: new SDK code, same config, key, workspace and address';
+    reinstall.onclick = () => openReinstall(agent);
     const remove = el('button', 'btn danger small', 'Delete');
     remove.onclick = () => deleteAgent(agent);
-    actions.append(settings, forget, remove);
+    actions.append(settings, forget, reinstall, remove);
     row.append(actions);
     table.append(row);
   });
@@ -623,6 +703,14 @@ function contextCell(report) {
     + `characters: ${report.system_prompt_chars} of system prompt plus `
     + `${top.chars} of history. Sent on every request in this session.`;
   return td;
+}
+
+/** "12s ago", "4m ago", "2h ago" — coarse on purpose; it labels a held figure. */
+function ago(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
 }
 
 function stat(key, value, note, cls) {
@@ -697,19 +785,28 @@ function serverCard(server) {
 
   const m = server.metrics || {};
   const recent = server.recent || {};
-  // A windowed rate when the poll window contained a finished request, else
-  // the server's lifetime average — labelled, because they differ a lot: the
-  // lifetime figure carries every slow high-context turn ever served.
+  // The rate from the latest window that finished a request. Between turns
+  // the server holds the last measured figure (recent.held) and says how old
+  // it is, rather than dropping to 0. llama.cpp's own gauge is a last resort:
+  // it covers only requests since the previous /metrics read, so it reads 0
+  // whenever the model is idle.
   [['Decode', 'decode_rate', 'decode_rate', 'tok/s out'],
    ['Prefill', 'prefill_rate', 'prefill_rate', 'tok/s in']].forEach(
-    ([label, recentKey, lifetimeKey, unit]) => {
-      const windowed = recent[recentKey];
-      const value = windowed ?? m[lifetimeKey];
-      if (value === undefined) return;
-      const note = windowed !== undefined
-        ? `${unit} · last ${Math.round(recent.window_seconds)}s`
-        : `${unit} · lifetime`;
-      stats.append(stat(label, value.toFixed(1), note));
+    ([label, recentKey, gaugeKey, unit]) => {
+      const measured = recent[recentKey];
+      const gauge = m[gaugeKey];
+      const value = measured ?? (gauge > 0 ? gauge : undefined);
+      if (value === undefined) {
+        stats.append(stat(label, '—', `${unit} · no request measured yet`));
+        return;
+      }
+      let note = `${unit} · since last poll`;
+      if (measured !== undefined && recent.held) {
+        note = `${unit} · last turn, ${ago(recent.age_seconds)}`;
+      } else if (measured !== undefined) {
+        note = `${unit} · last ${Math.round(recent.window_seconds)}s`;
+      }
+      stats.append(stat(label, value.toFixed(1), note, recent.held ? 'held' : ''));
     });
 
   if (server.cache_hit_ratio !== undefined) {
@@ -1104,6 +1201,72 @@ async function openAgentConfig(agent) {
   };
 
   openModal(`${fqn(agent)} · settings`, wrap);
+}
+
+/*
+ * Reinstall: the same install.sh run as Create, minus everything that would
+ * reset the agent. The server reads the current config and address back from
+ * the machine and passes them in; this form only picks the code to install.
+ */
+function openReinstall(agent) {
+  const form = el('form', 'form');
+  const source = el('select');
+  source.name = 'sdk_source';
+  source.append(new Option('this working tree (build & send a wheel)', 'local'),
+                new Option('git (repository branch)', 'git'));
+  source.value = state.settings.default_sdk_source || 'local';
+  const sourceLabel = el('label');
+  sourceLabel.append(document.createTextNode('SDK source'), source);
+  const ref = el('input');
+  ref.name = 'sdk_ref';
+  ref.placeholder = 'master (only used with git)';
+  const refLabel = el('label');
+  refLabel.append(document.createTextNode('Git ref'), ref);
+  const refresh = el('label', 'check');
+  const refreshBox = el('input');
+  refreshBox.type = 'checkbox';
+  refreshBox.checked = true;
+  refresh.append(refreshBox, document.createTextNode(' Refresh the board address and token in .env'));
+  refresh.append(el('small', '', 'So send_to_agent, list_agents and the file relay reach this ' +
+                    'board as it is configured now. The API key and other variables are kept.'));
+  form.append(sourceLabel, refLabel, refresh);
+  form.append(el('p', 'note',
+    'Kept: agent.yaml, instructions.md, the workspace, the port, the API key, and the ' +
+    'host / advertised address shown in ⚙ Settings. The agent restarts at the end, ' +
+    'and building a wheel can take a few minutes.'));
+  const actions = el('div', 'form-actions');
+  const go = el('button', 'btn primary', 'Reinstall');
+  go.type = 'submit';
+  actions.append(go);
+  form.append(actions);
+
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    go.disabled = true;
+    go.innerHTML = '<span class="spin">↻</span> reinstalling…';
+    try {
+      const result = await api(`/api/agents/${agent.id}/reinstall`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sdk_source: source.value, sdk_ref: ref.value.trim(),
+          refresh_board_env: refreshBox.checked,
+        }),
+      });
+      closeModal();
+      const problems = result.result?.problems;
+      const list = Array.isArray(problems) ? problems.join('; ') : (problems || '');
+      toast(result.agent?.ready
+        ? `${fqn(agent)} reinstalled${result.kept_address ? '' : ' — address re-detected by install.sh'}`
+        : `${fqn(agent)} reinstalled but not ready: ${list || 'see its log'}`,
+        !result.agent?.ready);
+      load();
+    } catch (error) {
+      toast(`Reinstall failed: ${error.message}`, true);
+      go.disabled = false;
+      go.textContent = 'Reinstall';
+    }
+  };
+  openModal(`Reinstall ${fqn(agent)}`, form);
 }
 
 /* ── machines view ──────────────────────────────────────────────────── */

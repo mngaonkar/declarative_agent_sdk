@@ -21,7 +21,11 @@ from typing import Any, Dict, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from urllib.parse import urlparse
+
+import httpx
+from starlette.background import BackgroundTask
+from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -46,6 +50,23 @@ STATIC_DIR = Path(__file__).parent / "static"
 # The board itself is unauthenticated (it is a shell that asks for the token);
 # every /api path is not. Exact paths and prefixes are kept apart deliberately:
 # a prefix list containing "/" matches every request and opens the whole API.
+# A shared-file link as share_file mints it: /files/<id>?exp=<int>&sig=<hex>.
+SHARE_PATH_RE = re.compile(r"^/files/([A-Za-z0-9_-]{8,64})$")
+
+
+def parse_qs_one(query: str, key: str) -> str:
+    from urllib.parse import parse_qs
+    values = parse_qs(query or "").get(key) or [""]
+    return values[0]
+
+
+def _netloc(url: str) -> str:
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return f"{host}:{port}" if host else ""
+
+
 # The board is edited in place and served from disk, so a browser must ask
 # before reusing its copy: without this it applies heuristic caching to a file
 # with only Last-Modified, and keeps running yesterday's app.js. no-cache still
@@ -454,6 +475,75 @@ def create_app(cp: "ControlPlane") -> Starlette:
         return JSONResponse({"agent": agent, "result": result})
 
     @guard
+    async def reinstall_agent(request: Request) -> Response:
+        """
+        Re-run install.sh for an existing agent, keeping what it has.
+
+        For picking up new SDK code, and for agents installed before a fix in
+        install.sh or the board. What is kept, and how:
+
+        - agent.yaml, instructions.md, workspace, port: install.sh keeps them
+          (no --force);
+        - .env: no --env-file, which would replace it wholesale and drop a key
+          set since; only the board handshake is refreshed, one variable at a
+          time, before the install so its restart reads them;
+        - bind and published address: read from the machine and passed back,
+          because install.sh would otherwise re-guess them from the default
+          route — exactly what the Settings dialog exists to override.
+        """
+        agent, machine = _agent_and_machine(int(request.path_params["agent_id"]))
+        payload = await body(request)
+        prefix = str(agent["prefix"] or "")
+        settings = store.settings()
+
+        files = await in_thread(driver.read_agent_files, machine, prefix)
+        parsed = agent_config.parse(files["yaml"])
+        endpoint = parsed.get("endpoint") if isinstance(parsed.get("endpoint"), dict) else {}
+        tools = parsed.get("tools")
+        if isinstance(tools, (list, tuple)):
+            tools = ",".join(str(t) for t in tools)
+        try:
+            network = await in_thread(driver.agent_network, machine, prefix, agent["name"])
+        except MachineError:
+            network = {}
+
+        refreshed = []
+        if payload.get("refresh_board_env", True):
+            for key, value in cp.agent_env(agent["name"], str(machine["name"])).items():
+                if not value:
+                    continue          # an unset token is left as it is
+                await in_thread(driver.set_env_var, machine, prefix, key, value)
+                refreshed.append(key)
+
+        result = await in_thread(
+            driver.create_agent,
+            machine,
+            name=agent["name"],
+            framework=agent_config.runtime_of(
+                str(parsed.get("agent_framework") or parsed.get("backend") or "lean")),
+            provider=str(parsed.get("provider") or agent.get("provider") or ""),
+            model=str(parsed.get("model") or ""),
+            endpoint=str((endpoint or {}).get("url") or ""),
+            description=str(parsed.get("description") or ""),
+            tools=str(tools or ""),
+            approval=bool(parsed.get("tools_approval_required", True)),
+            bind_host=str(network.get("bind_host") or "") if network.get("ok") else "",
+            advertise_host=str(network.get("advertise_host") or "") if network.get("ok") else "",
+            sdk_source=str(payload.get("sdk_source") or settings["default_sdk_source"]),
+            sdk_ref=str(payload.get("sdk_ref") or ""),
+            seed_env=False,
+            prefix=prefix,
+        )
+        result.setdefault("name", agent["name"])
+        result["endpoint"] = str((endpoint or {}).get("url") or agent.get("endpoint") or "")
+        result["description"] = str(parsed.get("description") or agent.get("description") or "")
+        record = await in_thread(store.upsert_agent, int(machine["id"]), result)
+        bus.publish({"type": "agents"})
+        return JSONResponse({"agent": record, "result": result,
+                             "refreshed_env": refreshed,
+                             "kept_address": bool(network.get("ok"))})
+
+    @guard
     async def delete_agent(request: Request) -> Response:
         agent_id = int(request.path_params["agent_id"])
         agent = store.agent(agent_id)
@@ -533,6 +623,61 @@ def create_app(cp: "ControlPlane") -> Starlette:
                 str(parsed.get("agent_framework") or parsed.get("backend") or "lean")),
             "status": status,
         })
+
+    @guard
+    async def relay_file(request: Request) -> Response:
+        """
+        Pass a shared file through from the agent that owns it.
+
+        For readers that cannot reach the owner themselves — this board's
+        page, and agents on another network. Nothing is stored: the response
+        streams as it arrives.
+
+        Not an open proxy: the link must be a /files/ link whose address is a
+        registered agent's, and the request goes to that agent's recorded
+        address, never to whatever host the link names. The owner still checks
+        the link's signature and expiry itself.
+        """
+        link = str(request.query_params.get("url") or "")
+        parsed = urlparse(link)
+        match = SHARE_PATH_RE.match(parsed.path or "")
+        if parsed.scheme not in ("http", "https") or not match:
+            raise ValueError("not a shared-file link (expected …/files/<id>?exp=…&sig=…)")
+        wanted = _netloc(link)
+        owner = next((a for a in store.agents() if _netloc(str(a.get("url") or "")) == wanted), None)
+        if owner is None:
+            raise LookupError(f"no agent on this board serves {wanted}")
+        target = f"{str(owner['url']).rstrip('/')}/files/{match.group(1)}"
+        client = httpx.AsyncClient(timeout=httpx.Timeout(30, read=120))
+        try:
+            upstream = await client.send(
+                client.build_request("GET", target, params=dict(
+                    exp=request.query_params.get("exp") or parse_qs_one(parsed.query, "exp"),
+                    sig=request.query_params.get("sig") or parse_qs_one(parsed.query, "sig"),
+                )),
+                stream=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — reported to the reader
+            await client.aclose()
+            return JSONResponse(
+                {"error": f"could not reach {owner['qualified']}: {type(exc).__name__}"},
+                status_code=502)
+
+        async def close():
+            await upstream.aclose()
+            await client.aclose()
+
+        # aiter_bytes undoes any Content-Encoding, so a compressed length
+        # would no longer match what is sent; let the server count it then.
+        keep = {"content-type", "content-disposition"}
+        if not upstream.headers.get("content-encoding"):
+            keep.add("content-length")
+        passed = {k: v for k, v in upstream.headers.items() if k.lower() in keep}
+        passed["Cache-Control"] = "no-store"
+        passed["X-Content-Type-Options"] = "nosniff"
+        passed["X-Shared-By"] = str(owner["qualified"])
+        return StreamingResponse(upstream.aiter_bytes(), status_code=upstream.status_code,
+                                 headers=passed, background=BackgroundTask(close))
 
     @guard
     async def agent_models(request: Request) -> Response:
@@ -1055,6 +1200,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
               machine_interfaces, methods=["POST"]),
         Route("/api/agents", create_agent, methods=["POST"]),
         Route("/api/models", list_models, methods=["POST"]),
+        Route("/api/files/relay", relay_file),
         Route("/api/agents/{agent_id:int}", delete_agent, methods=["DELETE"]),
         Route("/api/agents/metrics", agent_metrics),
         Route("/api/agents/{agent_id:int}/config", get_agent_config),
@@ -1065,6 +1211,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/channels/{channel_id:int}", delete_channel, methods=["DELETE"]),
         Route("/api/channels/{channel_id:int}/clear", clear_channel, methods=["POST"]),
         Route("/api/agents/{agent_id:int}/clear-context", clear_agent_context, methods=["POST"]),
+        Route("/api/agents/{agent_id:int}/reinstall", reinstall_agent, methods=["POST"]),
         Route("/api/channels/{channel_id:int}/members", join_channel, methods=["POST"]),
         Route("/api/channels/{channel_id:int}/members/{agent_id:int}",
               leave_channel, methods=["DELETE"]),

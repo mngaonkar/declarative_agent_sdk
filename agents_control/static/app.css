@@ -395,3 +395,26 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .server-card .card-note { margin: 10px 0 0; }
 .grid td .dim { color: var(--dim); }
 .grid td .warn-text { color: var(--warn); }
+
+/* A throughput figure carried over from the last measured turn: still the
+   right number, just not a live one. */
+.stat.held .v { opacity: 0.75; }
+
+/* Shared-file links from share_file, drawn as chips that preview in place. */
+.file-chip {
+  display: inline-flex; align-items: center; gap: 6px; margin: 2px 0;
+  padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--bg-3); color: var(--text); font: inherit; font-size: 12px;
+  cursor: pointer; max-width: 100%;
+}
+.file-chip:hover { border-color: var(--accent); }
+.file-chip .meta { color: var(--dim); }
+.file-chip.expired { opacity: 0.6; }
+.file-chip.expired .meta { color: var(--danger); }
+.file-preview { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.file-preview .file-head { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+.file-preview pre {
+  margin: 0; max-height: 60vh; overflow: auto; white-space: pre-wrap;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px;
+}
+.file-preview .msg-like { max-height: 60vh; overflow: auto; }

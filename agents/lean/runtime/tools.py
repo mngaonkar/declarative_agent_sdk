@@ -228,28 +228,23 @@ class LeanToolRegistry:
             ["path"],
             self._run_script,
         )
-        self._register_board_tools()
+        self._register_shared_core()
 
-    def _register_board_tools(self) -> None:
+    def _register_shared_core(self) -> None:
         """
-        Add send_to_agent and list_agents when this agent is on a board.
+        Bridge in the SDK-wide core tools (web_request, exec_command,
+        send_to_agent, share_file, read_shared; list_agents on a board).
 
-        Core rather than opt-in: an agent that can be addressed as @name should
-        be able to answer in kind, and asking people to list a tool for the
-        thing the board is *for* is a trap — the symptom is an agent that
-        cannot bring in a peer and says nothing about why. Off a board they are
-        left out: there they could only report that there is no board, and
-        every tool offered costs tokens on every request.
+        Core rather than opt-in, so no agent config has to list them. The lean
+        read_file / write_file registered above are sandboxed to the workspace
+        and win: add_callable skips a name that is already taken.
         """
-        if not ToolRegistry.on_a_board():
-            logger.debug("no AGENTS_CONTROL_URL; board tools not registered")
-            return
         ToolRegistry.register_built_in_tools()
-        for name in ToolRegistry.BOARD_TOOL_NAMES:
+        for name in ToolRegistry.core_tool_names():
             try:
                 self.add_callable(ToolRegistry.get(name))
             except (ValueError, Exception) as exc:   # noqa: BLE001 - never fatal
-                logger.warning(f"could not register board tool '{name}': {exc}")
+                logger.warning(f"could not register core tool '{name}': {exc}")
 
     def _is_mutable(self, path: str) -> bool:
         abs_path = str(Path(path).expanduser().resolve())

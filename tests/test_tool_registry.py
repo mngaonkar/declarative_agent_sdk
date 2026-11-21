@@ -56,9 +56,10 @@ class TestResolve:
 
 
 class TestCoreTools:
-    def test_core_tools_are_file_access(self):
+    def test_core_tools_off_a_board(self, monkeypatch):
+        monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         names = [fn.__name__ for fn in ToolRegistry.core_tools()]
-        assert names == ["read_file", "write_file"]
+        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared"]
 
     def test_core_tools_need_no_registration_call(self):
         ToolRegistry.register_built_in_tools(force=True)

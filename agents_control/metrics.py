@@ -212,6 +212,28 @@ class Sampler:
 
     def __init__(self) -> None:
         self._last: Dict[str, Dict[str, Any]] = {}
+        # The last window that actually measured something, per endpoint.
+        self._rates: Dict[str, Dict[str, Any]] = {}
+
+    def held(self, url: str, rates: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        This window's rates, or the last measured ones, marked as such.
+
+        A window with no finished request measures nothing, and llama.cpp's own
+        throughput gauges cover only the requests since the previous /metrics
+        read, so between turns both read as nothing or 0. Showing the last real
+        figure with its age is truer than either.
+        """
+        if any(key in rates for key in ("decode_rate", "prefill_rate")):
+            self._rates[url] = dict(rates, measured_at=time.time())
+            return rates
+        last = self._rates.get(url)
+        if not last:
+            return rates
+        held = {k: v for k, v in last.items() if k != "measured_at"}
+        held["held"] = True
+        held["age_seconds"] = round(time.time() - float(last["measured_at"]), 1)
+        return held
 
     def take(self, url: str, metrics: Dict[str, float]) -> Optional[Dict[str, Any]]:
         before = self._last.get(url)
@@ -221,6 +243,7 @@ class Sampler:
 
     def forget(self, url: str) -> None:
         self._last.pop(url, None)
+        self._rates.pop(url, None)
 
 
 async def probe(
@@ -275,7 +298,8 @@ async def probe(
             if cached + fresh > 0:
                 report["cache_hit_ratio"] = round(cached / (cached + fresh), 4)
             if sampler is not None:
-                report["recent"] = _rates(values, sampler.take(root, values))
+                report["recent"] = sampler.held(
+                    root, _rates(values, sampler.take(root, values)))
         else:
             report["metrics_note"] = "no recognised metrics at /metrics"
     elif metrics_response is not None:

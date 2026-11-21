@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 
 from declarative_agent_sdk.core.base_agent import BaseAgent
+from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 from declarative_agent_sdk.agents.deepagent.agent import (
     LangChainAIAgent,
     LangChainEvent,
@@ -645,42 +646,39 @@ class TestToolGating:
             )
         return sorted(captured.get("tools") or [])
 
+    @staticmethod
+    def _core(*extra):
+        return sorted(set(ToolRegistry.CORE_TOOL_NAMES) | set(extra))
+
     def test_core_tools_without_any_tools_list(self):
-        assert self._tool_names() == ["read_file", "write_file"]
+        assert self._tool_names() == self._core()
 
     def test_no_tools_list_registers_skill_tools(self, tmp_path):
         names = self._tool_names(
             skills_directory=self._skills_dir(tmp_path), skills=["toc"]
         )
-        assert names == ["read_file", "toc_build", "write_file"]
+        assert names == self._core("toc_build")
 
     def test_listed_tool_is_added_to_core(self):
-        assert self._tool_names(tools=["exec_command"]) == [
-            "exec_command",
-            "read_file",
-            "write_file",
-        ]
+        assert self._tool_names(tools=["tavily_search"]) == self._core("tavily_search")
 
     def test_skill_tool_must_be_listed_when_tools_present(self, tmp_path):
         skills_dir = self._skills_dir(tmp_path)
         listed = self._tool_names(
             tools=["toc_build"], skills_directory=skills_dir, skills=["toc"]
         )
-        assert listed == ["read_file", "toc_build", "write_file"]
+        assert listed == self._core("toc_build")
 
         gated = self._tool_names(
             tools=["web_request"], skills_directory=skills_dir, skills=["toc"]
         )
-        assert gated == ["read_file", "web_request", "write_file"]
+        assert gated == self._core()
 
     def test_unknown_name_leaves_only_core(self, caplog):
         with caplog.at_level(logging.WARNING):
-            assert self._tool_names(tools=["exec_commnd"]) == [
-                "read_file",
-                "write_file",
-            ]
+            assert self._tool_names(tools=["exec_commnd"]) == self._core()
         assert "Unknown tool 'exec_commnd'" in caplog.text
         assert "Did you mean 'exec_command'?" in caplog.text
 
     def test_core_tool_listed_twice_is_not_duplicated(self):
-        assert self._tool_names(tools=["read_file"]) == ["read_file", "write_file"]
+        assert self._tool_names(tools=["read_file"]) == self._core()

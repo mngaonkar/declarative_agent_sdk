@@ -155,5 +155,16 @@ check('pipe text without a delimiter row stays a paragraph',
 check('user@host is not a mention', render('ssh mahadev@10.0.0.147'), lacks('class="mention"'));
 check('a word-start @ is a mention', render('ask @coder.box now'), has('<span class="mention">@coder.box</span>'));
 
+// ── onLink hook ───────────────────────────────────────────────────────────
+{
+  const chip = (token, d) => { const n = d.createElement('button'); n.textContent = 'chip:' + token.href; return n; };
+  const out = html(md.render('see http://a:1/files/x?exp=1&sig=ab', doc, { onLink: chip }));
+  check('onLink replaces a link', out, has('<button>chip:http://a:1/files/x?exp=1&amp;sig=ab</button>'));
+  check('onLink is not offered unsafe schemes',
+        html(md.render('[x](javascript:alert(1))', doc, { onLink: chip })), lacks('chip:'));
+  check('onLink returning null keeps the anchor',
+        html(md.render('https://example.com', doc, { onLink: () => null })), has('<a href="https://example.com"'));
+}
+
 console.log(failed ? `\n${failed} failure(s)` : '\nall md.js tests passed');
 process.exit(failed ? 1 : 0);

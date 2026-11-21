@@ -59,9 +59,9 @@ class TestStore:
     def test_settings_are_seeded(self, store):
         settings = store.settings()
         assert settings["default_framework"] == "lean"
-        # the board tools are core on a board, so they are deliberately absent
-        assert "send_to_agent" not in settings["default_tools"]
-        assert "exec_command" in settings["default_tools"]
+        # web_request, exec_command, send_to_agent ... are core, so the
+        # default extra-tools list is empty
+        assert settings["default_tools"] == ""
 
     def test_update_settings_ignores_unknown_keys(self, store):
         updated = store.update_settings({"default_model": "gpt-4o", "nonsense": 1})
@@ -520,11 +520,11 @@ class TestSendToAgentTool:
     def _tool(cls):
         return cls._module().send_to_agent
 
-    def test_registered_as_a_non_core_builtin(self):
+    def test_registered_as_a_core_builtin(self):
         from declarative_agent_sdk.tools.tool_registry import ToolRegistry
         ToolRegistry.register_built_in_tools()
         assert "send_to_agent" in ToolRegistry.list_available()
-        assert "send_to_agent" not in ToolRegistry.CORE_TOOL_NAMES
+        assert "send_to_agent" in ToolRegistry.CORE_TOOL_NAMES
 
     def test_board_plumbing_is_not_offered_as_tools(self):
         """_board.py is a private module: its helpers must not become tools."""
@@ -2515,17 +2515,17 @@ class TestBoardToolsAreCore:
         names = self._registry().core_tool_names()
         assert "send_to_agent" in names and "list_agents" in names
 
-    def test_they_are_absent_off_a_board(self, monkeypatch):
-        """Off a board they could only report that there is no board."""
+    def test_list_agents_is_absent_off_a_board(self, monkeypatch):
+        """Off a board list_agents could only report that there is no board."""
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         names = self._registry().core_tool_names()
-        assert "send_to_agent" not in names and "list_agents" not in names
-        assert names == ["read_file", "write_file"]
+        assert "list_agents" not in names
+        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared"]
 
     def test_core_tools_returns_the_callables(self, monkeypatch):
         monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
         got = [fn.__name__ for fn in self._registry().core_tools()]
-        assert got == ["read_file", "write_file", "send_to_agent", "list_agents"]
+        assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared", "list_agents"]
 
     def test_the_lean_runtime_registers_them(self, tmp_path, monkeypatch):
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
@@ -2544,7 +2544,7 @@ class TestBoardToolsAreCore:
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
-        assert "send_to_agent" not in registry.names()
+        assert "send_to_agent" in registry.names()
         assert "list_agents" not in registry.names()
 
     def test_listing_them_anyway_does_not_duplicate(self, tmp_path, monkeypatch):
@@ -2830,17 +2830,17 @@ class TestBoardToolsAreCore:
         names = self._registry().core_tool_names()
         assert "send_to_agent" in names and "list_agents" in names
 
-    def test_they_are_absent_off_a_board(self, monkeypatch):
-        """Off a board they could only report that there is no board."""
+    def test_list_agents_is_absent_off_a_board(self, monkeypatch):
+        """Off a board list_agents could only report that there is no board."""
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         names = self._registry().core_tool_names()
-        assert "send_to_agent" not in names and "list_agents" not in names
-        assert names == ["read_file", "write_file"]
+        assert "list_agents" not in names
+        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared"]
 
     def test_core_tools_returns_the_callables(self, monkeypatch):
         monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
         got = [fn.__name__ for fn in self._registry().core_tools()]
-        assert got == ["read_file", "write_file", "send_to_agent", "list_agents"]
+        assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared", "list_agents"]
 
     def test_the_lean_runtime_registers_them(self, tmp_path, monkeypatch):
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
@@ -2859,7 +2859,7 @@ class TestBoardToolsAreCore:
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
-        assert "send_to_agent" not in registry.names()
+        assert "send_to_agent" in registry.names()
         assert "list_agents" not in registry.names()
 
     def test_listing_them_anyway_does_not_duplicate(self, tmp_path, monkeypatch):
@@ -4344,12 +4344,13 @@ class TestAgentsKnowTheirOwnTools:
         machine = store.add_machine("MacBook-pro", "localhost", is_local=True)
         agent = store.upsert_agent(machine["id"], {
             "name": "master", "url": "http://x",
-            "tools": "web_request,exec_command,send_to_agent"})
+            "tools": "tavily_search"})
         channel = store.add_channel("Master")
         store.join(channel["id"], agent["id"])
         prompt = router._prompt_for(channel["id"], "master.MacBook-pro", "hi", "you")
         assert "You run on the machine 'MacBook-pro'" in prompt
-        assert "(web_request, exec_command, send_to_agent)" in prompt
+        assert "(read_file, write_file, web_request, exec_command, send_to_agent, " in prompt
+        assert "read_shared, tavily_search)" in prompt
         assert "user@host is not an agent" in prompt
 
 
@@ -4460,3 +4461,186 @@ class TestWorkingState:
 
     def test_state_carries_it(self, client):
         assert client.get("/api/state", headers=AUTH).json()["working"] == {}
+
+
+class TestHeldThroughput:
+    """tok/s keeps the last measured value between turns instead of reading 0."""
+
+    def test_a_measured_window_passes_through_and_is_remembered(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        sampler = Sampler()
+        rates = {"window_seconds": 5.0, "decode_rate": 41.2, "decode_tokens": 300}
+        assert sampler.held("http://box", rates) == rates
+
+    def test_an_empty_window_shows_the_last_figure_with_its_age(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        sampler = Sampler()
+        sampler.held("http://box", {"window_seconds": 5.0, "decode_rate": 41.2,
+                                    "prefill_rate": 900.0})
+        held = sampler.held("http://box", {"window_seconds": 5.0})
+        assert held["decode_rate"] == 41.2 and held["prefill_rate"] == 900.0
+        assert held["held"] is True and held["age_seconds"] >= 0
+        assert "measured_at" not in held
+
+    def test_a_new_measurement_replaces_the_held_one(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        sampler = Sampler()
+        sampler.held("http://box", {"decode_rate": 41.2})
+        assert sampler.held("http://box", {"decode_rate": 12.0}) == {"decode_rate": 12.0}
+        assert sampler.held("http://box", {})["decode_rate"] == 12.0
+
+    def test_nothing_measured_yet_stays_empty(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        assert Sampler().held("http://box", {}) == {}
+
+    def test_endpoints_are_held_separately(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        sampler = Sampler()
+        sampler.held("http://a", {"decode_rate": 41.2})
+        assert sampler.held("http://b", {}) == {}
+
+
+class TestFileRelay:
+    """/api/files/relay passes a shared file through from its owner, and only that."""
+
+    LINK = "http://100.83.163.18:8000/files/AbCdEfGh12345678?exp=9999999999&sig=" + "a" * 32
+
+    @pytest.fixture
+    def owner(self, plane):
+        machine = plane.store.add_machine("omarchy", "100.83.163.18")
+        return plane.store.upsert_agent(machine["id"], {
+            "name": "reviewer", "url": "http://100.83.163.18:8000/"})
+
+    def _upstream(self, monkeypatch, handler):
+        import declarative_agent_sdk.agents_control.server as server_module
+        original = server_module.httpx.AsyncClient
+        monkeypatch.setattr(server_module.httpx, "AsyncClient", lambda **kw: original(
+            transport=httpx.MockTransport(handler)))
+
+    def test_streams_from_the_owner_with_its_headers(self, client, owner, monkeypatch):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(200, text="# findings\n", headers={
+                "content-type": "text/markdown", "content-disposition": 'inline; filename="r.md"'})
+
+        self._upstream(monkeypatch, handler)
+        reply = client.get("/api/files/relay", params={"url": self.LINK}, headers=AUTH)
+        assert reply.status_code == 200 and reply.text == "# findings\n"
+        assert reply.headers["x-shared-by"] == "reviewer.omarchy"
+        assert reply.headers["cache-control"] == "no-store"
+        assert seen[0].startswith("http://100.83.163.18:8000/files/AbCdEfGh12345678?")
+        assert "sig=" + "a" * 32 in seen[0]
+
+    def test_the_owners_refusal_passes_through(self, client, owner, monkeypatch):
+        self._upstream(monkeypatch, lambda r: httpx.Response(410, json={"error": "expired"}))
+        reply = client.get("/api/files/relay", params={"url": self.LINK}, headers=AUTH)
+        assert reply.status_code == 410
+
+    def test_a_host_that_is_not_a_board_agent_is_refused(self, client, owner):
+        other = self.LINK.replace("100.83.163.18", "169.254.169.254")
+        reply = client.get("/api/files/relay", params={"url": other}, headers=AUTH)
+        assert reply.status_code == 404
+
+    def test_only_files_links_are_relayed(self, client, owner):
+        for url in ("http://100.83.163.18:8000/", "http://100.83.163.18:8000/context",
+                    "http://100.83.163.18:8000/files/../etc?exp=1&sig=a", "file:///etc/passwd"):
+            assert client.get("/api/files/relay", params={"url": url},
+                              headers=AUTH).status_code == 400, url
+
+    def test_needs_the_board_token(self, client, owner):
+        assert client.get("/api/files/relay", params={"url": self.LINK}).status_code == 401
+
+    def test_an_unreachable_owner_is_a_502(self, client, owner, monkeypatch):
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+        self._upstream(monkeypatch, refuse)
+        reply = client.get("/api/files/relay", params={"url": self.LINK}, headers=AUTH)
+        assert reply.status_code == 502 and "reviewer.omarchy" in reply.json()["error"]
+
+    def test_the_prompt_mentions_sharing_to_every_agent(self, store):
+        """share_file / read_shared are core, so no tools: list is needed."""
+        router = ChannelRouter(store, EventBus())
+        machine = store.add_machine("here", "localhost", is_local=True)
+        store.upsert_agent(machine["id"], {"name": "b", "tools": ""})
+        block = router._self_block("b.here")
+        assert "call share_file" in block and "with read_shared" in block
+
+
+class TestReinstall:
+    """Reinstall re-runs install.sh without resetting what the agent has."""
+
+    @pytest.fixture
+    def agent(self, plane, tmp_path):
+        prefix = tmp_path / "coder"
+        prefix.mkdir()
+        (prefix / "agent.yaml").write_text(SAMPLE_YAML)
+        (prefix / "instructions.md").write_text("# coder\n")
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        return plane.store.upsert_agent(machine["id"], {
+            "name": "coder", "prefix": str(prefix), "url": "http://100.1.1.1:8000/",
+            "endpoint": "http://box:30081/v1"})
+
+    def _fake(self, plane, monkeypatch, network=None):
+        calls = {"env": [], "install": None}
+        monkeypatch.setattr(plane.driver, "agent_network", lambda *a, **k: network or {
+            "ok": True, "bind_host": "0.0.0.0", "advertise_host": "100.83.163.18"})
+        monkeypatch.setattr(plane.driver, "set_env_var",
+                            lambda m, p, k, v, **kw: calls["env"].append((k, v)))
+
+        def install(machine, **kwargs):
+            calls["install"] = kwargs
+            return {"name": kwargs["name"], "prefix": kwargs["prefix"], "ready": True,
+                    "url": "http://100.83.163.18:8000/", "port": 8000}
+
+        monkeypatch.setattr(plane.driver, "create_agent", install)
+        return calls
+
+    def test_it_keeps_config_key_and_address(self, client, plane, agent, monkeypatch):
+        calls = self._fake(plane, monkeypatch)
+        reply = client.post(f"/api/agents/{agent['id']}/reinstall",
+                            json={"sdk_source": "local"}, headers=AUTH)
+        assert reply.status_code == 200, reply.text
+        kw = calls["install"]
+        assert kw["seed_env"] is False                 # .env is not replaced
+        assert kw["prefix"] == agent["prefix"]         # same directory
+        assert kw["bind_host"] == "0.0.0.0" and kw["advertise_host"] == "100.83.163.18"
+        assert kw["provider"] == "vllm" and kw["model"] == "qwen2.5-coder:latest"
+        assert kw["sdk_source"] == "local"
+        assert "api_key" not in kw or not kw.get("api_key")
+        record = plane.store.agent(agent["id"])
+        assert record["url"] == "http://100.83.163.18:8000/"
+        assert record["endpoint"]                      # not wiped by the result
+
+    def test_board_env_is_refreshed_one_variable_at_a_time(self, client, plane, agent, monkeypatch):
+        calls = self._fake(plane, monkeypatch)
+        client.post(f"/api/agents/{agent['id']}/reinstall", json={}, headers=AUTH)
+        keys = [k for k, _ in calls["env"]]
+        assert "AGENTS_CONTROL_URL" in keys and "AGENT_QUALIFIED_NAME" in keys
+        assert ("AGENT_QUALIFIED_NAME", "coder.here") in calls["env"]
+        assert not any(k.endswith("API_KEY") for k in keys)   # the key is left alone
+
+    def test_refresh_can_be_skipped(self, client, plane, agent, monkeypatch):
+        calls = self._fake(plane, monkeypatch)
+        client.post(f"/api/agents/{agent['id']}/reinstall",
+                    json={"refresh_board_env": False}, headers=AUTH)
+        assert calls["env"] == []
+
+    def test_an_unreadable_address_lets_install_sh_decide(self, client, plane, agent, monkeypatch):
+        calls = self._fake(plane, monkeypatch, network={"ok": False, "error": "x"})
+        reply = client.post(f"/api/agents/{agent['id']}/reinstall", json={}, headers=AUTH).json()
+        assert calls["install"]["bind_host"] == "" and reply["kept_address"] is False
+
+    def test_driver_passes_prefix_and_no_env_file(self, monkeypatch):
+        driver = MachineDriver()
+        commands = []
+        monkeypatch.setattr(driver, "push_scripts", lambda m: None)
+        monkeypatch.setattr(driver, "_script_path", lambda m, k: "install.sh")
+        monkeypatch.setattr(driver, "run", lambda m, c, **kw: commands.append(c) or '{"name": "coder"}')
+        driver.create_agent({"name": "here", "host": "box"}, name="coder", provider="vllm",
+                            control_env={"AGENTS_CONTROL_URL": "http://b"}, seed_env=False,
+                            prefix="/home/u/.declarative-agent/coder", sdk_source="git")
+        assert len(commands) == 1                       # no env file staged or removed
+        assert "--prefix /home/u/.declarative-agent/coder" in commands[0]
+        assert "--env-file" not in commands[0] and "--force" not in commands[0]
