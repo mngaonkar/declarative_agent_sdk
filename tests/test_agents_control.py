@@ -1631,7 +1631,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
     --env-file) ENV_FILE="$2"; shift 2 ;;
-    --json|--no-approval) shift ;;
+    --json|--no-approval|--enable-at-boot) shift ;;
     *) shift 2 ;;
   esac
 done
@@ -1690,6 +1690,13 @@ class TestEnvFileHandoff:
         install = next(c for c in sent if "install.sh" in c)
         assert '--env-file "$HOME/.agents-control/env.researcher"' in install
         assert "--env-file '" not in install     # the bug
+
+    def test_installs_ask_for_start_at_boot(self, stub):
+        """Without it an agent is gone after the machine reboots."""
+        driver, sent = self._capture()
+        driver.create_agent(self.REMOTE, name="researcher")
+        install = next(c for c in sent if "install.sh" in c)
+        assert "--enable-at-boot" in install
 
     def test_the_file_is_written_where_install_sh_will_look(self, stub):
         driver, sent = self._capture()

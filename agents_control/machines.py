@@ -508,10 +508,16 @@ class MachineDriver:
         sdk_ref: str = "",
         seed_env: bool = True,
         prefix: str = "",
+        start_at_boot: bool = True,
         timeout: int = 900,
     ) -> Dict[str, Any]:
         """
         Provision one agent. Returns install.sh's JSON result.
+
+        ``start_at_boot`` passes ``--enable-at-boot``: supervisord (and so every
+        agent on the machine) comes back after a reboot. install.sh makes this
+        a no-op when supervisord already runs under an unchanged boot service,
+        so repeating it on every install restarts nothing.
 
         ``seed_env=False`` is for a reinstall: install.sh *replaces* .env with
         an --env-file, which would drop a key set since, so none is passed and
@@ -553,6 +559,8 @@ class MachineDriver:
             args += ["--advertise-host", advertise_host]
         if not approval:
             args.append("--no-approval")
+        if start_at_boot:
+            args.append("--enable-at-boot")
 
         wheel_arg = ""
         if sdk_source == "local":

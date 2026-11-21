@@ -427,29 +427,49 @@ ensure_supervisor() {
   info "  started supervisord"
 }
 
+# Write $2 to file $1 unless it already holds exactly that. Returns 0 when the
+# file was (re)written, 1 when it was already current, so a repeat install can
+# tell "nothing changed" from "the service definition moved".
+write_if_changed() {
+  if [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]; then
+    return 1
+  fi
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' "$2" > "$1"
+  return 0
+}
+
+# Only one supervisord can hold the socket. Shut down one this script (or an
+# earlier install) started, so the boot service can own it instead of
+# crash-looping on "address already in use" behind KeepAlive/Restart=always.
+# Agents stop with it and come back when the service starts them.
+handover_supervisor() {
+  supervisor_running || return 0
+  info "  handing the running supervisord over to the boot service"
+  sctl shutdown >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    supervisor_running || break
+    sleep 0.5
+  done
+}
+
 # The single place a platform service is still involved: keeping supervisord
 # itself alive across reboots. One entry for the whole machine.
+#
+# Safe to run on every install: when supervisord already runs under an
+# unchanged boot service nothing is restarted, and when the boot service
+# cannot bring supervisord up it is started the ordinary way, so an agent is
+# never left down by trying to make it survive a reboot.
 enable_at_boot() {
   ensure_supervisor_installed
   local cmd="$SUPERVISOR_VENV/bin/supervisord -c $SUPERVISOR_CONF -n"
 
-  # Only one supervisord can hold the socket. If this script already started
-  # one, shut it down first and let the boot service own it, or the service
-  # crash-loops on "address already in use" behind KeepAlive/Restart=always.
-  # Agents stop with it and come back when the service starts them.
-  if supervisor_running; then
-    info "handing the running supervisord over to the boot service"
-    sctl shutdown >/dev/null 2>&1 || true
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      supervisor_running || break
-      sleep 0.5
-    done
-  fi
   if [ "$OS" = "Linux" ]; then
+    local sc unit content
     if [ "$IS_ROOT" -eq 1 ]; then
-      local unit="/etc/systemd/system/$BOOT_UNIT.service"
-      cat > "$unit" <<BOOTEOF
-[Unit]
+      sc="systemctl"
+      unit="/etc/systemd/system/$BOOT_UNIT.service"
+      content="[Unit]
 Description=supervisord for declarative-agent sub-agents
 After=network-online.target
 Wants=network-online.target
@@ -457,53 +477,66 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$SERVICE_USER
+Environment=PATH=$SERVICE_PATH
 ExecStart=$cmd
 Restart=always
 RestartSec=5s
 
 [Install]
-WantedBy=multi-user.target
-BOOTEOF
-      systemctl daemon-reload
-      systemctl enable "$BOOT_UNIT" >/dev/null
-      info "enabled $unit (system-wide)"
+WantedBy=multi-user.target"
     else
-      # A --user unit needs no root; lingering is what makes it start at boot
-      # rather than at login.
-      local dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-      mkdir -p "$dir"
-      cat > "$dir/$BOOT_UNIT.service" <<BOOTEOF
-[Unit]
+      # A user unit only starts at boot, and only outlives a logout, with
+      # lingering on; without it the unit would stop when the SSH session
+      # that installed it ends, taking the agents with it. Many polkit setups
+      # let a user enable their own lingering, so try before giving up.
+      linger_on || loginctl --no-ask-password enable-linger "$(id -un)" >/dev/null 2>&1 || true
+      if ! linger_on || ! systemctl --user show-environment >/dev/null 2>&1; then
+        warn "supervisord will not start at boot: lingering is off for $(id -un). Run once:
+         sudo loginctl enable-linger $(id -un)
+       then install again."
+        ensure_supervisor
+        return 0
+      fi
+      sc="systemctl --user"
+      unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$BOOT_UNIT.service"
+      content="[Unit]
 Description=supervisord for declarative-agent sub-agents
 
 [Service]
 Type=simple
+Environment=PATH=$SERVICE_PATH
 ExecStart=$cmd
 Restart=always
 RestartSec=5s
 
 [Install]
-WantedBy=default.target
-BOOTEOF
-      systemctl --user daemon-reload 2>/dev/null || true
-      systemctl --user enable "$BOOT_UNIT" >/dev/null 2>&1 || true
-      info "enabled $dir/$BOOT_UNIT.service (user scope)"
-      if command -v loginctl >/dev/null && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != "yes" ]; then
-        warn "user services only start at login until lingering is on:
-         sudo loginctl enable-linger $(id -un)"
-      fi
+WantedBy=default.target"
     fi
+
+    if write_if_changed "$unit" "$content"; then
+      $sc daemon-reload 2>/dev/null || true
+      info "  wrote $unit"
+    elif $sc is-active --quiet "$BOOT_UNIT" 2>/dev/null && supervisor_running; then
+      $sc enable "$BOOT_UNIT" >/dev/null 2>&1 || true
+      info "  supervisord already runs under $BOOT_UNIT (starts at boot)"
+      return 0
+    fi
+    $sc enable "$BOOT_UNIT" >/dev/null 2>&1 || warn "could not enable $BOOT_UNIT"
+    # Not active means whatever supervisord is running (a transient
+    # systemd-run unit, a plain daemon) is not the boot service's.
+    $sc is-active --quiet "$BOOT_UNIT" 2>/dev/null || handover_supervisor
+    $sc restart "$BOOT_UNIT" 2>/dev/null || warn "could not start $BOOT_UNIT"
   else
-    local plist
+    local plist domain content
     if [ "$IS_ROOT" -eq 1 ]; then
       plist="/Library/LaunchDaemons/$BOOT_LABEL.plist"
+      domain="system"
     else
       plist="$HOME/Library/LaunchAgents/$BOOT_LABEL.plist"
+      domain="gui/$(id -u)"
     fi
-    mkdir -p "$(dirname "$plist")"
-    cat > "$plist" <<BOOTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0">
+    content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<plist version=\"1.0\">
 <dict>
     <key>Label</key><string>$BOOT_LABEL</string>
     <key>ProgramArguments</key>
@@ -518,26 +551,28 @@ BOOTEOF
     <key>EnvironmentVariables</key>
     <dict><key>PATH</key><string>$SERVICE_PATH</string></dict>
 </dict>
-</plist>
-BOOTEOF
+</plist>"
+    if ! write_if_changed "$plist" "$content" \
+       && launchctl print "$domain/$BOOT_LABEL" >/dev/null 2>&1 && supervisor_running; then
+      info "  supervisord already runs under $BOOT_LABEL (starts at boot)"
+      return 0
+    fi
     chmod 644 "$plist"
     plutil -lint "$plist" >/dev/null || die "generated plist is not valid: $plist"
-    if [ "$IS_ROOT" -eq 1 ]; then
-      chown root:wheel "$plist"
-      launchctl bootout "system/$BOOT_LABEL" 2>/dev/null || true
-      launchctl bootstrap system "$plist" 2>/dev/null || true
-    else
-      launchctl bootout "gui/$(id -u)/$BOOT_LABEL" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || true
-      warn "a LaunchAgent stops at logout; run this as root for a LaunchDaemon that survives it"
-    fi
-    info "enabled $plist"
+    [ "$IS_ROOT" -eq 1 ] && chown root:wheel "$plist"
+    launchctl bootout "$domain/$BOOT_LABEL" 2>/dev/null || true
+    handover_supervisor
+    launchctl bootstrap "$domain" "$plist" 2>/dev/null || true
+    [ "$IS_ROOT" -eq 1 ] \
+      || warn "a LaunchAgent stops at logout; run this as root for a LaunchDaemon that survives it"
+    info "  enabled $plist"
   fi
 
   if wait_for_supervisor; then
-    info "supervisord is running under the boot service"
+    info "  supervisord is running under the boot service"
   else
-    warn "the boot service did not bring supervisord up; check $SUPERVISOR_HOME/supervisord.log"
+    warn "the boot service did not bring supervisord up (see $SUPERVISOR_HOME/supervisord.log); starting it directly"
+    ensure_supervisor
   fi
 }
 
@@ -1030,7 +1065,14 @@ SERVICE_STATE="not-registered"
 PROGRAM_CONF="$SUPERVISOR_CONFD/$NAME.conf"
 
 if [ "$SERVICE_KIND" = "supervisor" ]; then
-  ensure_supervisor
+  # With --enable-at-boot supervisord is started by the boot service from the
+  # outset, rather than started here and then handed over (which would
+  # restart every agent on the machine on every install).
+  if [ "$ENABLE_AT_BOOT" -eq 1 ]; then
+    enable_at_boot
+  else
+    ensure_supervisor
+  fi
   if [ -n "$SUPERVISOR_PROBLEM" ]; then
     PROBLEMS="${PROBLEMS:+$PROBLEMS
 }$SUPERVISOR_PROBLEM"
@@ -1103,7 +1145,7 @@ PROGEOF
   fi
 fi
 
-if [ "$ENABLE_AT_BOOT" -eq 1 ]; then
+if [ "$ENABLE_AT_BOOT" -eq 1 ] && [ "$SERVICE_KIND" != "supervisor" ]; then
   enable_at_boot
 fi
 
