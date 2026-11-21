@@ -31,7 +31,7 @@ Layout:
 # answers a route it does not have with a bare 404.
 #
 # Keep in step with EXPECTS_API in static/app.js.
-API_REVISION = 19
+API_REVISION = 29
 
 from declarative_agent_sdk.agents_control.store import Store
 from declarative_agent_sdk.agents_control.machines import MachineDriver, MachineError

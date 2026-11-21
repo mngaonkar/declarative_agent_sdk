@@ -12,23 +12,34 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from urllib.parse import urlparse
+
+import httpx
+from starlette.background import BackgroundTask
+from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.agents_control import config as agent_config
-from declarative_agent_sdk.agents_control.machines import MachineDriver, MachineError
+from declarative_agent_sdk.agents_control import catalog as model_catalog
+from declarative_agent_sdk.agents_control import metrics as model_metrics
+from declarative_agent_sdk.agents_control import logbook
+from declarative_agent_sdk.agents_control.machines import (
+    MachineDriver, MachineError, key_name_for,
+)
 from declarative_agent_sdk.agents_control.router import ChannelRouter, EventBus
 from declarative_agent_sdk.agents_control.store import Store, DEFAULT_DB_PATH
 
@@ -42,6 +53,37 @@ STATIC_DIR = Path(__file__).parent / "static"
 # The board itself is unauthenticated (it is a shell that asks for the token);
 # every /api path is not. Exact paths and prefixes are kept apart deliberately:
 # a prefix list containing "/" matches every request and opens the whole API.
+# A shared-file link as share_file mints it: /files/<id>?exp=<int>&sig=<hex>.
+SHARE_PATH_RE = re.compile(r"^/files/([A-Za-z0-9_-]{8,64})$")
+
+
+def parse_qs_one(query: str, key: str) -> str:
+    from urllib.parse import parse_qs
+    values = parse_qs(query or "").get(key) or [""]
+    return values[0]
+
+
+def _netloc(url: str) -> str:
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return f"{host}:{port}" if host else ""
+
+
+# The board is edited in place and served from disk, so a browser must ask
+# before reusing its copy: without this it applies heuristic caching to a file
+# with only Last-Modified, and keeps running yesterday's app.js. no-cache still
+# allows the copy — the ETag makes the check a cheap 304.
+NO_STALE = {"Cache-Control": "no-cache"}
+
+
+class FreshStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.update(NO_STALE)
+        return response
+
+
 PUBLIC_EXACT = frozenset({"/", "/index.html", "/healthz"})
 PUBLIC_PREFIXES = ("/static/",)
 
@@ -66,9 +108,14 @@ class ControlPlane:
         public_url: str = "",
     ) -> None:
         self.store = Store(db_path)
+        # Beside the database: ~/.agents-control/logs/control.log by default.
+        self.logbook = logbook.install(str(Path(self.store.path).parent / "logs"))
         self.driver = MachineDriver()
         self.bus = EventBus()
         self.router = ChannelRouter(self.store, self.bus)
+        # Holds the previous /metrics reading per endpoint so throughput can be
+        # reported over the window between polls, not just since boot.
+        self.sampler = model_metrics.Sampler()
         self.token = token if token is not None else os.environ.get("AGENTS_CONTROL_TOKEN", "")
         self.public_url = public_url.rstrip("/")
         self.app = create_app(self)
@@ -134,6 +181,7 @@ class ControlPlane:
 
 def create_app(cp: "ControlPlane") -> Starlette:
     store, driver, bus, router = cp.store, cp.driver, cp.bus, cp.router
+    sampler = cp.sampler
 
     # ------------------------------------------------------------------ auth
 
@@ -150,20 +198,52 @@ def create_app(cp: "ControlPlane") -> Starlette:
         return bool(supplied) and secrets.compare_digest(supplied, cp.token)
 
     def guard(handler):
+        """
+        Auth, error mapping, and the control plane's request log.
+
+        Changes (POST / PUT / DELETE) are logged with their outcome and how
+        long they took; reads only when they fail, since the board polls
+        several of them every few seconds. Anything unexpected is logged with
+        its traceback and answered as a 500 the board can show, instead of
+        surfacing only in the terminal the service happens to run in.
+        """
         async def wrapped(request: Request):
             if not authorized(request):
+                logger.warning(f"{request.method} {request.url.path}: unauthorized")
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
+            started = time.monotonic()
+            what = f"{request.method} {request.url.path}"
+            mutating = request.method in ("POST", "PUT", "DELETE")
+
+            def took() -> str:
+                return f"{(time.monotonic() - started) * 1000:.0f}ms"
+
             try:
-                return await handler(request)
+                response = await handler(request)
             except MachineError as exc:
-                logger.warning(f"machine command failed: {exc.detail()}")
+                logger.warning(f"{what} -> 502 in {took()}: {exc.detail()}")
                 return JSONResponse(
                     {"error": str(exc), "detail": exc.stderr}, status_code=502
                 )
             except LookupError as exc:
+                logger.warning(f"{what} -> 404: {exc}")
                 return JSONResponse({"error": str(exc)}, status_code=404)
             except ValueError as exc:
+                logger.warning(f"{what} -> 400: {exc}")
                 return JSONResponse({"error": str(exc)}, status_code=400)
+            except Exception as exc:  # noqa: BLE001 - logged, then reported
+                logger.exception(f"{what} -> 500 in {took()}")
+                return JSONResponse(
+                    {"error": f"internal error: {type(exc).__name__}: {exc}",
+                     "detail": "see the Logs tab (control plane) for the traceback"},
+                    status_code=500,
+                )
+            status = getattr(response, "status_code", 200)
+            if status >= 400:
+                logger.warning(f"{what} -> {status} in {took()}")
+            elif mutating:
+                logger.info(f"{what} -> {status} in {took()}")
+            return response
         wrapped.__name__ = getattr(handler, "__name__", "handler")
         return wrapped
 
@@ -201,7 +281,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
     # --------------------------------------------------------------- routes
 
     async def index(request: Request) -> Response:
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html", headers=NO_STALE)
 
     async def healthz(request: Request) -> Response:
         """
@@ -229,8 +309,28 @@ def create_app(cp: "ControlPlane") -> Starlette:
             "channels": store.channels(),
             "settings": store.settings(),
             "defaults": dict(DEFAULT_SETTINGS),
+            # Who is mid-turn, so a page opened during one shows it working
+            # instead of waiting for the next typing event.
+            "working": router.working(),
+            # Per-provider endpoints for the create form to fill in.
+            "providers": model_catalog.defaults(),
             "auth": bool(cp.token),
         })
+
+    @guard
+    async def list_models(request: Request) -> Response:
+        """
+        The models an endpoint serves, for the create form's model picker.
+
+        POST rather than GET so the API key travels in the body, never in a
+        URL that ends up in access logs.
+        """
+        payload = await body(request)
+        return JSONResponse(await model_catalog.list_models(
+            str(payload.get("provider") or ""),
+            str(payload.get("endpoint") or ""),
+            str(payload.get("api_key") or ""),
+        ))
 
     # -- machines ---------------------------------------------------------
 
@@ -377,7 +477,9 @@ def create_app(cp: "ControlPlane") -> Starlette:
                 "per machine — pick another name, or delete that agent first."
             )
         settings = store.settings()
-        tools = payload.get("tools") or settings["default_tools"]
+        # Extras only: the core tools (web_request, exec_command, send_to_agent,
+        # share_file, read_shared, ...) are registered by every runtime.
+        tools = payload.get("tools") or ""
         if isinstance(tools, (list, tuple)):
             tools = ",".join(str(t) for t in tools)
 
@@ -404,9 +506,81 @@ def create_app(cp: "ControlPlane") -> Starlette:
         result["tools"] = str(tools)
         result["sdk_source"] = result.get("sdk_source") or ""
         result["description"] = str(payload.get("description") or "")
+        # Kept so the board can read this model server's /metrics and /slots
+        # later; install.sh --list never reports it back.
+        result["endpoint"] = str(payload.get("endpoint") or "")
         agent = await in_thread(store.upsert_agent, int(machine["id"]), result)
         bus.publish({"type": "agents"})
         return JSONResponse({"agent": agent, "result": result})
+
+    @guard
+    async def reinstall_agent(request: Request) -> Response:
+        """
+        Re-run install.sh for an existing agent, keeping what it has.
+
+        For picking up new SDK code, and for agents installed before a fix in
+        install.sh or the board. What is kept, and how:
+
+        - agent.yaml, instructions.md, workspace, port: install.sh keeps them
+          (no --force);
+        - .env: no --env-file, which would replace it wholesale and drop a key
+          set since; only the board handshake is refreshed, one variable at a
+          time, before the install so its restart reads them;
+        - bind and published address: read from the machine and passed back,
+          because install.sh would otherwise re-guess them from the default
+          route — exactly what the Settings dialog exists to override.
+        """
+        agent, machine = _agent_and_machine(int(request.path_params["agent_id"]))
+        payload = await body(request)
+        prefix = str(agent["prefix"] or "")
+        settings = store.settings()
+
+        files = await in_thread(driver.read_agent_files, machine, prefix)
+        parsed = agent_config.parse(files["yaml"])
+        endpoint = parsed.get("endpoint") if isinstance(parsed.get("endpoint"), dict) else {}
+        tools = parsed.get("tools")
+        if isinstance(tools, (list, tuple)):
+            tools = ",".join(str(t) for t in tools)
+        try:
+            network = await in_thread(driver.agent_network, machine, prefix, agent["name"])
+        except MachineError:
+            network = {}
+
+        refreshed = []
+        if payload.get("refresh_board_env", True):
+            for key, value in cp.agent_env(agent["name"], str(machine["name"])).items():
+                if not value:
+                    continue          # an unset token is left as it is
+                await in_thread(driver.set_env_var, machine, prefix, key, value)
+                refreshed.append(key)
+
+        result = await in_thread(
+            driver.create_agent,
+            machine,
+            name=agent["name"],
+            framework=agent_config.runtime_of(
+                str(parsed.get("agent_framework") or parsed.get("backend") or "lean")),
+            provider=str(parsed.get("provider") or agent.get("provider") or ""),
+            model=str(parsed.get("model") or ""),
+            endpoint=str((endpoint or {}).get("url") or ""),
+            description=str(parsed.get("description") or ""),
+            tools=str(tools or ""),
+            approval=bool(parsed.get("tools_approval_required", True)),
+            bind_host=str(network.get("bind_host") or "") if network.get("ok") else "",
+            advertise_host=str(network.get("advertise_host") or "") if network.get("ok") else "",
+            sdk_source=str(payload.get("sdk_source") or settings["default_sdk_source"]),
+            sdk_ref=str(payload.get("sdk_ref") or ""),
+            seed_env=False,
+            prefix=prefix,
+        )
+        result.setdefault("name", agent["name"])
+        result["endpoint"] = str((endpoint or {}).get("url") or agent.get("endpoint") or "")
+        result["description"] = str(parsed.get("description") or agent.get("description") or "")
+        record = await in_thread(store.upsert_agent, int(machine["id"]), result)
+        bus.publish({"type": "agents"})
+        return JSONResponse({"agent": record, "result": result,
+                             "refreshed_env": refreshed,
+                             "kept_address": bool(network.get("ok"))})
 
     @guard
     async def delete_agent(request: Request) -> Response:
@@ -441,11 +615,38 @@ def create_app(cp: "ControlPlane") -> Starlette:
             driver.read_agent_files, machine, str(agent["prefix"] or "")
         )
         parsed = agent_config.parse(files["yaml"])
+        # agent.yaml is the authority on where the model runs, so a read is
+        # also the chance to correct the stored endpoint — including for agents
+        # installed before the board tracked one.
+        endpoint = str((parsed.get("endpoint") or {}).get("url") or "") \
+            if isinstance(parsed.get("endpoint"), dict) else ""
+        if endpoint != str(agent["endpoint"] or ""):
+            await in_thread(store.set_agent_endpoint, int(agent["id"]), endpoint)
+            agent = dict(agent, endpoint=endpoint)
         status = await in_thread(
             driver.supervisor_action, machine, str(agent["prefix"] or ""),
             agent["name"], "status",
         )
+        provider = str(parsed.get("provider") or agent.get("provider") or "")
+        try:
+            env_names = await in_thread(
+                driver.env_names, machine, str(agent["prefix"] or ""))
+        except MachineError:
+            env_names = []
+        try:
+            network = await in_thread(
+                driver.agent_network, machine, str(agent["prefix"] or ""), agent["name"])
+        except MachineError as exc:
+            network = {"ok": False, "error": exc.detail()}
         return JSONResponse({
+            # Where it binds and what its card publishes, read from the files
+            # the running process was started from.
+            "network": network,
+            # Names only, never values: enough to say whether a key is set.
+            "env_names": env_names,
+            "key_name": key_name_for(provider),
+            "key_names": {p: key_name_for(p)
+                          for p in ("openai", "google", "anthropic", "vllm")},
             "agent": agent,
             "prefix": agent["prefix"],
             "yaml": files["yaml"],
@@ -463,6 +664,157 @@ def create_app(cp: "ControlPlane") -> Starlette:
         })
 
     @guard
+    async def relay_file(request: Request) -> Response:
+        """
+        Pass a shared file through from the agent that owns it.
+
+        For readers that cannot reach the owner themselves — this board's
+        page, and agents on another network. Nothing is stored: the response
+        streams as it arrives.
+
+        Not an open proxy: the link must be a /files/ link whose address is a
+        registered agent's, and the request goes to that agent's recorded
+        address, never to whatever host the link names. The owner still checks
+        the link's signature and expiry itself.
+        """
+        link = str(request.query_params.get("url") or "")
+        parsed = urlparse(link)
+        match = SHARE_PATH_RE.match(parsed.path or "")
+        if parsed.scheme not in ("http", "https") or not match:
+            raise ValueError("not a shared-file link (expected …/files/<id>?exp=…&sig=…)")
+        wanted = _netloc(link)
+        owner = next((a for a in store.agents() if _netloc(str(a.get("url") or "")) == wanted), None)
+        if owner is None:
+            raise LookupError(f"no agent on this board serves {wanted}")
+        target = f"{str(owner['url']).rstrip('/')}/files/{match.group(1)}"
+        client = httpx.AsyncClient(timeout=httpx.Timeout(30, read=120))
+        try:
+            upstream = await client.send(
+                client.build_request("GET", target, params=dict(
+                    exp=request.query_params.get("exp") or parse_qs_one(parsed.query, "exp"),
+                    sig=request.query_params.get("sig") or parse_qs_one(parsed.query, "sig"),
+                )),
+                stream=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — reported to the reader
+            await client.aclose()
+            return JSONResponse(
+                {"error": f"could not reach {owner['qualified']}: {type(exc).__name__}"},
+                status_code=502)
+
+        async def close():
+            await upstream.aclose()
+            await client.aclose()
+
+        # aiter_bytes undoes any Content-Encoding, so a compressed length
+        # would no longer match what is sent; let the server count it then.
+        keep = {"content-type", "content-disposition"}
+        if not upstream.headers.get("content-encoding"):
+            keep.add("content-length")
+        passed = {k: v for k, v in upstream.headers.items() if k.lower() in keep}
+        passed["Cache-Control"] = "no-store"
+        passed["X-Content-Type-Options"] = "nosniff"
+        passed["X-Shared-By"] = str(owner["qualified"])
+        return StreamingResponse(upstream.aiter_bytes(), status_code=upstream.status_code,
+                                 headers=passed, background=BackgroundTask(close))
+
+    @guard
+    async def agent_models(request: Request) -> Response:
+        """
+        Models this agent's endpoint serves, for the settings form's picker.
+
+        Asked from the agent's machine with the key in its own .env, so the
+        board never handles the key. ``provider`` and ``endpoint`` in the query
+        reflect unsaved edits in the form; otherwise the saved ones are used.
+        """
+        agent, machine = _agent_and_machine(int(request.path_params["agent_id"]))
+        provider = (request.query_params.get("provider")
+                    or str(agent.get("provider") or "")).strip().lower()
+        if provider not in model_catalog.LISTABLE:
+            return JSONResponse({"ok": False, "models": [], "error":
+                                 f"model listing is not available for {provider or 'this provider'}"})
+        endpoint = (request.query_params.get("endpoint")
+                    or str(agent.get("endpoint") or "")
+                    or model_catalog.PROVIDER_ENDPOINTS.get(provider, "")).strip().rstrip("/")
+        if not endpoint:
+            return JSONResponse({"ok": False, "models": [],
+                                 "error": "enter the endpoint URL to list its models"})
+        key_name = key_name_for(provider)
+        try:
+            reply = await in_thread(driver.list_models_on_machine, machine,
+                                    str(agent["prefix"] or ""), endpoint, key_name)
+        except MachineError as exc:
+            return JSONResponse({"ok": False, "models": [], "endpoint": endpoint,
+                                 "error": exc.detail()[:300]})
+        if reply.get("ok"):
+            return JSONResponse({"ok": True, "endpoint": endpoint, "error": "",
+                                 "models": model_catalog.chat_models(provider, reply["ids"])})
+        if reply.get("status") in (401, 403):
+            error = (f"the endpoint rejected the agent's {key_name}" if reply.get("has_key")
+                     else f"{key_name} is not set for this agent — add it above")
+        elif reply.get("status"):
+            error = f"{endpoint}/models answered {reply['status']}"
+        else:
+            error = (f"could not reach {endpoint} from {machine['name']}: "
+                     f"{reply.get('error', 'no reply')}")
+        return JSONResponse({"ok": False, "models": [], "endpoint": endpoint, "error": error})
+
+    @guard
+    async def agent_metrics(request: Request) -> Response:
+        """
+        What each agent's model server is doing, grouped by endpoint.
+
+        Grouped rather than listed per agent because that is the shape of the
+        underlying fact: two agents pointed at one single-slot server are not
+        two independent model servers, and their turns serialise. The grouping
+        makes that visible instead of showing the same numbers twice.
+
+        Endpoints are learned at create time and corrected whenever an
+        agent.yaml is read; an agent with none reports as unknown rather than
+        being silently dropped.
+        """
+        agents = await in_thread(store.agents)
+        # Two different questions, so two different sources: the agent knows
+        # how much history it prefixes to a request, the server knows what it
+        # did with the one it received.
+        contexts = await model_metrics.contexts_for(agents)
+        groups: Dict[str, Any] = {}
+        for agent in agents:
+            endpoint = str(agent.get("endpoint") or "")
+            entry = groups.setdefault(endpoint, {"endpoint": endpoint, "agents": []})
+            entry["agents"].append({
+                "id": agent["id"], "qualified": agent["qualified"],
+                "model": agent["model"], "provider": agent["provider"],
+                "ready": bool(agent["ready"]),
+                "context": contexts.get(int(agent["id"]), {}),
+            })
+
+        reports = await model_metrics.probe_all(
+            [e for e in groups if e], sampler=sampler,
+        )
+        by_url = {str(r.get("endpoint")): r for r in reports}
+        servers = []
+        for endpoint, entry in sorted(groups.items()):
+            report = dict(by_url.get(endpoint) or {})
+            if not endpoint:
+                report = {
+                    "endpoint": "", "reachable": False,
+                    "error": "no endpoint recorded — open ⚙ Settings for one of "
+                             "these agents and the board will learn it",
+                }
+            report["agents"] = entry["agents"]
+            # Two agents on one endpoint share its slots; say so once here
+            # rather than leaving it to be inferred from the numbers.
+            report["shared"] = len(entry["agents"]) > 1
+            servers.append(report)
+        return JSONResponse({
+            "servers": servers,
+            # Flat, keyed by agent id, so the agents table can show a context
+            # column without walking the grouping.
+            "contexts": {str(k): v for k, v in contexts.items()},
+        })
+
+    @guard
     async def put_agent_config(request: Request) -> Response:
         """
         Save agent.yaml (and instructions.md), then restart so it takes effect.
@@ -475,34 +827,91 @@ def create_app(cp: "ControlPlane") -> Starlette:
         prefix = str(agent["prefix"] or "")
 
         current = await in_thread(driver.read_agent_files, machine, prefix)
-        try:
-            text, warnings = agent_config.prepare(
-                current["yaml"],
-                agent["name"],
-                raw=payload.get("yaml"),
-                updates=payload.get("properties"),
-            )
-        except agent_config.ConfigError as exc:
-            raise ValueError(str(exc)) from exc
+        # A save may change only the key or the address; agent.yaml is then
+        # left exactly as it is rather than refused as "nothing to save".
+        touches_yaml = payload.get("yaml") is not None or bool(payload.get("properties"))
+        if not touches_yaml and (payload.get("api_key") or payload.get("network")):
+            text, warnings = current["yaml"], []
+        else:
+            try:
+                text, warnings = agent_config.prepare(
+                    current["yaml"],
+                    agent["name"],
+                    raw=payload.get("yaml"),
+                    updates=payload.get("properties"),
+                )
+            except agent_config.ConfigError as exc:
+                raise ValueError(str(exc)) from exc
 
         instructions = payload.get("instructions")
         if instructions is not None and instructions == current["instructions"]:
             instructions = None                      # nothing changed, skip the write
 
+        # A new key is checked before anything is written, so a rejected one
+        # does not leave the config saved and the key not.
+        api_key = str(payload.get("api_key") or "").strip()
+        if api_key and (any(ch.isspace() for ch in api_key)
+                        or any(c in api_key for c in "'\"\\$`")):
+            raise ValueError("the API key must be a single token without spaces, "
+                             "quotes, '$', '`' or backslashes")
+
+        network = payload.get("network") or {}
+        for field in ("bind_host", "advertise_host"):
+            value = str(network.get(field) or "").strip()
+            if value and not HOST_RE.match(value):
+                raise ValueError(f"'{value}' is not a usable address for {field}")
+
         written = await in_thread(
-            driver.write_agent_files, machine, prefix, text, instructions
+            driver.write_agent_files, machine, prefix,
+            text if touches_yaml else None, instructions,
         )
+        if api_key:
+            # Named after the provider in the config just written, so switching
+            # provider and pasting its key in one save lands in the right place.
+            key_name = key_name_for(str(agent_config.parse(text).get("provider") or ""))
+            await in_thread(driver.set_env_var, machine, prefix, key_name, api_key)
+            written = dict(written, written=list(written.get("written", [])) + [f".env ({key_name})"])
+
+        # Bind address / published URL. Validated before anything else is
+        # touched below, applied after the config, and it restarts the agent
+        # itself: a new HOST is only read when supervisord re-creates the
+        # process, so it cannot wait for the restart checkbox.
+        network_result: Dict[str, Any] = {}
+        if network:
+            network_result = await in_thread(
+                driver.agent_network, machine, prefix, agent["name"],
+                str(network.get("bind_host") or "").strip(),
+                str(network.get("advertise_host") or "").strip(),
+                True,
+            )
+            if not network_result.get("ok"):
+                warnings.append(f"address not changed: {network_result.get('error', '')}")
+            else:
+                await in_thread(store.set_agent_url, int(agent["id"]), network_result["url"])
+                agent = dict(agent, url=network_result["url"],
+                             agent_card=f"{network_result['url']}.well-known/agent-card.json")
+                written = dict(written, written=list(written.get("written", []))
+                               + ["supervisor program", "run_server.py", ".agent-meta"])
 
         restart = {}
-        if payload.get("restart", True):
+        if network_result.get("ok"):
+            restart = await in_thread(
+                driver.apply_service_change, machine, prefix, agent["name"])
+            if not restart.get("ok"):
+                warnings.append(
+                    f"address saved, but supervisord could not apply it: "
+                    f"{restart.get('output', '')[:600]}")
+        elif payload.get("restart", True):
             restart = await in_thread(
                 driver.supervisor_action, machine, prefix, agent["name"], "restart"
             )
             if not restart.get("ok"):
-                warnings.append(
-                    f"saved, but the restart failed: {restart.get('output', '')[:200]} "
-                    f"— the agent is still running its old config"
-                )
+                output = str(restart.get("output", ""))
+                # "Still running its old config" is only true while supervisord
+                # is; when it is down, the agent is not running at all.
+                tail = "" if "supervisord is not running" in output \
+                    else " — the agent is still running its old config"
+                warnings.append(f"saved, but the restart failed: {output[:600]}{tail}")
 
         # Keep the record in step with the file the agent will now read.
         parsed = agent_config.parse(text)
@@ -519,6 +928,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
         bus.publish({"type": "agents"})
         return JSONResponse({
             "yaml": text, "written": written, "restart": restart, "warnings": warnings,
+            "network": network_result,
         })
 
     @guard
@@ -554,6 +964,16 @@ def create_app(cp: "ControlPlane") -> Starlette:
         await in_thread(store.delete_channel, channel_id)
         bus.publish({"type": "channels"})
         return JSONResponse({"deleted": channel_id})
+
+    @guard
+    async def clear_channel(request: Request) -> Response:
+        """Clear conversation: transcript plus each member's history of it."""
+        return JSONResponse(await router.clear_channel(int(request.path_params["channel_id"])))
+
+    @guard
+    async def clear_agent_context(request: Request) -> Response:
+        """Clear context: one agent forgets every channel's conversation."""
+        return JSONResponse(await router.clear_agent(int(request.path_params["agent_id"])))
 
     @guard
     async def join_channel(request: Request) -> Response:
@@ -783,6 +1203,78 @@ def create_app(cp: "ControlPlane") -> Starlette:
         )
         return JSONResponse({"message": message})
 
+    # -- logs -------------------------------------------------------------
+
+    @guard
+    async def control_logs(request: Request) -> Response:
+        """This process's recent log records; ?after=<seq> for only new ones."""
+        q = request.query_params
+        try:
+            after = int(q.get("after") or 0)
+            limit = int(q.get("limit") or 500)
+        except ValueError:
+            raise ValueError("'after' and 'limit' must be integers")
+        return JSONResponse(cp.logbook.read(
+            after=after, level=q.get("level") or "", query=q.get("q") or "", limit=limit))
+
+    @guard
+    async def agent_logs(request: Request) -> Response:
+        """Tail of an agent's stdout / stderr, or its machine's supervisord log."""
+        agent, machine = _agent_and_machine(int(request.path_params["agent_id"]))
+        q = request.query_params
+        try:
+            lines = int(q.get("lines") or 200)
+        except ValueError:
+            raise ValueError("'lines' must be an integer")
+        result = await in_thread(
+            driver.agent_logs, machine, str(agent["prefix"] or ""), agent["name"],
+            stream=q.get("stream") or "stderr", lines=lines,
+        )
+        return JSONResponse(dict(result, agent=agent["name"],
+                                 machine=machine.get("name")))
+
+    def attachment(text: str, filename: str, extra: Optional[Dict[str, str]] = None) -> Response:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
+        headers = {"Content-Disposition": f'attachment; filename="{safe}"'}
+        headers.update(extra or {})
+        return Response(text, media_type="text/plain; charset=utf-8", headers=headers)
+
+    @guard
+    async def control_log_download(request: Request) -> Response:
+        """
+        control.log as a file. Falls back to the in-memory records when there
+        is no file (it could not be created), so a download never comes back
+        empty-handed while the buffer holds something.
+        """
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = cp.logbook.file_path
+        if path and Path(path).is_file():
+            for handler in logging.getLogger().handlers:
+                if getattr(handler, "baseFilename", None) == str(Path(path).resolve()):
+                    handler.flush()
+            text = await in_thread(Path(path).read_text, encoding="utf-8", errors="replace")
+        else:
+            records = cp.logbook.read(limit=logbook.CAPACITY)["records"]
+            text = "".join(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r['ts']))} - "
+                f"{r['logger']} - {r['level']} - {r['message']}\n" for r in records)
+        return attachment(text, f"agents-control-{stamp}.log")
+
+    @guard
+    async def agent_log_download(request: Request) -> Response:
+        """One of an agent's logs, whole (up to the driver's cap), as a file."""
+        agent, machine = _agent_and_machine(int(request.path_params["agent_id"]))
+        stream = request.query_params.get("stream") or "stderr"
+        result = await in_thread(
+            driver.agent_log_file, machine, str(agent["prefix"] or ""), agent["name"],
+            stream=stream,
+        )
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        extra = {"X-Log-Truncated": "1"} if result["truncated"] else {}
+        return attachment(
+            result["text"],
+            f"{agent['name']}.{machine.get('name')}-{stream}-{stamp}.log", extra)
+
     # -- SSE --------------------------------------------------------------
 
     async def events(request: Request) -> Response:
@@ -818,12 +1310,23 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/machines/{machine_id:int}/interfaces",
               machine_interfaces, methods=["POST"]),
         Route("/api/agents", create_agent, methods=["POST"]),
+        Route("/api/models", list_models, methods=["POST"]),
+        Route("/api/files/relay", relay_file),
         Route("/api/agents/{agent_id:int}", delete_agent, methods=["DELETE"]),
+        Route("/api/agents/metrics", agent_metrics),
+        Route("/api/logs", control_logs),
+        Route("/api/logs/download", control_log_download),
+        Route("/api/agents/{agent_id:int}/logs", agent_logs),
+        Route("/api/agents/{agent_id:int}/logs/download", agent_log_download),
         Route("/api/agents/{agent_id:int}/config", get_agent_config),
+        Route("/api/agents/{agent_id:int}/models", agent_models),
         Route("/api/agents/{agent_id:int}/config", put_agent_config, methods=["PUT"]),
         Route("/api/agents/{agent_id:int}/action", agent_action, methods=["POST"]),
         Route("/api/channels", create_channel, methods=["POST"]),
         Route("/api/channels/{channel_id:int}", delete_channel, methods=["DELETE"]),
+        Route("/api/channels/{channel_id:int}/clear", clear_channel, methods=["POST"]),
+        Route("/api/agents/{agent_id:int}/clear-context", clear_agent_context, methods=["POST"]),
+        Route("/api/agents/{agent_id:int}/reinstall", reinstall_agent, methods=["POST"]),
         Route("/api/channels/{channel_id:int}/members", join_channel, methods=["POST"]),
         Route("/api/channels/{channel_id:int}/members/{agent_id:int}",
               leave_channel, methods=["DELETE"]),
@@ -840,6 +1343,6 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/peer/preflight", peer_preflight),
         Route("/api/peer/log", peer_log, methods=["POST"]),
         Route("/api/events", events),
-        Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
+        Mount("/static", app=FreshStaticFiles(directory=str(STATIC_DIR)), name="static"),
     ]
     return Starlette(routes=routes)

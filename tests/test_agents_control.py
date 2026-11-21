@@ -3,8 +3,11 @@
 import asyncio
 import json
 import logging
+import os
+import time
 from pathlib import Path
 
+import httpx
 import pytest
 from a2a.types import TaskState
 from starlette.testclient import TestClient
@@ -21,6 +24,7 @@ from declarative_agent_sdk.agents_control.router import (
     mentions,
     resolve_member,
 )
+from declarative_agent_sdk.agents_control import metrics
 from declarative_agent_sdk.agents_control.server import ControlPlane
 from declarative_agent_sdk.agents_control.store import Store
 
@@ -55,9 +59,9 @@ class TestStore:
     def test_settings_are_seeded(self, store):
         settings = store.settings()
         assert settings["default_framework"] == "lean"
-        # the board tools are core on a board, so they are deliberately absent
-        assert "send_to_agent" not in settings["default_tools"]
-        assert "exec_command" in settings["default_tools"]
+        # web_request, exec_command, send_to_agent ... are core, so there is
+        # no default tools list to seed
+        assert "default_tools" not in settings
 
     def test_update_settings_ignores_unknown_keys(self, store):
         updated = store.update_settings({"default_model": "gpt-4o", "nonsense": 1})
@@ -516,11 +520,11 @@ class TestSendToAgentTool:
     def _tool(cls):
         return cls._module().send_to_agent
 
-    def test_registered_as_a_non_core_builtin(self):
+    def test_registered_as_a_core_builtin(self):
         from declarative_agent_sdk.tools.tool_registry import ToolRegistry
         ToolRegistry.register_built_in_tools()
         assert "send_to_agent" in ToolRegistry.list_available()
-        assert "send_to_agent" not in ToolRegistry.CORE_TOOL_NAMES
+        assert "send_to_agent" in ToolRegistry.CORE_TOOL_NAMES
 
     def test_board_plumbing_is_not_offered_as_tools(self):
         """_board.py is a private module: its helpers must not become tools."""
@@ -944,6 +948,35 @@ class TestAgentConfigApi:
         # the store now matches what the agent will read
         assert plane.store.agent(agent["id"])["model"] == "gpt-4o-mini"
         assert "endpoint" not in response.json()["yaml"]
+
+    def test_get_reports_key_status_never_the_key(self, client, agent):
+        Path(agent["prefix"], ".env").write_text("OPENAI_API_KEY=sk-secret\n")
+        response = client.get(f"/api/agents/{agent['id']}/config", headers=AUTH)
+        data = response.json()
+        assert data["key_name"] == "OPENAI_API_KEY"          # vllm reads this one
+        assert data["env_names"] == ["OPENAI_API_KEY"]
+        assert "sk-secret" not in response.text
+
+    def test_put_with_a_key_lands_under_the_new_provider(self, client, agent):
+        response = client.put(f"/api/agents/{agent['id']}/config", json={
+            "properties": {"provider": "anthropic"}, "api_key": "sk-ant-1",
+            "restart": False,
+        }, headers=AUTH)
+        assert response.status_code == 200
+        assert "sk-ant-1" not in response.text
+        env = Path(agent["prefix"], ".env").read_text()
+        assert "ANTHROPIC_API_KEY=sk-ant-1" in env
+        assert "sk-ant-1" not in Path(agent["prefix"], "agent.yaml").read_text()
+
+    def test_put_with_a_bad_key_writes_nothing(self, client, agent):
+        before = Path(agent["prefix"], "agent.yaml").read_text()
+        response = client.put(f"/api/agents/{agent['id']}/config", json={
+            "properties": {"model": "changed"}, "api_key": "has space",
+            "restart": False,
+        }, headers=AUTH)
+        assert response.status_code == 400
+        assert Path(agent["prefix"], "agent.yaml").read_text() == before
+        assert not Path(agent["prefix"], ".env").exists()
 
     def test_put_raw_yaml_is_written_verbatim(self, client, agent, tmp_path):
         raw = "# my own comment\nname: coder\nprovider: openai\nmodel: gpt-4o\n"
@@ -1598,7 +1631,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
     --env-file) ENV_FILE="$2"; shift 2 ;;
-    --json|--no-approval) shift ;;
+    --json|--no-approval|--enable-at-boot) shift ;;
     *) shift 2 ;;
   esac
 done
@@ -1657,6 +1690,13 @@ class TestEnvFileHandoff:
         install = next(c for c in sent if "install.sh" in c)
         assert '--env-file "$HOME/.agents-control/env.researcher"' in install
         assert "--env-file '" not in install     # the bug
+
+    def test_installs_ask_for_start_at_boot(self, stub):
+        """Without it an agent is gone after the machine reboots."""
+        driver, sent = self._capture()
+        driver.create_agent(self.REMOTE, name="researcher")
+        install = next(c for c in sent if "install.sh" in c)
+        assert "--enable-at-boot" in install
 
     def test_the_file_is_written_where_install_sh_will_look(self, stub):
         driver, sent = self._capture()
@@ -2482,17 +2522,17 @@ class TestBoardToolsAreCore:
         names = self._registry().core_tool_names()
         assert "send_to_agent" in names and "list_agents" in names
 
-    def test_they_are_absent_off_a_board(self, monkeypatch):
-        """Off a board they could only report that there is no board."""
+    def test_list_agents_is_absent_off_a_board(self, monkeypatch):
+        """Off a board list_agents could only report that there is no board."""
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         names = self._registry().core_tool_names()
-        assert "send_to_agent" not in names and "list_agents" not in names
-        assert names == ["read_file", "write_file"]
+        assert "list_agents" not in names
+        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared"]
 
     def test_core_tools_returns_the_callables(self, monkeypatch):
         monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
         got = [fn.__name__ for fn in self._registry().core_tools()]
-        assert got == ["read_file", "write_file", "send_to_agent", "list_agents"]
+        assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared", "list_agents"]
 
     def test_the_lean_runtime_registers_them(self, tmp_path, monkeypatch):
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
@@ -2511,7 +2551,7 @@ class TestBoardToolsAreCore:
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
-        assert "send_to_agent" not in registry.names()
+        assert "send_to_agent" in registry.names()
         assert "list_agents" not in registry.names()
 
     def test_listing_them_anyway_does_not_duplicate(self, tmp_path, monkeypatch):
@@ -2797,17 +2837,17 @@ class TestBoardToolsAreCore:
         names = self._registry().core_tool_names()
         assert "send_to_agent" in names and "list_agents" in names
 
-    def test_they_are_absent_off_a_board(self, monkeypatch):
-        """Off a board they could only report that there is no board."""
+    def test_list_agents_is_absent_off_a_board(self, monkeypatch):
+        """Off a board list_agents could only report that there is no board."""
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         names = self._registry().core_tool_names()
-        assert "send_to_agent" not in names and "list_agents" not in names
-        assert names == ["read_file", "write_file"]
+        assert "list_agents" not in names
+        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared"]
 
     def test_core_tools_returns_the_callables(self, monkeypatch):
         monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
         got = [fn.__name__ for fn in self._registry().core_tools()]
-        assert got == ["read_file", "write_file", "send_to_agent", "list_agents"]
+        assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared", "list_agents"]
 
     def test_the_lean_runtime_registers_them(self, tmp_path, monkeypatch):
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
@@ -2826,7 +2866,7 @@ class TestBoardToolsAreCore:
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
-        assert "send_to_agent" not in registry.names()
+        assert "send_to_agent" in registry.names()
         assert "list_agents" not in registry.names()
 
     def test_listing_them_anyway_does_not_duplicate(self, tmp_path, monkeypatch):
@@ -3384,3 +3424,1230 @@ class TestTranscriptSlots:
 
         prompt = router._prompt_for(cid, "a.here", "now convert it", "you")
         assert "workspace/p.md" in prompt
+# ---------------------------------------------------------------------------
+# model-server metrics
+# ---------------------------------------------------------------------------
+
+LLAMACPP_METRICS = """\
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 1.13378e+06
+# HELP llamacpp:prompt_tokens_cached_total Number of prompt tokens reused
+# TYPE llamacpp:prompt_tokens_cached_total counter
+llamacpp:prompt_tokens_cached_total 7.80234e+06
+llamacpp:prompt_seconds_total 857.147
+llamacpp:tokens_predicted_total 1.26773e+06
+llamacpp:tokens_predicted_seconds_total 27871.3
+llamacpp:predicted_tokens_seconds 46.9731
+llamacpp:prompt_tokens_seconds 1323.7
+llamacpp:requests_processing 0
+llamacpp:requests_deferred 0
+llamacpp:n_busy_slots_per_decode 1
+llamacpp:spec_decode_num_drafts_total 0
+"""
+
+# The shape /slots really returns, taken from a running server mid-request.
+BUSY_SLOT = [{
+    "id": 0, "n_ctx": 131072, "is_processing": True, "id_task": 1269278,
+    "n_prompt_tokens": 18144, "n_prompt_tokens_processed": 346,
+    "n_prompt_tokens_cache": 17487,
+    "params": {"n_predict": 32768, "temperature": 1.0},
+    "next_token": [{"has_next_token": True, "n_remain": 32457, "n_decoded": 311}],
+}]
+
+IDLE_SLOT = [dict(BUSY_SLOT[0], is_processing=False, n_prompt_tokens=21559,
+                  n_prompt_tokens_cache=0, n_prompt_tokens_processed=0,
+                  next_token=[{"n_remain": -1, "n_decoded": 0}])]
+
+
+class TestMetricsParsing:
+    def test_counters_and_gauges_are_read(self):
+        raw = metrics.parse_prometheus(LLAMACPP_METRICS)
+        assert raw["llamacpp:prompt_tokens_total"] == pytest.approx(1133780)
+        assert raw["llamacpp:requests_deferred"] == 0
+
+    def test_comments_are_not_metrics(self):
+        raw = metrics.parse_prometheus(LLAMACPP_METRICS)
+        assert not any(k.startswith("#") or k == "HELP" for k in raw)
+
+    def test_labelled_series_still_parse(self):
+        raw = metrics.parse_prometheus('vllm:prompt_tokens_total{model="x"} 42\n')
+        assert raw["vllm:prompt_tokens_total"] == 42
+
+    def test_nan_and_junk_are_skipped(self):
+        raw = metrics.parse_prometheus("a:b NaN\nnonsense\nc:d 3\n")
+        assert "c:d" in raw and "a:b" not in raw
+
+    def test_names_are_normalised(self):
+        values = metrics.normalise(metrics.parse_prometheus(LLAMACPP_METRICS))
+        assert values["predicted_tokens"] == pytest.approx(1267730)
+        assert values["decode_rate"] == pytest.approx(46.9731)
+
+    def test_vllm_maps_onto_the_same_shape(self):
+        values = metrics.normalise(metrics.parse_prometheus(
+            "vllm:generation_tokens_total 10\nvllm:num_requests_waiting 2\n"))
+        assert values == {"predicted_tokens": 10.0, "deferred": 2.0}
+
+    @pytest.mark.parametrize("endpoint,expected", [
+        ("http://h:30081/v1", "http://h:30081"),
+        ("http://h:30081/v1/", "http://h:30081"),
+        ("http://h:30081/v1/chat/completions", "http://h:30081"),
+        ("http://h:11434/api", "http://h:11434"),
+        ("http://h:30081", "http://h:30081"),
+        ("", ""),
+    ])
+    def test_the_api_suffix_comes_off(self, endpoint, expected):
+        """Configs point at /v1; /metrics and /slots live at the root."""
+        assert metrics.base_url(endpoint) == expected
+
+
+class TestSlotContext:
+    def test_a_live_request_reports_its_prompt_size(self):
+        """The question 'what context is it passing?' is answered here."""
+        ctx = metrics._slot_context(BUSY_SLOT)
+        assert ctx["live"] is True
+        assert ctx["tokens"] == 18144
+        assert ctx["cached"] == 17487
+        assert ctx["processed"] == 346
+        assert ctx["fill"] == pytest.approx(18144 / 131072, abs=1e-4)
+        assert ctx["decoded"] == 311
+        assert ctx["max_tokens"] == 32768
+
+    def test_an_idle_slot_keeps_the_last_prompt_but_not_the_zeros(self):
+        """
+        llama.cpp zeroes the cache split when the request ends. Reporting that
+        as 'nothing was cached' would be a false claim about the model.
+        """
+        ctx = metrics._slot_context(IDLE_SLOT)
+        assert ctx["live"] is False
+        assert ctx["tokens"] == 21559
+        assert "cached" not in ctx and "decoded" not in ctx
+
+    def test_the_busy_slot_wins_over_an_idle_one(self):
+        ctx = metrics._slot_context(IDLE_SLOT + BUSY_SLOT)
+        assert ctx["tokens"] == 18144
+
+    def test_slots_are_counted(self):
+        ctx = metrics._slot_context(BUSY_SLOT + IDLE_SLOT)
+        assert (ctx["slots_busy"], ctx["slots_total"]) == (1, 2)
+
+    def test_no_slots_is_not_an_error(self):
+        assert metrics._slot_context([]) == {}
+        assert metrics._slot_context({"error": "disabled"}) == {}
+
+
+class TestWindowedRates:
+    """
+    Lifetime throughput hides the thing being diagnosed: 46 tok/s averaged over
+    every high-context turn ever served says nothing about this one.
+    """
+
+    def test_a_window_gives_tokens_per_second_of_model_time(self):
+        before = {"at": time.time() - 30,
+                  "metrics": {"predicted_tokens": 1000.0, "predicted_seconds": 20.0}}
+        rates = metrics._rates({"predicted_tokens": 1600.0, "predicted_seconds": 30.0},
+                               before)
+        assert rates["decode_rate"] == pytest.approx(60.0)   # 600 tokens / 10s
+        assert rates["decode_tokens"] == 600
+
+    def test_a_window_with_no_completion_reports_nothing(self):
+        """Counters move only when a request finishes — absent, not 0 tok/s."""
+        before = {"at": time.time() - 30, "metrics": {"predicted_tokens": 1000.0,
+                                                      "predicted_seconds": 20.0}}
+        rates = metrics._rates({"predicted_tokens": 1000.0, "predicted_seconds": 20.0},
+                               before)
+        assert "decode_rate" not in rates
+
+    def test_a_restarted_server_does_not_invent_a_rate(self):
+        before = {"at": time.time() - 30, "metrics": {"predicted_tokens": 9000.0,
+                                                      "predicted_seconds": 90.0}}
+        assert "decode_rate" not in metrics._rates(
+            {"predicted_tokens": 10.0, "predicted_seconds": 1.0}, before)
+
+    def test_a_stale_sample_is_not_a_window(self):
+        before = {"at": time.time() - (metrics.SAMPLE_MAX_AGE + 60),
+                  "metrics": {"predicted_tokens": 1.0, "predicted_seconds": 1.0}}
+        assert metrics._rates({"predicted_tokens": 500.0, "predicted_seconds": 10.0},
+                              before) == {}
+
+    def test_the_first_reading_has_no_window(self):
+        assert metrics._rates({"predicted_tokens": 5.0}, None) == {}
+
+    def test_the_sampler_hands_back_the_previous_reading(self):
+        sampler = metrics.Sampler()
+        assert sampler.take("http://h", {"predicted_tokens": 1.0}) is None
+        before = sampler.take("http://h", {"predicted_tokens": 2.0})
+        assert before["metrics"] == {"predicted_tokens": 1.0}
+
+    def test_endpoints_are_sampled_apart(self):
+        sampler = metrics.Sampler()
+        sampler.take("http://a", {"predicted_tokens": 1.0})
+        assert sampler.take("http://b", {"predicted_tokens": 9.0}) is None
+
+
+class TestProbe:
+    """Against a stub server, so the suite does not need a GPU box."""
+
+    @staticmethod
+    def _handler(routes):
+        def handle(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path not in routes:
+                return httpx.Response(404)
+            status, payload = routes[path]
+            if isinstance(payload, str):
+                return httpx.Response(status, text=payload)
+            return httpx.Response(status, json=payload)
+        return handle
+
+    async def _probe(self, routes, sampler=None):
+        transport = httpx.MockTransport(self._handler(routes))
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await metrics.probe(client, "http://box:30081/v1", sampler)
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_server_reports_everything(self):
+        report = await self._probe({
+            "/props": (200, {"model_alias": "qwen:IQ3_S", "total_slots": 1,
+                             "default_generation_settings": {"n_ctx": 131072}}),
+            "/metrics": (200, LLAMACPP_METRICS),
+            "/slots": (200, BUSY_SLOT),
+        })
+        assert report["reachable"] is True
+        assert report["model"] == "qwen:IQ3_S"
+        assert report["n_ctx"] == 131072
+        assert report["context"]["tokens"] == 18144
+        assert report["metrics"]["decode_rate"] == pytest.approx(46.9731)
+        # 7.80M reused against 1.13M computed
+        assert report["cache_hit_ratio"] == pytest.approx(0.873, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_endpoint_is_a_result_not_an_exception(self):
+        def refuse(request):
+            raise httpx.ConnectError("connection refused")
+        transport = httpx.MockTransport(refuse)
+        async with httpx.AsyncClient(transport=transport) as client:
+            report = await metrics.probe(client, "http://box:30081/v1")
+        assert report["reachable"] is False
+        assert "ConnectError" in report["error"]
+
+    @pytest.mark.asyncio
+    async def test_metrics_disabled_costs_only_the_metrics(self):
+        """llama.cpp needs --metrics; without it the rest still reads."""
+        report = await self._probe({
+            "/props": (200, {"model_alias": "m", "total_slots": 1}),
+            "/metrics": (404, "not found"),
+            "/slots": (200, BUSY_SLOT),
+        })
+        assert "--metrics" in report["metrics_note"]
+        assert report["context"]["tokens"] == 18144
+        assert "metrics" not in report
+
+    @pytest.mark.asyncio
+    async def test_no_slots_costs_only_the_context(self):
+        report = await self._probe({
+            "/props": (200, {"model_alias": "m"}),
+            "/metrics": (200, LLAMACPP_METRICS),
+            "/slots": (501, "slots disabled"),
+        })
+        assert "--no-slots" in report["slots_note"]
+        assert "context" not in report
+        assert report["metrics"]["decode_rate"] == pytest.approx(46.9731)
+
+    @pytest.mark.asyncio
+    async def test_a_server_with_no_known_metrics_says_so(self):
+        report = await self._probe({
+            "/props": (200, {}),
+            "/metrics": (200, "some_other_project_tokens 5\n"),
+            "/slots": (404, ""),
+        })
+        assert report["metrics_note"] == "no recognised metrics at /metrics"
+
+    @pytest.mark.asyncio
+    async def test_a_blank_endpoint_is_reported_not_fetched(self):
+        async with httpx.AsyncClient() as client:
+            report = await metrics.probe(client, "")
+        assert report["reachable"] is False
+        assert report["error"] == "no endpoint configured"
+
+    @pytest.mark.asyncio
+    async def test_probe_all_dedupes_shared_endpoints(self):
+        """Two agents on one server is one server, read once."""
+        seen = []
+
+        async def fake(client, endpoint, sampler=None, timeout=4.0):
+            seen.append(endpoint)
+            return {"endpoint": endpoint}
+
+        original = metrics.probe
+        metrics.probe = fake
+        try:
+            out = await metrics.probe_all(["http://a/v1", "http://a/v1", "http://b/v1", ""])
+        finally:
+            metrics.probe = original
+        assert sorted(seen) == ["http://a/v1", "http://b/v1"]
+        assert len(out) == 2
+
+
+class TestMetricsRoute:
+    @pytest.fixture
+    def two_agents(self, plane):
+        """Two agents sharing one endpoint, which is the interesting case."""
+        store = plane.store
+        machine = store.add_machine("box", "box", ssh_user="u")
+        for name in ("researcher", "reviewer"):
+            store.upsert_agent(int(machine["id"]), {
+                "name": name, "model": "qwen", "provider": "vllm", "ready": True,
+                "endpoint": "http://10.0.0.147:30081/v1",
+            })
+        return plane
+
+    def test_the_endpoint_is_remembered_from_the_agent_record(self, two_agents):
+        agents = two_agents.store.agents()
+        assert {a["endpoint"] for a in agents} == {"http://10.0.0.147:30081/v1"}
+
+    def test_a_blank_endpoint_does_not_erase_a_known_one(self, two_agents):
+        """install.sh --list reports no endpoint; a refresh must not lose it."""
+        store = two_agents.store
+        machine = store.machines()[0]
+        store.upsert_agent(int(machine["id"]), {"name": "researcher", "ready": True})
+        assert store.agent_by_name(int(machine["id"]), "researcher")["endpoint"] == \
+            "http://10.0.0.147:30081/v1"
+
+    def test_agents_are_grouped_by_server_and_marked_shared(self, two_agents, monkeypatch):
+        async def fake_probe_all(endpoints, sampler=None, timeout=4.0):
+            return [{"endpoint": endpoints[0], "reachable": True, "model": "qwen",
+                     "context": {"tokens": 18144, "n_ctx": 131072, "live": True}}]
+        monkeypatch.setattr(metrics, "probe_all", fake_probe_all)
+
+        client = TestClient(two_agents.app)
+        servers = client.get("/api/agents/metrics", headers=AUTH).json()["servers"]
+        assert len(servers) == 1
+        assert servers[0]["shared"] is True
+        assert servers[0]["context"]["tokens"] == 18144
+        assert {a["qualified"] for a in servers[0]["agents"]} == \
+            {"researcher.box", "reviewer.box"}
+
+    def test_an_agent_with_no_endpoint_is_listed_as_unknown(self, plane, monkeypatch):
+        """Dropping it would hide the agent; it is the endpoint that is missing."""
+        async def nothing(endpoints, sampler=None, timeout=4.0):
+            return []
+        monkeypatch.setattr(metrics, "probe_all", nothing)
+        machine = plane.store.add_machine("box", "b", ssh_user="u")
+        plane.store.upsert_agent(int(machine["id"]), {"name": "solo", "ready": True})
+
+        servers = TestClient(plane.app).get(
+            "/api/agents/metrics", headers=AUTH).json()["servers"]
+        assert len(servers) == 1
+        assert servers[0]["reachable"] is False
+        assert "no endpoint recorded" in servers[0]["error"]
+        assert servers[0]["agents"][0]["qualified"] == "solo.box"
+
+    def test_it_needs_the_token(self, client):
+        assert client.get("/api/agents/metrics").status_code == 401
+
+    def test_the_route_is_not_swallowed_by_the_agent_id_route(self, client):
+        """'/api/agents/metrics' must not be read as an agent called 'metrics'."""
+        assert client.get("/api/agents/metrics", headers=AUTH).status_code == 200
+
+    def test_the_agents_tab_renders_the_cards(self):
+        root = Path(__file__).resolve().parents[1] / "agents_control" / "static"
+        html = (root / "index.html").read_text()
+        app_js = (root / "app.js").read_text()
+        assert 'id="server-cards"' in html
+        assert "/api/agents/metrics" in app_js
+        # polled only while the tab is open, and stopped when it is not
+        assert "startServerPolling" in app_js and "stopServerPolling" in app_js
+
+
+class TestAgentContext:
+    """
+    The per-agent figure: how much history it prefixes to every request.
+
+    Distinct from a server card, which reports whatever request that server
+    last handled — on a shared endpoint that could be either agent's.
+    """
+
+    @staticmethod
+    def _reply(payload, status=200):
+        def handle(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/context"
+            if isinstance(payload, str):
+                return httpx.Response(status, text=payload)
+            return httpx.Response(status, json=payload)
+        return httpx.MockTransport(handle)
+
+    async def _read(self, transport):
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await metrics.agent_context(client, "http://box:8001/")
+
+    @pytest.mark.asyncio
+    async def test_the_largest_session_is_surfaced(self):
+        report = await self._read(self._reply({
+            "supported": True, "history_limit": 48,
+            "sessions": [{"session": "a", "messages": 34, "chars": 112000,
+                          "prompt_tokens": 28100},
+                         {"session": "b", "messages": 2, "chars": 90}],
+        }))
+        assert report["top"]["prompt_tokens"] == 28100
+        assert report["session_count"] == 2
+        assert report["reachable"] is True
+
+    @pytest.mark.asyncio
+    async def test_an_agent_with_no_history_is_not_an_error(self):
+        report = await self._read(self._reply({"supported": True, "sessions": []}))
+        assert report["supported"] is True and report["top"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_older_agent_without_the_route_is_told_apart(self):
+        """404 means 'reinstall me', not 'I am broken'."""
+        report = await self._read(self._reply("nope", status=404))
+        assert report["supported"] is False
+        assert "reinstall" in report["error"]
+        # It answered, so it is up — only the route is missing.
+        assert report["reachable"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_agent_reports_the_connection(self):
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+        report = await self._read(httpx.MockTransport(refuse))
+        assert report["supported"] is False and "ConnectError" in report["error"]
+        # The board's status column overrides install-time `ready` with this.
+        assert report["reachable"] is False
+
+    @pytest.mark.asyncio
+    async def test_an_agent_with_no_address_is_not_fetched(self):
+        async with httpx.AsyncClient() as client:
+            report = await metrics.agent_context(client, "")
+        assert report["error"] == "no address for this agent"
+        assert report["reachable"] is False
+
+    @pytest.mark.asyncio
+    async def test_contexts_are_keyed_by_agent_id(self):
+        async def fake(client, url, timeout=4.0):
+            return {"supported": True, "url": url}
+        original = metrics.agent_context
+        metrics.agent_context = fake
+        try:
+            out = await metrics.contexts_for([{"id": 7, "url": "http://a:1"},
+                                              {"id": 9, "url": "http://b:1"}])
+        finally:
+            metrics.agent_context = original
+        assert out[7]["url"] == "http://a:1" and out[9]["url"] == "http://b:1"
+
+    def test_the_route_returns_it_per_agent(self, plane, monkeypatch):
+        async def fake_contexts(agents, timeout=4.0):
+            return {int(a["id"]): {"supported": True, "top": {"prompt_tokens": 28100}}
+                    for a in agents}
+        async def no_servers(endpoints, sampler=None, timeout=4.0):
+            return []
+        monkeypatch.setattr(metrics, "contexts_for", fake_contexts)
+        monkeypatch.setattr(metrics, "probe_all", no_servers)
+
+        machine = plane.store.add_machine("box", "b", ssh_user="u")
+        agent = plane.store.upsert_agent(int(machine["id"]),
+                                         {"name": "researcher", "url": "http://b:8001"})
+        data = TestClient(plane.app).get("/api/agents/metrics", headers=AUTH).json()
+        assert data["contexts"][str(agent["id"])]["top"]["prompt_tokens"] == 28100
+
+    def test_the_agents_table_has_a_context_column(self):
+        app_js = (Path(__file__).resolve().parents[1]
+                  / "agents_control" / "static" / "app.js").read_text()
+        assert "contextCell" in app_js
+        assert "'Context'" in app_js
+
+
+class TestAgentContextRoute:
+    """The agent's own side of it."""
+
+    @pytest.fixture
+    def served(self, tmp_path):
+        from declarative_agent_sdk.agents.lean.agent import LeanAIAgent
+        from declarative_agent_sdk.transports.a2a.server import AIAgentServer
+        agent = LeanAIAgent(
+            name="researcher", description="d", instruction_file=None, tools=[],
+            model="qwen", provider="vllm", endpoint_url="http://box:30081/v1",
+            workspace_directory=str(tmp_path / "ws"),
+            skills_directory=str(tmp_path / "skills"),
+        )
+        return agent, TestClient(AIAgentServer(agent, port=8111).app)
+
+    def test_it_reports_sizes(self, served):
+        agent, client = served
+        agent._loop._history["s"] = [{"role": "user", "content": "x" * 8000}]
+        data = client.get("/context").json()
+        assert data["supported"] is True
+        assert data["agent"] == "researcher"
+        assert data["sessions"][0]["chars"] == 8000
+        assert data["sessions"][0]["prompt_tokens"] > 2000
+
+    def test_delete_forgets_one_session(self, served):
+        agent, client = served
+        agent._loop._history["a"] = [{"role": "user", "content": "x"}]
+        agent._loop._history["b"] = [{"role": "user", "content": "y"}]
+        reply = client.delete("/context", params={"session": "a"})
+        assert reply.status_code == 200 and reply.json()["cleared"] == 1
+        assert list(agent._loop._history) == ["b"]
+        assert client.get("/context").json()["sessions"][0]["session"] == "b"
+
+    def test_delete_without_a_session_forgets_all(self, served):
+        agent, client = served
+        agent._loop._history["a"] = [{"role": "user", "content": "x"}]
+        agent._loop._history["b"] = [{"role": "user", "content": "y"}]
+        assert client.delete("/context").json()["cleared"] == 2
+        assert agent._loop._history == {}
+
+    def test_it_does_not_leak_the_conversation(self, served):
+        agent, client = served
+        agent._loop._history["s"] = [{"role": "user", "content": "swordfish"}]
+        assert "swordfish" not in client.get("/context").text
+
+    def test_a_runtime_that_cannot_answer_says_so(self, tmp_path):
+        """adk and deepagent keep history elsewhere; that is reported, not faked."""
+        from declarative_agent_sdk.transports.a2a.server import AIAgentServer
+
+        class Mute:
+            name = "mute"
+            agent_card = None
+
+        from declarative_agent_sdk.agents.lean.agent import LeanAIAgent
+        agent = LeanAIAgent(name="m", description="d", instruction_file=None,
+                            tools=[], model="q", provider="vllm",
+                            endpoint_url="http://b:1/v1",
+                            workspace_directory=str(tmp_path / "ws"),
+                            skills_directory=str(tmp_path / "sk"))
+        server = AIAgentServer(agent, port=8112)
+        # stand in for a runtime without the method
+        object.__setattr__(server, "_agent", Mute())
+        data = TestClient(server.app).get("/context").json()
+        assert data["supported"] is False
+        assert "lean runtime does" in data["note"]
+
+    def test_the_agent_card_still_serves(self, served):
+        """The new route must not displace the A2A surface."""
+        _, client = served
+        assert client.get("/.well-known/agent-card.json").status_code == 200
+
+
+class TestModelCatalog:
+    """The create form's endpoint autofill and model picker."""
+
+    @staticmethod
+    def _serving(payload, status=200, seen=None):
+        def handle(request: httpx.Request) -> httpx.Response:
+            if seen is not None:
+                seen.append(request)
+            return httpx.Response(status, json=payload)
+        return httpx.MockTransport(handle)
+
+    @pytest.mark.asyncio
+    async def test_openai_defaults_its_endpoint_and_drops_non_chat_models(self):
+        from declarative_agent_sdk.agents_control import catalog
+        seen = []
+        result = await catalog.list_models(
+            "openai", "", "sk-test",
+            transport=self._serving({"data": [
+                {"id": "gpt-x"}, {"id": "text-embedding-3-small"},
+                {"id": "whisper-1"}, {"id": "o-mini"},
+            ]}, seen=seen),
+        )
+        assert result["ok"] and result["models"] == ["gpt-x", "o-mini"]
+        assert str(seen[0].url) == "https://api.openai.com/v1/models"
+        assert seen[0].headers["Authorization"] == "Bearer sk-test"
+
+    @pytest.mark.asyncio
+    async def test_openai_without_a_key_says_so_instead_of_calling(self, monkeypatch):
+        from declarative_agent_sdk.agents_control import catalog
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        result = await catalog.list_models("openai", "", "")
+        assert not result["ok"] and "API key" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_vllm_lists_everything_it_serves_without_a_key(self, monkeypatch):
+        from declarative_agent_sdk.agents_control import catalog
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        seen = []
+        result = await catalog.list_models(
+            "vllm", "http://box:30081/v1/", "",
+            transport=self._serving({"data": [{"id": "Qwen/Qwen3-embedding"}]}, seen=seen),
+        )
+        # vLLM serves what it was started with; nothing is filtered.
+        assert result["models"] == ["Qwen/Qwen3-embedding"]
+        assert "Authorization" not in seen[0].headers
+        assert str(seen[0].url) == "http://box:30081/v1/models"
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_key_is_named(self):
+        from declarative_agent_sdk.agents_control import catalog
+        result = await catalog.list_models(
+            "openai", "", "bad", transport=self._serving({}, status=401))
+        assert not result["ok"] and "rejected" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_endpoint_is_a_result(self):
+        from declarative_agent_sdk.agents_control import catalog
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+        result = await catalog.list_models(
+            "vllm", "http://box:1/v1", "", transport=httpx.MockTransport(refuse))
+        assert not result["ok"] and "could not reach" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_providers_without_a_listing_are_declined(self):
+        from declarative_agent_sdk.agents_control import catalog
+        result = await catalog.list_models("anthropic", "", "key")
+        assert not result["ok"] and result["models"] == []
+
+    def test_state_carries_provider_endpoints(self, client):
+        providers = client.get("/api/state", headers=AUTH).json()["providers"]
+        assert providers["endpoints"]["openai"] == "https://api.openai.com/v1"
+        assert "vllm" in providers["listable"]
+
+    def test_the_route_answers_with_a_reason(self, client, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        reply = client.post("/api/models", headers=AUTH, json={"provider": "openai"})
+        assert reply.status_code == 200
+        assert reply.json()["ok"] is False
+
+
+class TestAgentApiKey:
+    """Updating a provider key after install, through the agent's .env."""
+
+    LOCAL = {"host": "localhost", "is_local": 1, "name": "here"}
+
+    def test_set_replaces_the_line_keeps_others_and_stays_private(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("OPENAI_API_KEY=old\nexport OPENAI_API_KEY=older\n"
+                       "AGENTS_CONTROL_URL=http://board:8900\n")
+        env.chmod(0o600)
+        driver = MachineDriver()
+        driver.set_env_var(self.LOCAL, str(tmp_path), "OPENAI_API_KEY", "sk-new")
+        lines = env.read_text().splitlines()
+        assert lines.count("OPENAI_API_KEY=sk-new") == 1
+        assert not any("old" in line for line in lines)
+        assert "AGENTS_CONTROL_URL=http://board:8900" in lines
+        assert (env.stat().st_mode & 0o777) == 0o600
+        assert not (tmp_path / ".env.tmp").exists()
+
+    def test_set_creates_a_missing_env(self, tmp_path):
+        MachineDriver().set_env_var(self.LOCAL, str(tmp_path), "GOOGLE_API_KEY", "g-1")
+        assert (tmp_path / ".env").read_text() == "GOOGLE_API_KEY=g-1\n"
+
+    def test_names_are_listed_without_values(self, tmp_path):
+        (tmp_path / ".env").write_text(
+            "OPENAI_API_KEY=sk-secret\nexport B_TOKEN=x\nEMPTY=\n# C=1\n")
+        names = MachineDriver().env_names(self.LOCAL, str(tmp_path))
+        assert names == ["B_TOKEN", "OPENAI_API_KEY"]
+        assert "sk-secret" not in "".join(names)
+
+    def test_no_env_means_no_names(self, tmp_path):
+        assert MachineDriver().env_names(self.LOCAL, str(tmp_path)) == []
+
+    @pytest.mark.parametrize("bad", ["two words", "a'b", 'a"b', "a$b", "a`b", "a\\b"])
+    def test_values_that_would_break_the_file_are_refused(self, tmp_path, bad):
+        with pytest.raises(MachineError):
+            MachineDriver().set_env_var(self.LOCAL, str(tmp_path), "OPENAI_API_KEY", bad)
+
+    def test_vllm_keys_go_to_openai_api_key(self):
+        from declarative_agent_sdk.agents_control.machines import key_name_for
+        assert key_name_for("vllm") == "OPENAI_API_KEY"
+        assert key_name_for("anthropic") == "ANTHROPIC_API_KEY"
+
+
+class TestBoardIsNeverStale:
+    """The board is edited in place; a browser must revalidate, not guess."""
+
+    def test_static_files_say_no_cache(self, client):
+        response = client.get("/static/app.js")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers.get("etag")
+
+    def test_index_says_no_cache(self, client):
+        assert client.get("/").headers["cache-control"] == "no-cache"
+
+
+class TestAgentNetwork:
+    """Changing an installed agent's bind address and published URL."""
+
+    LOCAL = {"host": "localhost", "is_local": 1, "name": "here"}
+
+    @pytest.fixture
+    def layout(self, tmp_path):
+        import sys
+        root = tmp_path / "root"
+        prefix = root / "coder"
+        (prefix / ".venv" / "bin").mkdir(parents=True)
+        (prefix / ".venv" / "bin" / "python").symlink_to(sys.executable)
+        conf = root / "supervisor" / "conf.d" / "coder.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text('[program:coder]\ncommand=x\n'
+                        'environment=PYTHONUNBUFFERED="1",HOST="0.0.0.0",PORT="8000",PATH="/bin"\n')
+        (prefix / "run_server.py").write_text(
+            'x = 1\n        AgentInterface(\n                url="http://10.0.0.132:8000/",\n')
+        (prefix / ".agent-meta").write_text(json.dumps({
+            "name": "coder", "bind_host": "0.0.0.0", "advertise_host": "10.0.0.132",
+            "url": "http://10.0.0.132:8000/", "port": 8000}))
+        return prefix, conf
+
+    def test_read_reports_the_files_not_the_board(self, layout):
+        prefix, _ = layout
+        net = MachineDriver().agent_network(self.LOCAL, str(prefix), "coder")
+        assert net["ok"] and net["bind_host"] == "0.0.0.0"
+        assert net["advertise_host"] == "10.0.0.132" and net["port"] == 8000
+
+    def test_write_updates_all_three_places(self, layout):
+        prefix, conf = layout
+        net = MachineDriver().agent_network(
+            self.LOCAL, str(prefix), "coder", "0.0.0.0", "100.83.163.18", write=True)
+        assert net["url"] == "http://100.83.163.18:8000/"
+        assert 'url="http://100.83.163.18:8000/"' in (prefix / "run_server.py").read_text()
+        meta = json.loads((prefix / ".agent-meta").read_text())
+        assert meta["url"] == net["url"] and meta["advertise_host"] == "100.83.163.18"
+        assert meta["agent_card"].endswith(":8000/.well-known/agent-card.json")
+        assert net["conf_changed"] is False                 # HOST was not asked to change
+        assert 'HOST="0.0.0.0"' in conf.read_text()
+
+    def test_a_specific_bind_is_also_what_gets_published(self, layout):
+        prefix, conf = layout
+        net = MachineDriver().agent_network(
+            self.LOCAL, str(prefix), "coder", "100.83.163.18", "", write=True)
+        assert 'HOST="100.83.163.18",PORT="8000"' in conf.read_text()
+        assert net["url"] == "http://100.83.163.18:8000/" and net["conf_changed"]
+
+    def test_all_interfaces_without_an_address_keeps_the_published_one(self, layout):
+        prefix, _ = layout
+        net = MachineDriver().agent_network(
+            self.LOCAL, str(prefix), "coder", "0.0.0.0", "", write=True)
+        assert net["url"] == "http://10.0.0.132:8000/"
+
+    def test_ipv6_is_bracketed(self, layout):
+        prefix, _ = layout
+        net = MachineDriver().agent_network(
+            self.LOCAL, str(prefix), "coder", "", "fd7a::1", write=True)
+        assert net["url"] == "http://[fd7a::1]:8000/"
+        again = MachineDriver().agent_network(self.LOCAL, str(prefix), "coder")
+        assert again["advertise_host"] == "fd7a::1"
+
+    def test_a_pre_supervisor_install_says_why(self, layout):
+        prefix, conf = layout
+        conf.unlink()
+        net = MachineDriver().agent_network(self.LOCAL, str(prefix), "coder")
+        assert not net["ok"] and "missing" in net["error"]
+
+    def test_bad_addresses_are_refused(self, layout):
+        prefix, _ = layout
+        with pytest.raises(MachineError):
+            MachineDriver().agent_network(
+                self.LOCAL, str(prefix), "coder", "x; reboot", "", write=True)
+
+    def test_route_updates_the_board_record(self, client, plane, layout):
+        prefix, _ = layout
+        (prefix / "agent.yaml").write_text(SAMPLE_YAML)
+        (prefix / "instructions.md").write_text("# coder\n")
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        agent = plane.store.upsert_agent(machine["id"], {
+            "name": "coder", "prefix": str(prefix), "url": "http://10.0.0.132:8000/"})
+        got = client.get(f"/api/agents/{agent['id']}/config", headers=AUTH).json()
+        assert got["network"]["advertise_host"] == "10.0.0.132"
+        reply = client.put(f"/api/agents/{agent['id']}/config", json={
+            "properties": {}, "restart": False,
+            "network": {"bind_host": "0.0.0.0", "advertise_host": "100.83.163.18"},
+        }, headers=AUTH).json()
+        assert reply.get("network", {}).get("url") == "http://100.83.163.18:8000/", reply
+        record = plane.store.agent(agent["id"])
+        assert record["url"] == "http://100.83.163.18:8000/"
+        assert record["agent_card"] == "http://100.83.163.18:8000/.well-known/agent-card.json"
+
+    def test_route_rejects_a_bad_address_before_writing(self, client, plane, layout):
+        prefix, _ = layout
+        (prefix / "agent.yaml").write_text(SAMPLE_YAML)
+        (prefix / "instructions.md").write_text("# coder\n")
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        agent = plane.store.upsert_agent(machine["id"], {"name": "coder", "prefix": str(prefix)})
+        before = (prefix / "agent.yaml").read_text()
+        response = client.put(f"/api/agents/{agent['id']}/config", json={
+            "properties": {"model": "changed"}, "network": {"bind_host": "a b"},
+        }, headers=AUTH)
+        assert response.status_code == 400
+        assert (prefix / "agent.yaml").read_text() == before
+
+
+class TestAgentModels:
+    """The settings form's model picker, listed from the agent's machine."""
+
+    LOCAL = {"host": "localhost", "is_local": 1, "name": "here"}
+
+    @pytest.fixture
+    def endpoint(self):
+        import http.server
+        import threading
+        seen = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["auth"] = self.headers.get("Authorization")
+                seen["path"] = self.path
+                if seen["auth"] != "Bearer sk-fake-for-test":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                body = json.dumps({"data": [{"id": "gpt-x"}, {"id": "whisper-1"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        yield f"http://127.0.0.1:{server.server_port}/v1", seen
+        server.shutdown()
+
+    @pytest.fixture
+    def prefix(self, tmp_path):
+        import sys
+        (tmp_path / ".venv" / "bin").mkdir(parents=True)
+        (tmp_path / ".venv" / "bin" / "python").symlink_to(sys.executable)
+        return tmp_path
+
+    def test_the_key_comes_from_the_agents_env(self, endpoint, prefix, monkeypatch):
+        url, seen = endpoint
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        (prefix / ".env").write_text("export OPENAI_API_KEY='sk-fake-for-test'\n")
+        reply = MachineDriver().list_models_on_machine(
+            self.LOCAL, str(prefix), url, "OPENAI_API_KEY")
+        assert reply["ok"] and reply["ids"] == ["gpt-x", "whisper-1"]
+        assert seen["path"] == "/v1/models"
+        assert "sk-fake" not in json.dumps(reply)           # only ids come back
+
+    def test_a_missing_key_is_reported_as_missing(self, endpoint, prefix, monkeypatch):
+        url, _ = endpoint
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        reply = MachineDriver().list_models_on_machine(
+            self.LOCAL, str(prefix), url, "OPENAI_API_KEY")
+        assert reply == {"ok": False, "status": 401, "has_key": False}
+
+    def test_a_bad_endpoint_is_refused_before_running(self, prefix):
+        with pytest.raises(MachineError):
+            MachineDriver().list_models_on_machine(
+                self.LOCAL, str(prefix), "file:///etc/passwd", "OPENAI_API_KEY")
+
+    def _agent(self, plane, prefix, provider="openai"):
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        return plane.store.upsert_agent(machine["id"], {
+            "name": "coder", "prefix": str(prefix), "provider": provider})
+
+    def test_route_filters_and_follows_unsaved_edits(self, client, plane, prefix, monkeypatch):
+        calls = []
+
+        def fake(machine, prefix_, endpoint, key_name, timeout=30):
+            calls.append((endpoint, key_name))
+            return {"ok": True, "ids": ["gpt-x", "text-embedding-3-small"], "has_key": True}
+
+        monkeypatch.setattr(plane.driver, "list_models_on_machine", fake)
+        agent = self._agent(plane, prefix, provider="vllm")
+        data = client.get(f"/api/agents/{agent['id']}/models?provider=openai",
+                          headers=AUTH).json()
+        assert data["models"] == ["gpt-x"]
+        assert calls == [("https://api.openai.com/v1", "OPENAI_API_KEY")]
+
+    def test_route_explains_a_missing_key(self, client, plane, prefix, monkeypatch):
+        monkeypatch.setattr(plane.driver, "list_models_on_machine",
+                            lambda *a, **k: {"ok": False, "status": 401, "has_key": False})
+        agent = self._agent(plane, prefix)
+        data = client.get(f"/api/agents/{agent['id']}/models", headers=AUTH).json()
+        assert not data["ok"] and "OPENAI_API_KEY is not set" in data["error"]
+
+    def test_route_declines_unlisted_providers(self, client, plane, prefix):
+        agent = self._agent(plane, prefix, provider="anthropic")
+        data = client.get(f"/api/agents/{agent['id']}/models", headers=AUTH).json()
+        assert not data["ok"] and data["models"] == []
+
+
+class TestSupervisordDown:
+    """A dead supervisord is named, not reported as a bare exit code."""
+
+    LOCAL = {"host": "localhost", "is_local": 1, "name": "gpu"}
+
+    def test_stdout_is_kept_when_stderr_is_empty(self):
+        with pytest.raises(MachineError) as excinfo:
+            MachineDriver().run(self.LOCAL, "echo 'unix:///x/s.sock no such file'; exit 7")
+        assert "no such file" in excinfo.value.stderr
+
+    @staticmethod
+    def _fake_supervisor(tmp_path):
+        """supervisorctl that is 'down' until fake supervisord drops a marker."""
+        prefix = tmp_path / "root" / "coder"
+        bin_dir = tmp_path / "root" / "supervisor" / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        prefix.mkdir()
+        marker = tmp_path / "up"
+        ctl = bin_dir / "supervisorctl"
+        ctl.write_text(f"#!/bin/sh\n[ -f {marker} ] && exit 0\n"
+                       "echo 'unix:///x/s.sock no such file'\nexit 7\n")
+        daemon = bin_dir / "supervisord"
+        daemon.write_text(f"#!/bin/sh\ntouch {marker}\n")
+        for tool in (ctl, daemon):
+            tool.chmod(0o755)
+        return prefix, marker
+
+    def test_restart_with_supervisord_down_starts_it(self, tmp_path):
+        prefix, marker = self._fake_supervisor(tmp_path)
+        result = MachineDriver().supervisor_action(self.LOCAL, str(prefix), "coder", "restart")
+        assert result["ok"] is True and result["state"] == "started"
+        assert marker.exists()
+        assert "started its agents" in result["output"]
+
+    def test_apply_with_supervisord_down_starts_it(self, tmp_path):
+        prefix, _ = self._fake_supervisor(tmp_path)
+        applied = MachineDriver().apply_service_change(self.LOCAL, str(prefix), "coder")
+        assert applied["ok"] and applied["state"] == "started"
+
+    def test_status_with_supervisord_down_only_reports(self, tmp_path):
+        prefix, marker = self._fake_supervisor(tmp_path)
+        result = MachineDriver().supervisor_action(self.LOCAL, str(prefix), "coder", "status")
+        assert result["ok"] is False and not marker.exists()
+        assert "supervisord is not running on 'gpu'" in result["output"]
+
+    def test_a_reaping_logind_without_linger_is_reported_not_attempted(
+            self, tmp_path, monkeypatch):
+        prefix, marker = self._fake_supervisor(tmp_path)
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        (tools / "busctl").write_text("#!/bin/sh\necho 'b true'\n")
+        (tools / "loginctl").write_text("#!/bin/sh\necho no\n")
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+        result = MachineDriver().supervisor_action(self.LOCAL, str(prefix), "coder", "restart")
+        assert result["ok"] is False and result["state"] == "needs-linger"
+        assert "sudo loginctl enable-linger" in result["output"]
+        assert not marker.exists()                  # nothing started that would die
+
+    def test_other_failures_pass_through(self):
+        from declarative_agent_sdk.agents_control.machines import supervisor_down_hint
+        assert supervisor_down_hint("coder: ERROR (no such process)", self.LOCAL, "/r/a") == ""
+
+
+class TestAgentsKnowTheirOwnTools:
+    """An agent on the board is told its tools act on its own machine."""
+
+    def test_user_at_host_is_not_a_mention(self):
+        assert mentions('check GPU on "mahadev@10.0.0.147"') == []
+        assert mentions("ssh mahadev@mahadev-ms7d28.tailbe5bd0.ts.net") == []
+        assert mentions("mail me at a.b@example.com") == []
+
+    def test_real_mentions_still_parse(self):
+        assert mentions("@coder.box go, then (@scout) and\n@reviewer") == [
+            "coder.box", "scout", "reviewer"]
+        assert mentions("ask @coder: now") == ["coder"]
+
+    def test_the_prompt_says_where_the_agent_runs_and_what_it_holds(self, store):
+        router = ChannelRouter(store, EventBus())
+        machine = store.add_machine("MacBook-pro", "localhost", is_local=True)
+        agent = store.upsert_agent(machine["id"], {
+            "name": "master", "url": "http://x",
+            "tools": "tavily_search"})
+        channel = store.add_channel("Master")
+        store.join(channel["id"], agent["id"])
+        prompt = router._prompt_for(channel["id"], "master.MacBook-pro", "hi", "you")
+        assert "You run on the machine 'MacBook-pro'" in prompt
+        assert "(read_file, write_file, web_request, exec_command, send_to_agent, " in prompt
+        assert "read_shared, tavily_search)" in prompt
+        assert "user@host is not an agent" in prompt
+
+
+class TestClearing:
+    """Clear conversation (per channel) and clear context (per agent)."""
+
+    @pytest.fixture
+    def setup(self, store):
+        router = ChannelRouter(store, EventBus())
+        machine = store.add_machine("here", "localhost", is_local=True)
+        agent = store.upsert_agent(machine["id"], {"name": "coder", "url": "http://x"})
+        channel = store.add_channel("dev")
+        store.join(channel["id"], agent["id"])
+        return router, channel, agent
+
+    def test_an_untouched_board_keeps_its_original_ids(self):
+        from declarative_agent_sdk.agents_control.router import context_id_for
+        assert context_id_for({"name": "dev"}, {"qualified": "coder.here"}) == "ac-dev-coder.here"
+
+    @pytest.mark.asyncio
+    async def test_clear_conversation_empties_and_moves_every_member_on(
+            self, setup, store, monkeypatch):
+        from declarative_agent_sdk.agents_control.router import context_id_for
+        router, channel, agent = setup
+        asked = []
+
+        async def forget(member, session=""):
+            asked.append((member["qualified"], session))
+            return "freed"
+
+        monkeypatch.setattr(router, "_forget", forget)
+        store.add_message(channel["id"], "human", "you", "old question")
+        before = context_id_for(store.channel(channel["id"]), store.agent(agent["id"]))
+        result = await router.clear_channel(channel["id"])
+        after = context_id_for(store.channel(channel["id"]), store.agent(agent["id"]))
+        assert result["messages_removed"] == 1
+        assert before != after
+        assert asked == [("coder.here", before)]          # the old history is freed
+        texts = [m["text"] for m in store.messages(channel["id"])]
+        assert texts == ["Conversation cleared. Members start from a blank history."]
+
+    @pytest.mark.asyncio
+    async def test_clear_context_moves_one_agent_on_everywhere(self, setup, store, monkeypatch):
+        from declarative_agent_sdk.agents_control.router import context_id_for
+        router, channel, agent = setup
+        other = store.add_channel("ops")
+        store.join(other["id"], agent["id"])
+
+        async def forget(member, session=""):
+            return "freed"
+
+        monkeypatch.setattr(router, "_forget", forget)
+        ids = lambda: [context_id_for(store.channel(c["id"]), store.agent(agent["id"]))
+                       for c in (channel, other)]
+        before = ids()
+        store.add_message(channel["id"], "human", "you", "kept")
+        await router.clear_agent(agent["id"])
+        assert all(b != a for b, a in zip(before, ids()))
+        assert [m["text"] for m in store.messages(channel["id"])] == ["kept"]
+
+    @pytest.mark.asyncio
+    async def test_an_older_agent_is_reported_not_failed(self, setup, monkeypatch):
+        router, _, agent = setup
+        original = httpx.AsyncClient
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(
+            transport=httpx.MockTransport(lambda request: httpx.Response(405))))
+        assert "older agent" in await router._forget(dict(agent, url="http://x"))
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_agent_is_reported_not_failed(self, setup, monkeypatch):
+        router, _, agent = setup
+        original = httpx.AsyncClient
+
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(
+            transport=httpx.MockTransport(refuse)))
+        assert "unreachable" in await router._forget(dict(agent, url="http://x"))
+
+    def test_routes(self, client, plane):
+        channel = plane.store.add_channel("dev")
+        reply = client.post(f"/api/channels/{channel['id']}/clear", headers=AUTH)
+        assert reply.status_code == 200 and reply.json()["messages_removed"] == 0
+        assert client.post("/api/channels/999/clear", headers=AUTH).status_code == 404
+        assert client.post("/api/agents/999/clear-context", headers=AUTH).status_code == 404
+        assert client.post(f"/api/channels/{channel['id']}/clear").status_code == 401
+
+
+class TestWorkingState:
+    """The sidebar's idle/working icon is seeded from /api/state."""
+
+    def test_turns_are_counted_per_agent_and_channel(self, store):
+        router = ChannelRouter(store, EventBus())
+        router._turns[("coder.here", 1)] = 2
+        router._turns[("coder.here", 3)] = 1
+        assert router.working() == {"coder.here": [1, 3]}
+
+    @pytest.mark.asyncio
+    async def test_a_finished_turn_leaves_no_trace(self, store):
+        router = ChannelRouter(store, EventBus())
+        machine = store.add_machine("here", "localhost", is_local=True)
+        agent = store.upsert_agent(machine["id"], {"name": "coder", "url": "http://127.0.0.1:9"})
+        channel = store.add_channel("dev")
+        store.join(channel["id"], agent["id"])
+        await router.dispatch(channel["id"], store.members(channel["id"])[0], "hi", "you")
+        assert router.working() == {}              # unreachable agent, turn still ended
+
+    def test_state_carries_it(self, client):
+        assert client.get("/api/state", headers=AUTH).json()["working"] == {}
+
+
+class TestHeldThroughput:
+    """tok/s keeps the last measured value between turns instead of reading 0."""
+
+    def test_a_measured_window_passes_through_and_is_remembered(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        sampler = Sampler()
+        rates = {"window_seconds": 5.0, "decode_rate": 41.2, "decode_tokens": 300}
+        assert sampler.held("http://box", rates) == rates
+
+    def test_an_empty_window_shows_the_last_figure_with_its_age(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        sampler = Sampler()
+        sampler.held("http://box", {"window_seconds": 5.0, "decode_rate": 41.2,
+                                    "prefill_rate": 900.0})
+        held = sampler.held("http://box", {"window_seconds": 5.0})
+        assert held["decode_rate"] == 41.2 and held["prefill_rate"] == 900.0
+        assert held["held"] is True and held["age_seconds"] >= 0
+        assert "measured_at" not in held
+
+    def test_a_new_measurement_replaces_the_held_one(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        sampler = Sampler()
+        sampler.held("http://box", {"decode_rate": 41.2})
+        assert sampler.held("http://box", {"decode_rate": 12.0}) == {"decode_rate": 12.0}
+        assert sampler.held("http://box", {})["decode_rate"] == 12.0
+
+    def test_nothing_measured_yet_stays_empty(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        assert Sampler().held("http://box", {}) == {}
+
+    def test_endpoints_are_held_separately(self):
+        from declarative_agent_sdk.agents_control.metrics import Sampler
+        sampler = Sampler()
+        sampler.held("http://a", {"decode_rate": 41.2})
+        assert sampler.held("http://b", {}) == {}
+
+
+class TestFileRelay:
+    """/api/files/relay passes a shared file through from its owner, and only that."""
+
+    LINK = "http://100.83.163.18:8000/files/AbCdEfGh12345678?exp=9999999999&sig=" + "a" * 32
+
+    @pytest.fixture
+    def owner(self, plane):
+        machine = plane.store.add_machine("omarchy", "100.83.163.18")
+        return plane.store.upsert_agent(machine["id"], {
+            "name": "reviewer", "url": "http://100.83.163.18:8000/"})
+
+    def _upstream(self, monkeypatch, handler):
+        import declarative_agent_sdk.agents_control.server as server_module
+        original = server_module.httpx.AsyncClient
+        monkeypatch.setattr(server_module.httpx, "AsyncClient", lambda **kw: original(
+            transport=httpx.MockTransport(handler)))
+
+    def test_streams_from_the_owner_with_its_headers(self, client, owner, monkeypatch):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(200, text="# findings\n", headers={
+                "content-type": "text/markdown", "content-disposition": 'inline; filename="r.md"'})
+
+        self._upstream(monkeypatch, handler)
+        reply = client.get("/api/files/relay", params={"url": self.LINK}, headers=AUTH)
+        assert reply.status_code == 200 and reply.text == "# findings\n"
+        assert reply.headers["x-shared-by"] == "reviewer.omarchy"
+        assert reply.headers["cache-control"] == "no-store"
+        assert seen[0].startswith("http://100.83.163.18:8000/files/AbCdEfGh12345678?")
+        assert "sig=" + "a" * 32 in seen[0]
+
+    def test_the_owners_refusal_passes_through(self, client, owner, monkeypatch):
+        self._upstream(monkeypatch, lambda r: httpx.Response(410, json={"error": "expired"}))
+        reply = client.get("/api/files/relay", params={"url": self.LINK}, headers=AUTH)
+        assert reply.status_code == 410
+
+    def test_a_host_that_is_not_a_board_agent_is_refused(self, client, owner):
+        other = self.LINK.replace("100.83.163.18", "169.254.169.254")
+        reply = client.get("/api/files/relay", params={"url": other}, headers=AUTH)
+        assert reply.status_code == 404
+
+    def test_only_files_links_are_relayed(self, client, owner):
+        for url in ("http://100.83.163.18:8000/", "http://100.83.163.18:8000/context",
+                    "http://100.83.163.18:8000/files/../etc?exp=1&sig=a", "file:///etc/passwd"):
+            assert client.get("/api/files/relay", params={"url": url},
+                              headers=AUTH).status_code == 400, url
+
+    def test_needs_the_board_token(self, client, owner):
+        assert client.get("/api/files/relay", params={"url": self.LINK}).status_code == 401
+
+    def test_an_unreachable_owner_is_a_502(self, client, owner, monkeypatch):
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+        self._upstream(monkeypatch, refuse)
+        reply = client.get("/api/files/relay", params={"url": self.LINK}, headers=AUTH)
+        assert reply.status_code == 502 and "reviewer.omarchy" in reply.json()["error"]
+
+    def test_the_prompt_mentions_sharing_to_every_agent(self, store):
+        """share_file / read_shared are core, so no tools: list is needed."""
+        router = ChannelRouter(store, EventBus())
+        machine = store.add_machine("here", "localhost", is_local=True)
+        store.upsert_agent(machine["id"], {"name": "b", "tools": ""})
+        block = router._self_block("b.here")
+        assert "call share_file" in block and "with read_shared" in block
+
+
+class TestReinstall:
+    """Reinstall re-runs install.sh without resetting what the agent has."""
+
+    @pytest.fixture
+    def agent(self, plane, tmp_path):
+        prefix = tmp_path / "coder"
+        prefix.mkdir()
+        (prefix / "agent.yaml").write_text(SAMPLE_YAML)
+        (prefix / "instructions.md").write_text("# coder\n")
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        return plane.store.upsert_agent(machine["id"], {
+            "name": "coder", "prefix": str(prefix), "url": "http://100.1.1.1:8000/",
+            "endpoint": "http://box:30081/v1"})
+
+    def _fake(self, plane, monkeypatch, network=None):
+        calls = {"env": [], "install": None}
+        monkeypatch.setattr(plane.driver, "agent_network", lambda *a, **k: network or {
+            "ok": True, "bind_host": "0.0.0.0", "advertise_host": "100.83.163.18"})
+        monkeypatch.setattr(plane.driver, "set_env_var",
+                            lambda m, p, k, v, **kw: calls["env"].append((k, v)))
+
+        def install(machine, **kwargs):
+            calls["install"] = kwargs
+            return {"name": kwargs["name"], "prefix": kwargs["prefix"], "ready": True,
+                    "url": "http://100.83.163.18:8000/", "port": 8000}
+
+        monkeypatch.setattr(plane.driver, "create_agent", install)
+        return calls
+
+    def test_it_keeps_config_key_and_address(self, client, plane, agent, monkeypatch):
+        calls = self._fake(plane, monkeypatch)
+        reply = client.post(f"/api/agents/{agent['id']}/reinstall",
+                            json={"sdk_source": "local"}, headers=AUTH)
+        assert reply.status_code == 200, reply.text
+        kw = calls["install"]
+        assert kw["seed_env"] is False                 # .env is not replaced
+        assert kw["prefix"] == agent["prefix"]         # same directory
+        assert kw["bind_host"] == "0.0.0.0" and kw["advertise_host"] == "100.83.163.18"
+        assert kw["provider"] == "vllm" and kw["model"] == "qwen2.5-coder:latest"
+        assert kw["sdk_source"] == "local"
+        assert "api_key" not in kw or not kw.get("api_key")
+        record = plane.store.agent(agent["id"])
+        assert record["url"] == "http://100.83.163.18:8000/"
+        assert record["endpoint"]                      # not wiped by the result
+
+    def test_board_env_is_refreshed_one_variable_at_a_time(self, client, plane, agent, monkeypatch):
+        calls = self._fake(plane, monkeypatch)
+        client.post(f"/api/agents/{agent['id']}/reinstall", json={}, headers=AUTH)
+        keys = [k for k, _ in calls["env"]]
+        assert "AGENTS_CONTROL_URL" in keys and "AGENT_QUALIFIED_NAME" in keys
+        assert ("AGENT_QUALIFIED_NAME", "coder.here") in calls["env"]
+        assert not any(k.endswith("API_KEY") for k in keys)   # the key is left alone
+
+    def test_refresh_can_be_skipped(self, client, plane, agent, monkeypatch):
+        calls = self._fake(plane, monkeypatch)
+        client.post(f"/api/agents/{agent['id']}/reinstall",
+                    json={"refresh_board_env": False}, headers=AUTH)
+        assert calls["env"] == []
+
+    def test_an_unreadable_address_lets_install_sh_decide(self, client, plane, agent, monkeypatch):
+        calls = self._fake(plane, monkeypatch, network={"ok": False, "error": "x"})
+        reply = client.post(f"/api/agents/{agent['id']}/reinstall", json={}, headers=AUTH).json()
+        assert calls["install"]["bind_host"] == "" and reply["kept_address"] is False
+
+    def test_driver_passes_prefix_and_no_env_file(self, monkeypatch):
+        driver = MachineDriver()
+        commands = []
+        monkeypatch.setattr(driver, "push_scripts", lambda m: None)
+        monkeypatch.setattr(driver, "_script_path", lambda m, k: "install.sh")
+        monkeypatch.setattr(driver, "run", lambda m, c, **kw: commands.append(c) or '{"name": "coder"}')
+        driver.create_agent({"name": "here", "host": "box"}, name="coder", provider="vllm",
+                            control_env={"AGENTS_CONTROL_URL": "http://b"}, seed_env=False,
+                            prefix="/home/u/.declarative-agent/coder", sdk_source="git")
+        assert len(commands) == 1                       # no env file staged or removed
+        assert "--prefix /home/u/.declarative-agent/coder" in commands[0]
+        assert "--env-file" not in commands[0] and "--force" not in commands[0]

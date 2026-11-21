@@ -29,6 +29,8 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+
+import httpx
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from google.protobuf.json_format import MessageToDict
@@ -36,6 +38,7 @@ from google.protobuf.json_format import MessageToDict
 from a2a.types import TaskState
 
 from declarative_agent_sdk.core.agent_logging import get_logger
+from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 from declarative_agent_sdk.transports.a2a.client import AIAgentClient
 from declarative_agent_sdk.agents_control.store import Store
 
@@ -51,7 +54,27 @@ SHELL_TOOLS = frozenset({
     "exec_command", "exec_async", "check_exec_async", "run_script",
 })
 
-MENTION_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)?)")
+# An @ that starts a word. `mahadev@10.0.0.147` is an SSH target, not a
+# mention of "@10.0": answering it with "not in this channel" told the model
+# the host did not exist, and it stopped reaching for its own tools.
+MENTION_RE = re.compile(
+    r"(?<![A-Za-z0-9_.@-])@([A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)?)")
+
+
+def context_id_for(channel: Dict[str, Any], agent: Dict[str, Any]) -> str:
+    """
+    The A2A context id a channel's turns with one agent are filed under.
+
+    The agent keeps one in-memory history per context id, so clearing is done
+    by moving to a new id: "clear conversation" bumps the channel's epoch,
+    "clear context" the agent's. That works on an agent of any age, with no
+    agent-side support. At 0/0 the id is the original form, so a board that
+    has never cleared anything keeps talking to the history it already has.
+    """
+    name = str(agent.get("qualified") or agent.get("name") or "")
+    base = f"ac-{channel.get('name', channel.get('id', ''))}-{name}"
+    c, a = int(channel.get("context_epoch") or 0), int(agent.get("context_epoch") or 0)
+    return base if (c, a) == (0, 0) else f"{base}-{c}.{a}"
 
 
 def mentions(text: str) -> List[str]:
@@ -170,6 +193,10 @@ class ChannelRouter:
         self.bus = bus
         self.pending: Dict[str, PendingApproval] = {}
         self._tasks: Dict[int, Set[asyncio.Task]] = {}
+        # (agent, channel) → turns in flight. Counted, because a relay can
+        # start a second turn for the same pair before the first ends, and the
+        # first one ending must not show the agent idle.
+        self._turns: Dict[Tuple[str, int], int] = {}
         self._failure_hint = ""
 
     # ------------------------------------------------------------ messaging
@@ -212,6 +239,73 @@ class ChannelRouter:
             dispatched.append(member["qualified"])
         return {"message": message, "dispatched": dispatched}
 
+    def working(self) -> Dict[str, List[int]]:
+        """Agents taking a turn right now → the channels they are taking it in."""
+        out: Dict[str, List[int]] = {}
+        for (agent, channel_id) in self._turns:
+            out.setdefault(agent, []).append(channel_id)
+        return out
+
+    # ------------------------------------------------------------- clearing
+
+    async def _forget(self, agent: Dict[str, Any], session: str = "") -> str:
+        """
+        Ask an agent to drop a history it no longer needs. Best effort.
+
+        The board has already moved to a new context id, so the next turn is
+        clean either way; this frees the old one. An agent installed before
+        the route existed answers 404/405 and keeps it until it restarts.
+        """
+        url = str(agent.get("url") or "").rstrip("/")
+        if not url:
+            return "no address"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(
+                    f"{url}/context", params={"session": session} if session else {},
+                    timeout=5)
+        except Exception as exc:  # noqa: BLE001 — a stopped agent has no history anyway
+            return f"unreachable ({type(exc).__name__})"
+        if response.status_code in (404, 405, 501):
+            return "kept until it restarts (older agent)"
+        return "freed" if response.status_code == 200 else f"answered {response.status_code}"
+
+    async def clear_channel(self, channel_id: int) -> Dict[str, Any]:
+        """
+        Clear conversation: the transcript, and every member's history of it.
+
+        Both halves matter. The board replays recent transcript into each
+        prompt, and each agent remembers its own turns; clearing only one
+        leaves the other to bring the old conversation back.
+        """
+        channel = self.store.channel(channel_id)
+        if channel is None:
+            raise LookupError("no such channel")
+        members = self.store.members(channel_id)
+        old = {int(m["id"]): context_id_for(channel, m) for m in members}
+        removed = self.store.clear_messages(channel_id)
+        self.store.bump_channel_context(channel_id)
+        # Before the system line, so every open board empties its view and
+        # then receives that line as the first message of the new transcript.
+        self.bus.publish({"type": "cleared", "channel_id": channel_id})
+        freed = await asyncio.gather(*(
+            self._forget(m, old[int(m["id"])]) for m in members))
+        self._post(channel_id, "system", "system",
+                   "Conversation cleared. Members start from a blank history.")
+        self.bus.publish({"type": "channels"})
+        return {"channel": channel["name"], "messages_removed": removed,
+                "agents": {str(m["qualified"]): f for m, f in zip(members, freed)}}
+
+    async def clear_agent(self, agent_id: int) -> Dict[str, Any]:
+        """Clear context: this agent forgets every channel's conversation."""
+        agent = self.store.agent(agent_id)
+        if agent is None:
+            raise LookupError("no such agent")
+        self.store.bump_agent_context(agent_id)
+        freed = await self._forget(agent)
+        self.bus.publish({"type": "agents"})
+        return {"agent": agent["qualified"], "history": freed}
+
     def _spawn(self, channel_id: int, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self._tasks.setdefault(channel_id, set()).add(task)
@@ -244,6 +338,8 @@ class ChannelRouter:
             # again mid-task, or at agents outside this channel.
             self._roster_block(channel_id, agent_name),
             "",
+            self._self_block(agent_name),
+            "",
             "To bring in another member, write their @name in your reply — the "
             "board delivers it to them and their answer comes back here. You "
             "cannot call them directly, and you do not need to wait: finish "
@@ -263,6 +359,35 @@ class ChannelRouter:
                 parts.append(f"\nRecent channel history:\n{transcript}")
         parts.append(f"\n{sender} says:\n{text}")
         return "\n".join(parts)
+
+    def _self_block(self, agent_name: str) -> str:
+        """
+        Where the agent runs and what its own tools reach.
+
+        Without it the prompt describes the agent only as a channel member that
+        talks through @mentions, and a model takes that literally: asked about
+        its machine, it answered "I have no network or SSH access" while holding
+        exec_command — then repeated it, since the transcript replays each turn.
+        """
+        agent = self.store.agent_by_qualified(agent_name) or {}
+        machine = agent.get("machine_name") or ""
+        extra = [t.strip() for t in str(agent.get("tools") or "").split(",") if t.strip()]
+        # Core tools are registered by every runtime whatever the config lists.
+        tools = list(dict.fromkeys(list(ToolRegistry.core_tool_names()) + extra))
+        where = f"the machine '{machine}'" if machine else "your own machine"
+        text = (
+            f"You run on {where}. Your own tools ({', '.join(tools)}) act there: "
+            "use them for anything about that machine, its files, or the hosts it "
+            "can reach (a command such as ssh runs from it like any other). "
+            "@mentions are only for the agents listed above — a hostname or "
+            "user@host is not an agent, and the board will not deliver to it."
+            # Other agents cannot open your workspace; say how to hand a file over.
+            " To give another agent a file from your workspace, call share_file "
+            "and put the link it returns in your reply — do not paste the file's "
+            "contents. Read a shared-file link (…/files/…?exp=…&sig=…) with "
+            "read_shared."
+        )
+        return text
 
     def _roster_block(self, channel_id: int, agent_name: str) -> str:
         """Who else is in this channel, as the agent sees it."""
@@ -383,7 +508,7 @@ class ChannelRouter:
             return
 
         channel = self.store.channel(channel_id) or {}
-        context_id = f"ac-{channel.get('name', channel_id)}-{name}"
+        context_id = context_id_for(channel, agent)
         settings = self.store.settings()
 
         def number(key: str, fallback: float) -> float:
@@ -413,6 +538,8 @@ class ChannelRouter:
         # membership change mid-turn still dispatches correctly.
         members = self.store.members(channel_id)
 
+        key = (name, channel_id)
+        self._turns[key] = self._turns.get(key, 0) + 1
         self.bus.publish({"type": "typing", "channel_id": channel_id, "agent": name, "on": True})
         try:
             task = await client.submit(prompt, context_id)
@@ -507,9 +634,14 @@ class ChannelRouter:
                         "type": "approval_resolved", "channel_id": channel_id,
                         "id": approval.id, "approved": False,
                     })
-            self.bus.publish(
-                {"type": "typing", "channel_id": channel_id, "agent": name, "on": False}
-            )
+            left = self._turns.get(key, 1) - 1
+            if left > 0:
+                self._turns[key] = left
+            else:
+                self._turns.pop(key, None)
+                self.bus.publish(
+                    {"type": "typing", "channel_id": channel_id, "agent": name, "on": False}
+                )
 
     # Longer than this and a WORKING update is the agent talking, not a
     # progress note. "Calling tools: web_request" is 30 characters; an outline

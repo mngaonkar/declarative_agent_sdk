@@ -71,7 +71,7 @@ Each agent is independent — its own directory, virtualenv, program and port:
 
 | | |
 |---|---|
-| directory | `<root>/<name>`, where root is `/opt/declarative-agent` as root, `$XDG_DATA_HOME/declarative-agent` on Linux, `~/.declarative-agent` on macOS |
+| directory | `<root>/<name>`, where root is `/opt/declarative-agent` as root and `~/.declarative-agent` otherwise, on Linux and macOS alike (a Linux machine that already has agents under the old `${XDG_DATA_HOME:-~/.local/share}/declarative-agent` keeps using it, with a warning, until that directory is removed) |
 | program | `[program:<name>]` in `<root>/supervisor/conf.d/<name>.conf` |
 | port | `--port`, otherwise the first free one from `--port-base` (default 8000) |
 | address | binds `0.0.0.0` so other machines can reach it; publishes this host's primary address |
@@ -194,6 +194,10 @@ $SCTL stop <name>            # leave it registered but down
 $SCTL shutdown               # stop supervisord and every agent with it
 
 curl -s http://<advertise_host>:<port>/.well-known/agent-card.json
+
+# how much context the agent is prefixing to each model request (lean only;
+# sizes, never message content)
+curl -s http://<advertise_host>:<port>/context
 ```
 
 The exact `supervisorctl` invocation is in the install's JSON output, so an
@@ -216,6 +220,16 @@ has no authentication and wide-open CORS, and the agent can run shell commands
 through `exec_command`. Keep it on a trusted network, firewall it, or bind one
 private interface with `--host 10.0.0.5`. The installer warns whenever it binds
 every interface.
+
+**A supervised agent gets a fixed PATH, not your login shell's.** It is
+`/opt/homebrew/bin`, `/usr/local/bin`, the system directories,
+`/Library/TeX/texbin`, `/snap/bin` and `$HOME/.local/bin`. Anything installed
+outside those is invisible to the agent however well it works in your terminal
+— which an agent reports as "that tool is not installed". TeX is on the list
+because an agent asked for a PDF finds pandoc on the Homebrew prefix and then
+fails on a missing `pdflatex`, which looks like the same thing. Changing it
+means editing `SERVICE_PATH` in `install.sh` and reinstalling, or editing
+`environment=` in the agent's `conf.d/<name>.conf` and restarting it.
 
 **supervisord gives `exec_command` *fewer* restrictions than systemd did.** The
 old per-agent unit set `NoNewPrivileges=true` (no sudo, no setuid) and

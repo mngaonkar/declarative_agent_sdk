@@ -120,6 +120,13 @@ _FORCE_ASK_NUDGE = (
     "clarification. End with [[decision:ask]]."
 )
 
+_ANSWER_NUDGE = (
+    "[runtime] You ended the task with no user-facing text, so the user saw "
+    "nothing. Write the answer now: what you did, what the result was, and "
+    "where any file you produced can be found. If the task did not succeed, "
+    "say so and say why. End with [[decision:done]]."
+)
+
 _BUDGET_NUDGE = (
     "[runtime] Iteration budget is nearly exhausted. Summarize progress, "
     "deliver the best answer you can, and end with [[decision:done]] or "
@@ -157,6 +164,8 @@ class _TurnState:
     consecutive_failures: int = 0
     no_tool_continues: int = 0
     tools_used_this_turn: bool = False
+    asked_for_an_answer: bool = False
+    tools_called: List[str] = field(default_factory=list)
 
 
 class LeanLoop:
@@ -211,9 +220,55 @@ class LeanLoop:
             prompt = prompt + "\n\n# Additional instructions\n\n" + extra
         return prompt
 
+    def context_report(self) -> Dict[str, Any]:
+        """
+        The size of what this agent prefixes to every model request.
+
+        Each turn sends the system prompt plus the whole retained history, so
+        this is the figure that explains a turn getting slower as a
+        conversation goes on — and the one the board could not see, because a
+        model server only reports the request it happened to be given.
+
+        Sizes only: no message content leaves the process.
+        """
+        system = self.system_prompt()
+        sessions = []
+        for session_id, history in self._history.items():
+            chars = sum(_message_chars(message) for message in history)
+            sessions.append({
+                "session": session_id,
+                "messages": len(history),
+                "chars": chars,
+                "tokens": _approx_tokens(chars),
+                # Elided payloads are the difference between this history and
+                # the one that would have been sent without trimming.
+                "elided_messages": sum(
+                    1 for message in history
+                    if "chars elided" in str(message.get("content") or "")
+                ),
+                "prompt_chars": chars + len(system),
+                "prompt_tokens": _approx_tokens(chars + len(system)),
+            })
+        sessions.sort(key=lambda entry: entry["chars"], reverse=True)
+        return {
+            "system_prompt_chars": len(system),
+            "system_prompt_tokens": _approx_tokens(len(system)),
+            "history_limit": self.history_limit,
+            "tool_payload_keep": self.tool_payload_keep,
+            "tool_payload_max_chars": self.tool_payload_max_chars,
+            "sessions": sessions,
+        }
+
     def reset(self, session_id: str) -> None:
         self._history.pop(session_id, None)
         self._pending.pop(session_id, None)
+
+    def reset_all(self) -> int:
+        """Forget every session; returns how many there were."""
+        count = len(set(self._history) | set(self._pending))
+        self._history.clear()
+        self._pending.clear()
+        return count
 
     def _trim(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(history) <= self.history_limit:
@@ -386,6 +441,31 @@ class LeanLoop:
 
         yield from self._drive(session_id, messages, history, rounds_left, turn)
 
+    @staticmethod
+    def _silent_finish(turn: "_TurnState") -> str:
+        """
+        What to say when the model finishes without saying anything.
+
+        "(done)" was indistinguishable from a crash, from an empty reply and
+        from work that silently failed. Naming the tools it ran at least tells
+        the user where to look, and says plainly that the agent reported
+        nothing itself.
+        """
+        if not turn.tools_called:
+            return (
+                "Finished without producing an answer, and without running any "
+                "tools. Ask again, more specifically, or check the agent log."
+            )
+        ran = []
+        for name in turn.tools_called:          # ordered, de-duplicated
+            if name not in ran:
+                ran.append(name)
+        return (
+            "Finished, but gave no final answer of its own. Tools it ran this "
+            f"turn: {', '.join(ran)}. Ask what the result was, or check the "
+            "workspace and the agent log."
+        )
+
     def _inject_system(
         self,
         messages: List[Dict[str, Any]],
@@ -496,11 +576,25 @@ class LeanLoop:
                         self._inject_system(messages, history, _CONTINUE_NUDGE)
                         continue
 
+                # A turn that ends with only "[[decision:done]]" leaves the
+                # user with nothing — the work happened, and the report of it
+                # did not. Ask once for the answer before giving up on one.
+                if (
+                    not visible
+                    and not think_text
+                    and decision != "ask"
+                    and phase != "ask"
+                    and not turn.asked_for_an_answer
+                ):
+                    turn.asked_for_an_answer = True
+                    self._inject_system(messages, history, _ANSWER_NUDGE)
+                    continue
+
                 history[:] = self._trim(history)
                 final = visible or (
                     "I need your help to proceed."
                     if decision == "ask" or phase == "ask"
-                    else (think_text or "(done)")
+                    else (think_text or self._silent_finish(turn))
                 )
                 yield LoopEvent(kind="final", text=final)
                 return
@@ -511,6 +605,7 @@ class LeanLoop:
             names = [
                 (c.get("function") or {}).get("name", "?") for c in tool_calls
             ]
+            turn.tools_called.extend(names)
             yield LoopEvent(
                 kind="status", text=f"Calling tools: {', '.join(names)}"
             )
@@ -783,6 +878,33 @@ def _mirror_tool_inserts(
 
 
 ELIDED_HEAD = 160
+
+
+def _message_chars(message: Dict[str, Any]) -> int:
+    """
+    How much of the wire this message occupies.
+
+    Tool-call arguments count: a write_file call carries the whole file body in
+    its arguments, and leaving that out of the measurement would understate the
+    history by exactly the thing that makes it big.
+    """
+    total = len(str(message.get("content") or ""))
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        total += len(str(function.get("name") or ""))
+        total += len(str(function.get("arguments") or ""))
+    return total
+
+
+def _approx_tokens(chars: int) -> int:
+    """
+    Tokens, counted when tiktoken is available and estimated when it is not.
+
+    Counting needs the text; this only has a length, so it is deliberately an
+    estimate — four characters per token, which is close enough for "is the
+    context big?" and is labelled as approximate everywhere it is shown.
+    """
+    return int(round(chars / 4))
 
 
 def _elide_mark(dropped: int) -> str:

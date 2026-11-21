@@ -358,6 +358,23 @@ tools:
   - exec_command
 ```
 
+##### `exec_command` and the shell
+
+`shell` is unset by default, which means *use a shell when the command needs
+one* — `&&`, `;`, `|`, redirection, globs, substitutions, or a shell builtin
+like `command -v`. Passing `shell=true` forces it; passing `shell=false`
+**refuses** a command that needs one rather than running a mangled version.
+
+That last part is the point. `shlex.split("pwd && ls workspace")` yields
+`['pwd', '&&', 'ls', 'workspace']`, which runs `pwd` with three junk arguments
+and reports *its* exit code — so the second half never ran and the model is told
+`usage: pwd`. Nothing failed loudly; a different command simply succeeded.
+
+A non-zero exit that still wrote to stdout carries a `note`, because the two
+are not the same thing: `which pandoc wkhtmltopdf` exits 1 when either name is
+missing while printing the path of the one it found, and a model that reads only
+`success: false` concludes the tool is not installed.
+
 Add your own with `ToolRegistry.register("my_tool", my_fn)` or
 `ToolRegistry.register_from_scripts_folder("path/to/scripts")` **before**
 building the agent — then list the name in `tools:` like any builtin.

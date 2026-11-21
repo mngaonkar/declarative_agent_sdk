@@ -16,17 +16,23 @@ class ToolRegistry:
     _tools: Dict[str, Any] = {}
     _builtins_registered: bool = False
 
-    # Tools every agent gets whether or not the YAML declares a `tools:` list.
-    # The lean runtime has its own (sandboxed) core set in LeanToolRegistry;
-    # these are the equivalents for the adk / deepagent runtimes.
-    CORE_TOOL_NAMES: tuple = ('read_file', 'write_file')
+    # Tools every agent gets whether or not the YAML declares a `tools:` list;
+    # `tools:` only ever gates non-core tools. The lean runtime has its own
+    # sandboxed read_file / write_file and bridges the rest of these in
+    # (LeanToolRegistry._register_shared_core); adk / deepagent take them all.
+    CORE_TOOL_NAMES: tuple = (
+        'read_file',
+        'write_file',
+        'web_request',
+        'exec_command',
+        'send_to_agent',
+        'share_file',
+        'read_shared',
+    )
 
-    # Talking to the board an agent belongs to. Core when there is a board —
-    # an agent that can be addressed with @name should be able to answer in
-    # kind without anyone listing a tool for it — and absent when there is
-    # not, because off a board these two can only report that there is no
-    # board, and every tool offered costs tokens on every request.
-    BOARD_TOOL_NAMES: tuple = ('send_to_agent', 'list_agents')
+    # Core only when on a board: off a board it can only report that there is
+    # no board, and every tool offered costs tokens on every request.
+    BOARD_TOOL_NAMES: tuple = ('list_agents',)
     
     @classmethod
     def register(cls, name: str, tool: Any) -> None:
