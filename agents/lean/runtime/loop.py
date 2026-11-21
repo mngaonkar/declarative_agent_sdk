@@ -263,6 +263,13 @@ class LeanLoop:
         self._history.pop(session_id, None)
         self._pending.pop(session_id, None)
 
+    def reset_all(self) -> int:
+        """Forget every session; returns how many there were."""
+        count = len(set(self._history) | set(self._pending))
+        self._history.clear()
+        self._pending.clear()
+        return count
+
     def _trim(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(history) <= self.history_limit:
             return history

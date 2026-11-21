@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -947,6 +948,35 @@ class TestAgentConfigApi:
         # the store now matches what the agent will read
         assert plane.store.agent(agent["id"])["model"] == "gpt-4o-mini"
         assert "endpoint" not in response.json()["yaml"]
+
+    def test_get_reports_key_status_never_the_key(self, client, agent):
+        Path(agent["prefix"], ".env").write_text("OPENAI_API_KEY=sk-secret\n")
+        response = client.get(f"/api/agents/{agent['id']}/config", headers=AUTH)
+        data = response.json()
+        assert data["key_name"] == "OPENAI_API_KEY"          # vllm reads this one
+        assert data["env_names"] == ["OPENAI_API_KEY"]
+        assert "sk-secret" not in response.text
+
+    def test_put_with_a_key_lands_under_the_new_provider(self, client, agent):
+        response = client.put(f"/api/agents/{agent['id']}/config", json={
+            "properties": {"provider": "anthropic"}, "api_key": "sk-ant-1",
+            "restart": False,
+        }, headers=AUTH)
+        assert response.status_code == 200
+        assert "sk-ant-1" not in response.text
+        env = Path(agent["prefix"], ".env").read_text()
+        assert "ANTHROPIC_API_KEY=sk-ant-1" in env
+        assert "sk-ant-1" not in Path(agent["prefix"], "agent.yaml").read_text()
+
+    def test_put_with_a_bad_key_writes_nothing(self, client, agent):
+        before = Path(agent["prefix"], "agent.yaml").read_text()
+        response = client.put(f"/api/agents/{agent['id']}/config", json={
+            "properties": {"model": "changed"}, "api_key": "has space",
+            "restart": False,
+        }, headers=AUTH)
+        assert response.status_code == 400
+        assert Path(agent["prefix"], "agent.yaml").read_text() == before
+        assert not Path(agent["prefix"], ".env").exists()
 
     def test_put_raw_yaml_is_written_verbatim(self, client, agent, tmp_path):
         raw = "# my own comment\nname: coder\nprovider: openai\nmodel: gpt-4o\n"
@@ -3845,6 +3875,22 @@ class TestAgentContextRoute:
         assert data["sessions"][0]["chars"] == 8000
         assert data["sessions"][0]["prompt_tokens"] > 2000
 
+    def test_delete_forgets_one_session(self, served):
+        agent, client = served
+        agent._loop._history["a"] = [{"role": "user", "content": "x"}]
+        agent._loop._history["b"] = [{"role": "user", "content": "y"}]
+        reply = client.delete("/context", params={"session": "a"})
+        assert reply.status_code == 200 and reply.json()["cleared"] == 1
+        assert list(agent._loop._history) == ["b"]
+        assert client.get("/context").json()["sessions"][0]["session"] == "b"
+
+    def test_delete_without_a_session_forgets_all(self, served):
+        agent, client = served
+        agent._loop._history["a"] = [{"role": "user", "content": "x"}]
+        agent._loop._history["b"] = [{"role": "user", "content": "y"}]
+        assert client.delete("/context").json()["cleared"] == 2
+        assert agent._loop._history == {}
+
     def test_it_does_not_leak_the_conversation(self, served):
         agent, client = served
         agent._loop._history["s"] = [{"role": "user", "content": "swordfish"}]
@@ -3875,3 +3921,542 @@ class TestAgentContextRoute:
         """The new route must not displace the A2A surface."""
         _, client = served
         assert client.get("/.well-known/agent-card.json").status_code == 200
+
+
+class TestModelCatalog:
+    """The create form's endpoint autofill and model picker."""
+
+    @staticmethod
+    def _serving(payload, status=200, seen=None):
+        def handle(request: httpx.Request) -> httpx.Response:
+            if seen is not None:
+                seen.append(request)
+            return httpx.Response(status, json=payload)
+        return httpx.MockTransport(handle)
+
+    @pytest.mark.asyncio
+    async def test_openai_defaults_its_endpoint_and_drops_non_chat_models(self):
+        from declarative_agent_sdk.agents_control import catalog
+        seen = []
+        result = await catalog.list_models(
+            "openai", "", "sk-test",
+            transport=self._serving({"data": [
+                {"id": "gpt-x"}, {"id": "text-embedding-3-small"},
+                {"id": "whisper-1"}, {"id": "o-mini"},
+            ]}, seen=seen),
+        )
+        assert result["ok"] and result["models"] == ["gpt-x", "o-mini"]
+        assert str(seen[0].url) == "https://api.openai.com/v1/models"
+        assert seen[0].headers["Authorization"] == "Bearer sk-test"
+
+    @pytest.mark.asyncio
+    async def test_openai_without_a_key_says_so_instead_of_calling(self, monkeypatch):
+        from declarative_agent_sdk.agents_control import catalog
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        result = await catalog.list_models("openai", "", "")
+        assert not result["ok"] and "API key" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_vllm_lists_everything_it_serves_without_a_key(self, monkeypatch):
+        from declarative_agent_sdk.agents_control import catalog
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        seen = []
+        result = await catalog.list_models(
+            "vllm", "http://box:30081/v1/", "",
+            transport=self._serving({"data": [{"id": "Qwen/Qwen3-embedding"}]}, seen=seen),
+        )
+        # vLLM serves what it was started with; nothing is filtered.
+        assert result["models"] == ["Qwen/Qwen3-embedding"]
+        assert "Authorization" not in seen[0].headers
+        assert str(seen[0].url) == "http://box:30081/v1/models"
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_key_is_named(self):
+        from declarative_agent_sdk.agents_control import catalog
+        result = await catalog.list_models(
+            "openai", "", "bad", transport=self._serving({}, status=401))
+        assert not result["ok"] and "rejected" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_endpoint_is_a_result(self):
+        from declarative_agent_sdk.agents_control import catalog
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+        result = await catalog.list_models(
+            "vllm", "http://box:1/v1", "", transport=httpx.MockTransport(refuse))
+        assert not result["ok"] and "could not reach" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_providers_without_a_listing_are_declined(self):
+        from declarative_agent_sdk.agents_control import catalog
+        result = await catalog.list_models("anthropic", "", "key")
+        assert not result["ok"] and result["models"] == []
+
+    def test_state_carries_provider_endpoints(self, client):
+        providers = client.get("/api/state", headers=AUTH).json()["providers"]
+        assert providers["endpoints"]["openai"] == "https://api.openai.com/v1"
+        assert "vllm" in providers["listable"]
+
+    def test_the_route_answers_with_a_reason(self, client, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        reply = client.post("/api/models", headers=AUTH, json={"provider": "openai"})
+        assert reply.status_code == 200
+        assert reply.json()["ok"] is False
+
+
+class TestAgentApiKey:
+    """Updating a provider key after install, through the agent's .env."""
+
+    LOCAL = {"host": "localhost", "is_local": 1, "name": "here"}
+
+    def test_set_replaces_the_line_keeps_others_and_stays_private(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("OPENAI_API_KEY=old\nexport OPENAI_API_KEY=older\n"
+                       "AGENTS_CONTROL_URL=http://board:8900\n")
+        env.chmod(0o600)
+        driver = MachineDriver()
+        driver.set_env_var(self.LOCAL, str(tmp_path), "OPENAI_API_KEY", "sk-new")
+        lines = env.read_text().splitlines()
+        assert lines.count("OPENAI_API_KEY=sk-new") == 1
+        assert not any("old" in line for line in lines)
+        assert "AGENTS_CONTROL_URL=http://board:8900" in lines
+        assert (env.stat().st_mode & 0o777) == 0o600
+        assert not (tmp_path / ".env.tmp").exists()
+
+    def test_set_creates_a_missing_env(self, tmp_path):
+        MachineDriver().set_env_var(self.LOCAL, str(tmp_path), "GOOGLE_API_KEY", "g-1")
+        assert (tmp_path / ".env").read_text() == "GOOGLE_API_KEY=g-1\n"
+
+    def test_names_are_listed_without_values(self, tmp_path):
+        (tmp_path / ".env").write_text(
+            "OPENAI_API_KEY=sk-secret\nexport B_TOKEN=x\nEMPTY=\n# C=1\n")
+        names = MachineDriver().env_names(self.LOCAL, str(tmp_path))
+        assert names == ["B_TOKEN", "OPENAI_API_KEY"]
+        assert "sk-secret" not in "".join(names)
+
+    def test_no_env_means_no_names(self, tmp_path):
+        assert MachineDriver().env_names(self.LOCAL, str(tmp_path)) == []
+
+    @pytest.mark.parametrize("bad", ["two words", "a'b", 'a"b', "a$b", "a`b", "a\\b"])
+    def test_values_that_would_break_the_file_are_refused(self, tmp_path, bad):
+        with pytest.raises(MachineError):
+            MachineDriver().set_env_var(self.LOCAL, str(tmp_path), "OPENAI_API_KEY", bad)
+
+    def test_vllm_keys_go_to_openai_api_key(self):
+        from declarative_agent_sdk.agents_control.machines import key_name_for
+        assert key_name_for("vllm") == "OPENAI_API_KEY"
+        assert key_name_for("anthropic") == "ANTHROPIC_API_KEY"
+
+
+class TestBoardIsNeverStale:
+    """The board is edited in place; a browser must revalidate, not guess."""
+
+    def test_static_files_say_no_cache(self, client):
+        response = client.get("/static/app.js")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers.get("etag")
+
+    def test_index_says_no_cache(self, client):
+        assert client.get("/").headers["cache-control"] == "no-cache"
+
+
+class TestAgentNetwork:
+    """Changing an installed agent's bind address and published URL."""
+
+    LOCAL = {"host": "localhost", "is_local": 1, "name": "here"}
+
+    @pytest.fixture
+    def layout(self, tmp_path):
+        import sys
+        root = tmp_path / "root"
+        prefix = root / "coder"
+        (prefix / ".venv" / "bin").mkdir(parents=True)
+        (prefix / ".venv" / "bin" / "python").symlink_to(sys.executable)
+        conf = root / "supervisor" / "conf.d" / "coder.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text('[program:coder]\ncommand=x\n'
+                        'environment=PYTHONUNBUFFERED="1",HOST="0.0.0.0",PORT="8000",PATH="/bin"\n')
+        (prefix / "run_server.py").write_text(
+            'x = 1\n        AgentInterface(\n                url="http://10.0.0.132:8000/",\n')
+        (prefix / ".agent-meta").write_text(json.dumps({
+            "name": "coder", "bind_host": "0.0.0.0", "advertise_host": "10.0.0.132",
+            "url": "http://10.0.0.132:8000/", "port": 8000}))
+        return prefix, conf
+
+    def test_read_reports_the_files_not_the_board(self, layout):
+        prefix, _ = layout
+        net = MachineDriver().agent_network(self.LOCAL, str(prefix), "coder")
+        assert net["ok"] and net["bind_host"] == "0.0.0.0"
+        assert net["advertise_host"] == "10.0.0.132" and net["port"] == 8000
+
+    def test_write_updates_all_three_places(self, layout):
+        prefix, conf = layout
+        net = MachineDriver().agent_network(
+            self.LOCAL, str(prefix), "coder", "0.0.0.0", "100.83.163.18", write=True)
+        assert net["url"] == "http://100.83.163.18:8000/"
+        assert 'url="http://100.83.163.18:8000/"' in (prefix / "run_server.py").read_text()
+        meta = json.loads((prefix / ".agent-meta").read_text())
+        assert meta["url"] == net["url"] and meta["advertise_host"] == "100.83.163.18"
+        assert meta["agent_card"].endswith(":8000/.well-known/agent-card.json")
+        assert net["conf_changed"] is False                 # HOST was not asked to change
+        assert 'HOST="0.0.0.0"' in conf.read_text()
+
+    def test_a_specific_bind_is_also_what_gets_published(self, layout):
+        prefix, conf = layout
+        net = MachineDriver().agent_network(
+            self.LOCAL, str(prefix), "coder", "100.83.163.18", "", write=True)
+        assert 'HOST="100.83.163.18",PORT="8000"' in conf.read_text()
+        assert net["url"] == "http://100.83.163.18:8000/" and net["conf_changed"]
+
+    def test_all_interfaces_without_an_address_keeps_the_published_one(self, layout):
+        prefix, _ = layout
+        net = MachineDriver().agent_network(
+            self.LOCAL, str(prefix), "coder", "0.0.0.0", "", write=True)
+        assert net["url"] == "http://10.0.0.132:8000/"
+
+    def test_ipv6_is_bracketed(self, layout):
+        prefix, _ = layout
+        net = MachineDriver().agent_network(
+            self.LOCAL, str(prefix), "coder", "", "fd7a::1", write=True)
+        assert net["url"] == "http://[fd7a::1]:8000/"
+        again = MachineDriver().agent_network(self.LOCAL, str(prefix), "coder")
+        assert again["advertise_host"] == "fd7a::1"
+
+    def test_a_pre_supervisor_install_says_why(self, layout):
+        prefix, conf = layout
+        conf.unlink()
+        net = MachineDriver().agent_network(self.LOCAL, str(prefix), "coder")
+        assert not net["ok"] and "missing" in net["error"]
+
+    def test_bad_addresses_are_refused(self, layout):
+        prefix, _ = layout
+        with pytest.raises(MachineError):
+            MachineDriver().agent_network(
+                self.LOCAL, str(prefix), "coder", "x; reboot", "", write=True)
+
+    def test_route_updates_the_board_record(self, client, plane, layout):
+        prefix, _ = layout
+        (prefix / "agent.yaml").write_text(SAMPLE_YAML)
+        (prefix / "instructions.md").write_text("# coder\n")
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        agent = plane.store.upsert_agent(machine["id"], {
+            "name": "coder", "prefix": str(prefix), "url": "http://10.0.0.132:8000/"})
+        got = client.get(f"/api/agents/{agent['id']}/config", headers=AUTH).json()
+        assert got["network"]["advertise_host"] == "10.0.0.132"
+        reply = client.put(f"/api/agents/{agent['id']}/config", json={
+            "properties": {}, "restart": False,
+            "network": {"bind_host": "0.0.0.0", "advertise_host": "100.83.163.18"},
+        }, headers=AUTH).json()
+        assert reply.get("network", {}).get("url") == "http://100.83.163.18:8000/", reply
+        record = plane.store.agent(agent["id"])
+        assert record["url"] == "http://100.83.163.18:8000/"
+        assert record["agent_card"] == "http://100.83.163.18:8000/.well-known/agent-card.json"
+
+    def test_route_rejects_a_bad_address_before_writing(self, client, plane, layout):
+        prefix, _ = layout
+        (prefix / "agent.yaml").write_text(SAMPLE_YAML)
+        (prefix / "instructions.md").write_text("# coder\n")
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        agent = plane.store.upsert_agent(machine["id"], {"name": "coder", "prefix": str(prefix)})
+        before = (prefix / "agent.yaml").read_text()
+        response = client.put(f"/api/agents/{agent['id']}/config", json={
+            "properties": {"model": "changed"}, "network": {"bind_host": "a b"},
+        }, headers=AUTH)
+        assert response.status_code == 400
+        assert (prefix / "agent.yaml").read_text() == before
+
+
+class TestAgentModels:
+    """The settings form's model picker, listed from the agent's machine."""
+
+    LOCAL = {"host": "localhost", "is_local": 1, "name": "here"}
+
+    @pytest.fixture
+    def endpoint(self):
+        import http.server
+        import threading
+        seen = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["auth"] = self.headers.get("Authorization")
+                seen["path"] = self.path
+                if seen["auth"] != "Bearer sk-fake-for-test":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                body = json.dumps({"data": [{"id": "gpt-x"}, {"id": "whisper-1"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        yield f"http://127.0.0.1:{server.server_port}/v1", seen
+        server.shutdown()
+
+    @pytest.fixture
+    def prefix(self, tmp_path):
+        import sys
+        (tmp_path / ".venv" / "bin").mkdir(parents=True)
+        (tmp_path / ".venv" / "bin" / "python").symlink_to(sys.executable)
+        return tmp_path
+
+    def test_the_key_comes_from_the_agents_env(self, endpoint, prefix, monkeypatch):
+        url, seen = endpoint
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        (prefix / ".env").write_text("export OPENAI_API_KEY='sk-fake-for-test'\n")
+        reply = MachineDriver().list_models_on_machine(
+            self.LOCAL, str(prefix), url, "OPENAI_API_KEY")
+        assert reply["ok"] and reply["ids"] == ["gpt-x", "whisper-1"]
+        assert seen["path"] == "/v1/models"
+        assert "sk-fake" not in json.dumps(reply)           # only ids come back
+
+    def test_a_missing_key_is_reported_as_missing(self, endpoint, prefix, monkeypatch):
+        url, _ = endpoint
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        reply = MachineDriver().list_models_on_machine(
+            self.LOCAL, str(prefix), url, "OPENAI_API_KEY")
+        assert reply == {"ok": False, "status": 401, "has_key": False}
+
+    def test_a_bad_endpoint_is_refused_before_running(self, prefix):
+        with pytest.raises(MachineError):
+            MachineDriver().list_models_on_machine(
+                self.LOCAL, str(prefix), "file:///etc/passwd", "OPENAI_API_KEY")
+
+    def _agent(self, plane, prefix, provider="openai"):
+        machine = plane.store.add_machine("here", "localhost", is_local=True)
+        return plane.store.upsert_agent(machine["id"], {
+            "name": "coder", "prefix": str(prefix), "provider": provider})
+
+    def test_route_filters_and_follows_unsaved_edits(self, client, plane, prefix, monkeypatch):
+        calls = []
+
+        def fake(machine, prefix_, endpoint, key_name, timeout=30):
+            calls.append((endpoint, key_name))
+            return {"ok": True, "ids": ["gpt-x", "text-embedding-3-small"], "has_key": True}
+
+        monkeypatch.setattr(plane.driver, "list_models_on_machine", fake)
+        agent = self._agent(plane, prefix, provider="vllm")
+        data = client.get(f"/api/agents/{agent['id']}/models?provider=openai",
+                          headers=AUTH).json()
+        assert data["models"] == ["gpt-x"]
+        assert calls == [("https://api.openai.com/v1", "OPENAI_API_KEY")]
+
+    def test_route_explains_a_missing_key(self, client, plane, prefix, monkeypatch):
+        monkeypatch.setattr(plane.driver, "list_models_on_machine",
+                            lambda *a, **k: {"ok": False, "status": 401, "has_key": False})
+        agent = self._agent(plane, prefix)
+        data = client.get(f"/api/agents/{agent['id']}/models", headers=AUTH).json()
+        assert not data["ok"] and "OPENAI_API_KEY is not set" in data["error"]
+
+    def test_route_declines_unlisted_providers(self, client, plane, prefix):
+        agent = self._agent(plane, prefix, provider="anthropic")
+        data = client.get(f"/api/agents/{agent['id']}/models", headers=AUTH).json()
+        assert not data["ok"] and data["models"] == []
+
+
+class TestSupervisordDown:
+    """A dead supervisord is named, not reported as a bare exit code."""
+
+    LOCAL = {"host": "localhost", "is_local": 1, "name": "gpu"}
+
+    def test_stdout_is_kept_when_stderr_is_empty(self):
+        with pytest.raises(MachineError) as excinfo:
+            MachineDriver().run(self.LOCAL, "echo 'unix:///x/s.sock no such file'; exit 7")
+        assert "no such file" in excinfo.value.stderr
+
+    @staticmethod
+    def _fake_supervisor(tmp_path):
+        """supervisorctl that is 'down' until fake supervisord drops a marker."""
+        prefix = tmp_path / "root" / "coder"
+        bin_dir = tmp_path / "root" / "supervisor" / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        prefix.mkdir()
+        marker = tmp_path / "up"
+        ctl = bin_dir / "supervisorctl"
+        ctl.write_text(f"#!/bin/sh\n[ -f {marker} ] && exit 0\n"
+                       "echo 'unix:///x/s.sock no such file'\nexit 7\n")
+        daemon = bin_dir / "supervisord"
+        daemon.write_text(f"#!/bin/sh\ntouch {marker}\n")
+        for tool in (ctl, daemon):
+            tool.chmod(0o755)
+        return prefix, marker
+
+    def test_restart_with_supervisord_down_starts_it(self, tmp_path):
+        prefix, marker = self._fake_supervisor(tmp_path)
+        result = MachineDriver().supervisor_action(self.LOCAL, str(prefix), "coder", "restart")
+        assert result["ok"] is True and result["state"] == "started"
+        assert marker.exists()
+        assert "started its agents" in result["output"]
+
+    def test_apply_with_supervisord_down_starts_it(self, tmp_path):
+        prefix, _ = self._fake_supervisor(tmp_path)
+        applied = MachineDriver().apply_service_change(self.LOCAL, str(prefix), "coder")
+        assert applied["ok"] and applied["state"] == "started"
+
+    def test_status_with_supervisord_down_only_reports(self, tmp_path):
+        prefix, marker = self._fake_supervisor(tmp_path)
+        result = MachineDriver().supervisor_action(self.LOCAL, str(prefix), "coder", "status")
+        assert result["ok"] is False and not marker.exists()
+        assert "supervisord is not running on 'gpu'" in result["output"]
+
+    def test_a_reaping_logind_without_linger_is_reported_not_attempted(
+            self, tmp_path, monkeypatch):
+        prefix, marker = self._fake_supervisor(tmp_path)
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        (tools / "busctl").write_text("#!/bin/sh\necho 'b true'\n")
+        (tools / "loginctl").write_text("#!/bin/sh\necho no\n")
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+        result = MachineDriver().supervisor_action(self.LOCAL, str(prefix), "coder", "restart")
+        assert result["ok"] is False and result["state"] == "needs-linger"
+        assert "sudo loginctl enable-linger" in result["output"]
+        assert not marker.exists()                  # nothing started that would die
+
+    def test_other_failures_pass_through(self):
+        from declarative_agent_sdk.agents_control.machines import supervisor_down_hint
+        assert supervisor_down_hint("coder: ERROR (no such process)", self.LOCAL, "/r/a") == ""
+
+
+class TestAgentsKnowTheirOwnTools:
+    """An agent on the board is told its tools act on its own machine."""
+
+    def test_user_at_host_is_not_a_mention(self):
+        assert mentions('check GPU on "mahadev@10.0.0.147"') == []
+        assert mentions("ssh mahadev@mahadev-ms7d28.tailbe5bd0.ts.net") == []
+        assert mentions("mail me at a.b@example.com") == []
+
+    def test_real_mentions_still_parse(self):
+        assert mentions("@coder.box go, then (@scout) and\n@reviewer") == [
+            "coder.box", "scout", "reviewer"]
+        assert mentions("ask @coder: now") == ["coder"]
+
+    def test_the_prompt_says_where_the_agent_runs_and_what_it_holds(self, store):
+        router = ChannelRouter(store, EventBus())
+        machine = store.add_machine("MacBook-pro", "localhost", is_local=True)
+        agent = store.upsert_agent(machine["id"], {
+            "name": "master", "url": "http://x",
+            "tools": "web_request,exec_command,send_to_agent"})
+        channel = store.add_channel("Master")
+        store.join(channel["id"], agent["id"])
+        prompt = router._prompt_for(channel["id"], "master.MacBook-pro", "hi", "you")
+        assert "You run on the machine 'MacBook-pro'" in prompt
+        assert "(web_request, exec_command, send_to_agent)" in prompt
+        assert "user@host is not an agent" in prompt
+
+
+class TestClearing:
+    """Clear conversation (per channel) and clear context (per agent)."""
+
+    @pytest.fixture
+    def setup(self, store):
+        router = ChannelRouter(store, EventBus())
+        machine = store.add_machine("here", "localhost", is_local=True)
+        agent = store.upsert_agent(machine["id"], {"name": "coder", "url": "http://x"})
+        channel = store.add_channel("dev")
+        store.join(channel["id"], agent["id"])
+        return router, channel, agent
+
+    def test_an_untouched_board_keeps_its_original_ids(self):
+        from declarative_agent_sdk.agents_control.router import context_id_for
+        assert context_id_for({"name": "dev"}, {"qualified": "coder.here"}) == "ac-dev-coder.here"
+
+    @pytest.mark.asyncio
+    async def test_clear_conversation_empties_and_moves_every_member_on(
+            self, setup, store, monkeypatch):
+        from declarative_agent_sdk.agents_control.router import context_id_for
+        router, channel, agent = setup
+        asked = []
+
+        async def forget(member, session=""):
+            asked.append((member["qualified"], session))
+            return "freed"
+
+        monkeypatch.setattr(router, "_forget", forget)
+        store.add_message(channel["id"], "human", "you", "old question")
+        before = context_id_for(store.channel(channel["id"]), store.agent(agent["id"]))
+        result = await router.clear_channel(channel["id"])
+        after = context_id_for(store.channel(channel["id"]), store.agent(agent["id"]))
+        assert result["messages_removed"] == 1
+        assert before != after
+        assert asked == [("coder.here", before)]          # the old history is freed
+        texts = [m["text"] for m in store.messages(channel["id"])]
+        assert texts == ["Conversation cleared. Members start from a blank history."]
+
+    @pytest.mark.asyncio
+    async def test_clear_context_moves_one_agent_on_everywhere(self, setup, store, monkeypatch):
+        from declarative_agent_sdk.agents_control.router import context_id_for
+        router, channel, agent = setup
+        other = store.add_channel("ops")
+        store.join(other["id"], agent["id"])
+
+        async def forget(member, session=""):
+            return "freed"
+
+        monkeypatch.setattr(router, "_forget", forget)
+        ids = lambda: [context_id_for(store.channel(c["id"]), store.agent(agent["id"]))
+                       for c in (channel, other)]
+        before = ids()
+        store.add_message(channel["id"], "human", "you", "kept")
+        await router.clear_agent(agent["id"])
+        assert all(b != a for b, a in zip(before, ids()))
+        assert [m["text"] for m in store.messages(channel["id"])] == ["kept"]
+
+    @pytest.mark.asyncio
+    async def test_an_older_agent_is_reported_not_failed(self, setup, monkeypatch):
+        router, _, agent = setup
+        original = httpx.AsyncClient
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(
+            transport=httpx.MockTransport(lambda request: httpx.Response(405))))
+        assert "older agent" in await router._forget(dict(agent, url="http://x"))
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_agent_is_reported_not_failed(self, setup, monkeypatch):
+        router, _, agent = setup
+        original = httpx.AsyncClient
+
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(
+            transport=httpx.MockTransport(refuse)))
+        assert "unreachable" in await router._forget(dict(agent, url="http://x"))
+
+    def test_routes(self, client, plane):
+        channel = plane.store.add_channel("dev")
+        reply = client.post(f"/api/channels/{channel['id']}/clear", headers=AUTH)
+        assert reply.status_code == 200 and reply.json()["messages_removed"] == 0
+        assert client.post("/api/channels/999/clear", headers=AUTH).status_code == 404
+        assert client.post("/api/agents/999/clear-context", headers=AUTH).status_code == 404
+        assert client.post(f"/api/channels/{channel['id']}/clear").status_code == 401
+
+
+class TestWorkingState:
+    """The sidebar's idle/working icon is seeded from /api/state."""
+
+    def test_turns_are_counted_per_agent_and_channel(self, store):
+        router = ChannelRouter(store, EventBus())
+        router._turns[("coder.here", 1)] = 2
+        router._turns[("coder.here", 3)] = 1
+        assert router.working() == {"coder.here": [1, 3]}
+
+    @pytest.mark.asyncio
+    async def test_a_finished_turn_leaves_no_trace(self, store):
+        router = ChannelRouter(store, EventBus())
+        machine = store.add_machine("here", "localhost", is_local=True)
+        agent = store.upsert_agent(machine["id"], {"name": "coder", "url": "http://127.0.0.1:9"})
+        channel = store.add_channel("dev")
+        store.join(channel["id"], agent["id"])
+        await router.dispatch(channel["id"], store.members(channel["id"])[0], "hi", "you")
+        assert router.working() == {}              # unreachable agent, turn still ended
+
+    def test_state_carries_it(self, client):
+        assert client.get("/api/state", headers=AUTH).json()["working"] == {}

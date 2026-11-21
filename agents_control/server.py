@@ -28,8 +28,11 @@ from sse_starlette.sse import EventSourceResponse
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.agents_control import config as agent_config
+from declarative_agent_sdk.agents_control import catalog as model_catalog
 from declarative_agent_sdk.agents_control import metrics as model_metrics
-from declarative_agent_sdk.agents_control.machines import MachineDriver, MachineError
+from declarative_agent_sdk.agents_control.machines import (
+    MachineDriver, MachineError, key_name_for,
+)
 from declarative_agent_sdk.agents_control.router import ChannelRouter, EventBus
 from declarative_agent_sdk.agents_control.store import Store, DEFAULT_DB_PATH
 
@@ -43,6 +46,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 # The board itself is unauthenticated (it is a shell that asks for the token);
 # every /api path is not. Exact paths and prefixes are kept apart deliberately:
 # a prefix list containing "/" matches every request and opens the whole API.
+# The board is edited in place and served from disk, so a browser must ask
+# before reusing its copy: without this it applies heuristic caching to a file
+# with only Last-Modified, and keeps running yesterday's app.js. no-cache still
+# allows the copy — the ETag makes the check a cheap 304.
+NO_STALE = {"Cache-Control": "no-cache"}
+
+
+class FreshStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.update(NO_STALE)
+        return response
+
+
 PUBLIC_EXACT = frozenset({"/", "/index.html", "/healthz"})
 PUBLIC_PREFIXES = ("/static/",)
 
@@ -206,7 +223,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
     # --------------------------------------------------------------- routes
 
     async def index(request: Request) -> Response:
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html", headers=NO_STALE)
 
     async def healthz(request: Request) -> Response:
         """
@@ -234,8 +251,28 @@ def create_app(cp: "ControlPlane") -> Starlette:
             "channels": store.channels(),
             "settings": store.settings(),
             "defaults": dict(DEFAULT_SETTINGS),
+            # Who is mid-turn, so a page opened during one shows it working
+            # instead of waiting for the next typing event.
+            "working": router.working(),
+            # Per-provider endpoints for the create form to fill in.
+            "providers": model_catalog.defaults(),
             "auth": bool(cp.token),
         })
+
+    @guard
+    async def list_models(request: Request) -> Response:
+        """
+        The models an endpoint serves, for the create form's model picker.
+
+        POST rather than GET so the API key travels in the body, never in a
+        URL that ends up in access logs.
+        """
+        payload = await body(request)
+        return JSONResponse(await model_catalog.list_models(
+            str(payload.get("provider") or ""),
+            str(payload.get("endpoint") or ""),
+            str(payload.get("api_key") or ""),
+        ))
 
     # -- machines ---------------------------------------------------------
 
@@ -461,7 +498,26 @@ def create_app(cp: "ControlPlane") -> Starlette:
             driver.supervisor_action, machine, str(agent["prefix"] or ""),
             agent["name"], "status",
         )
+        provider = str(parsed.get("provider") or agent.get("provider") or "")
+        try:
+            env_names = await in_thread(
+                driver.env_names, machine, str(agent["prefix"] or ""))
+        except MachineError:
+            env_names = []
+        try:
+            network = await in_thread(
+                driver.agent_network, machine, str(agent["prefix"] or ""), agent["name"])
+        except MachineError as exc:
+            network = {"ok": False, "error": exc.detail()}
         return JSONResponse({
+            # Where it binds and what its card publishes, read from the files
+            # the running process was started from.
+            "network": network,
+            # Names only, never values: enough to say whether a key is set.
+            "env_names": env_names,
+            "key_name": key_name_for(provider),
+            "key_names": {p: key_name_for(p)
+                          for p in ("openai", "google", "anthropic", "vllm")},
             "agent": agent,
             "prefix": agent["prefix"],
             "yaml": files["yaml"],
@@ -477,6 +533,47 @@ def create_app(cp: "ControlPlane") -> Starlette:
                 str(parsed.get("agent_framework") or parsed.get("backend") or "lean")),
             "status": status,
         })
+
+    @guard
+    async def agent_models(request: Request) -> Response:
+        """
+        Models this agent's endpoint serves, for the settings form's picker.
+
+        Asked from the agent's machine with the key in its own .env, so the
+        board never handles the key. ``provider`` and ``endpoint`` in the query
+        reflect unsaved edits in the form; otherwise the saved ones are used.
+        """
+        agent, machine = _agent_and_machine(int(request.path_params["agent_id"]))
+        provider = (request.query_params.get("provider")
+                    or str(agent.get("provider") or "")).strip().lower()
+        if provider not in model_catalog.LISTABLE:
+            return JSONResponse({"ok": False, "models": [], "error":
+                                 f"model listing is not available for {provider or 'this provider'}"})
+        endpoint = (request.query_params.get("endpoint")
+                    or str(agent.get("endpoint") or "")
+                    or model_catalog.PROVIDER_ENDPOINTS.get(provider, "")).strip().rstrip("/")
+        if not endpoint:
+            return JSONResponse({"ok": False, "models": [],
+                                 "error": "enter the endpoint URL to list its models"})
+        key_name = key_name_for(provider)
+        try:
+            reply = await in_thread(driver.list_models_on_machine, machine,
+                                    str(agent["prefix"] or ""), endpoint, key_name)
+        except MachineError as exc:
+            return JSONResponse({"ok": False, "models": [], "endpoint": endpoint,
+                                 "error": exc.detail()[:300]})
+        if reply.get("ok"):
+            return JSONResponse({"ok": True, "endpoint": endpoint, "error": "",
+                                 "models": model_catalog.chat_models(provider, reply["ids"])})
+        if reply.get("status") in (401, 403):
+            error = (f"the endpoint rejected the agent's {key_name}" if reply.get("has_key")
+                     else f"{key_name} is not set for this agent — add it above")
+        elif reply.get("status"):
+            error = f"{endpoint}/models answered {reply['status']}"
+        else:
+            error = (f"could not reach {endpoint} from {machine['name']}: "
+                     f"{reply.get('error', 'no reply')}")
+        return JSONResponse({"ok": False, "models": [], "endpoint": endpoint, "error": error})
 
     @guard
     async def agent_metrics(request: Request) -> Response:
@@ -546,34 +643,91 @@ def create_app(cp: "ControlPlane") -> Starlette:
         prefix = str(agent["prefix"] or "")
 
         current = await in_thread(driver.read_agent_files, machine, prefix)
-        try:
-            text, warnings = agent_config.prepare(
-                current["yaml"],
-                agent["name"],
-                raw=payload.get("yaml"),
-                updates=payload.get("properties"),
-            )
-        except agent_config.ConfigError as exc:
-            raise ValueError(str(exc)) from exc
+        # A save may change only the key or the address; agent.yaml is then
+        # left exactly as it is rather than refused as "nothing to save".
+        touches_yaml = payload.get("yaml") is not None or bool(payload.get("properties"))
+        if not touches_yaml and (payload.get("api_key") or payload.get("network")):
+            text, warnings = current["yaml"], []
+        else:
+            try:
+                text, warnings = agent_config.prepare(
+                    current["yaml"],
+                    agent["name"],
+                    raw=payload.get("yaml"),
+                    updates=payload.get("properties"),
+                )
+            except agent_config.ConfigError as exc:
+                raise ValueError(str(exc)) from exc
 
         instructions = payload.get("instructions")
         if instructions is not None and instructions == current["instructions"]:
             instructions = None                      # nothing changed, skip the write
 
+        # A new key is checked before anything is written, so a rejected one
+        # does not leave the config saved and the key not.
+        api_key = str(payload.get("api_key") or "").strip()
+        if api_key and (any(ch.isspace() for ch in api_key)
+                        or any(c in api_key for c in "'\"\\$`")):
+            raise ValueError("the API key must be a single token without spaces, "
+                             "quotes, '$', '`' or backslashes")
+
+        network = payload.get("network") or {}
+        for field in ("bind_host", "advertise_host"):
+            value = str(network.get(field) or "").strip()
+            if value and not HOST_RE.match(value):
+                raise ValueError(f"'{value}' is not a usable address for {field}")
+
         written = await in_thread(
-            driver.write_agent_files, machine, prefix, text, instructions
+            driver.write_agent_files, machine, prefix,
+            text if touches_yaml else None, instructions,
         )
+        if api_key:
+            # Named after the provider in the config just written, so switching
+            # provider and pasting its key in one save lands in the right place.
+            key_name = key_name_for(str(agent_config.parse(text).get("provider") or ""))
+            await in_thread(driver.set_env_var, machine, prefix, key_name, api_key)
+            written = dict(written, written=list(written.get("written", [])) + [f".env ({key_name})"])
+
+        # Bind address / published URL. Validated before anything else is
+        # touched below, applied after the config, and it restarts the agent
+        # itself: a new HOST is only read when supervisord re-creates the
+        # process, so it cannot wait for the restart checkbox.
+        network_result: Dict[str, Any] = {}
+        if network:
+            network_result = await in_thread(
+                driver.agent_network, machine, prefix, agent["name"],
+                str(network.get("bind_host") or "").strip(),
+                str(network.get("advertise_host") or "").strip(),
+                True,
+            )
+            if not network_result.get("ok"):
+                warnings.append(f"address not changed: {network_result.get('error', '')}")
+            else:
+                await in_thread(store.set_agent_url, int(agent["id"]), network_result["url"])
+                agent = dict(agent, url=network_result["url"],
+                             agent_card=f"{network_result['url']}.well-known/agent-card.json")
+                written = dict(written, written=list(written.get("written", []))
+                               + ["supervisor program", "run_server.py", ".agent-meta"])
 
         restart = {}
-        if payload.get("restart", True):
+        if network_result.get("ok"):
+            restart = await in_thread(
+                driver.apply_service_change, machine, prefix, agent["name"])
+            if not restart.get("ok"):
+                warnings.append(
+                    f"address saved, but supervisord could not apply it: "
+                    f"{restart.get('output', '')[:600]}")
+        elif payload.get("restart", True):
             restart = await in_thread(
                 driver.supervisor_action, machine, prefix, agent["name"], "restart"
             )
             if not restart.get("ok"):
-                warnings.append(
-                    f"saved, but the restart failed: {restart.get('output', '')[:200]} "
-                    f"— the agent is still running its old config"
-                )
+                output = str(restart.get("output", ""))
+                # "Still running its old config" is only true while supervisord
+                # is; when it is down, the agent is not running at all.
+                tail = "" if "supervisord is not running" in output \
+                    else " — the agent is still running its old config"
+                warnings.append(f"saved, but the restart failed: {output[:600]}{tail}")
 
         # Keep the record in step with the file the agent will now read.
         parsed = agent_config.parse(text)
@@ -590,6 +744,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
         bus.publish({"type": "agents"})
         return JSONResponse({
             "yaml": text, "written": written, "restart": restart, "warnings": warnings,
+            "network": network_result,
         })
 
     @guard
@@ -625,6 +780,16 @@ def create_app(cp: "ControlPlane") -> Starlette:
         await in_thread(store.delete_channel, channel_id)
         bus.publish({"type": "channels"})
         return JSONResponse({"deleted": channel_id})
+
+    @guard
+    async def clear_channel(request: Request) -> Response:
+        """Clear conversation: transcript plus each member's history of it."""
+        return JSONResponse(await router.clear_channel(int(request.path_params["channel_id"])))
+
+    @guard
+    async def clear_agent_context(request: Request) -> Response:
+        """Clear context: one agent forgets every channel's conversation."""
+        return JSONResponse(await router.clear_agent(int(request.path_params["agent_id"])))
 
     @guard
     async def join_channel(request: Request) -> Response:
@@ -889,13 +1054,17 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/machines/{machine_id:int}/interfaces",
               machine_interfaces, methods=["POST"]),
         Route("/api/agents", create_agent, methods=["POST"]),
+        Route("/api/models", list_models, methods=["POST"]),
         Route("/api/agents/{agent_id:int}", delete_agent, methods=["DELETE"]),
         Route("/api/agents/metrics", agent_metrics),
         Route("/api/agents/{agent_id:int}/config", get_agent_config),
+        Route("/api/agents/{agent_id:int}/models", agent_models),
         Route("/api/agents/{agent_id:int}/config", put_agent_config, methods=["PUT"]),
         Route("/api/agents/{agent_id:int}/action", agent_action, methods=["POST"]),
         Route("/api/channels", create_channel, methods=["POST"]),
         Route("/api/channels/{channel_id:int}", delete_channel, methods=["DELETE"]),
+        Route("/api/channels/{channel_id:int}/clear", clear_channel, methods=["POST"]),
+        Route("/api/agents/{agent_id:int}/clear-context", clear_agent_context, methods=["POST"]),
         Route("/api/channels/{channel_id:int}/members", join_channel, methods=["POST"]),
         Route("/api/channels/{channel_id:int}/members/{agent_id:int}",
               leave_channel, methods=["DELETE"]),
@@ -912,6 +1081,6 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/peer/preflight", peer_preflight),
         Route("/api/peer/log", peer_log, methods=["POST"]),
         Route("/api/events", events),
-        Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
+        Mount("/static", app=FreshStaticFiles(directory=str(STATIC_DIR)), name="static"),
     ]
     return Starlette(routes=routes)

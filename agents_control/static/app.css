@@ -90,6 +90,35 @@ body:has(.banner:not(.hidden)) .layout { height: calc(100vh - 38px); }
 .pin.ready { background: var(--accent-2); }
 .pin.down { background: var(--danger); }
 
+/* Sidebar activity icon: colour says reachable or not (same as .pin), motion
+   says idle or working. One glyph, so a row never shows two dots that
+   disagree. */
+.activity {
+  position: relative; width: 12px; height: 12px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  --tone: var(--accent-2);
+}
+.activity.down { --tone: var(--danger); }
+.activity::before {                          /* the core dot */
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--tone);
+}
+.activity.idle::before { animation: breathe 3.2s ease-in-out infinite; }
+.activity.down::before { animation: none; opacity: 0.9; }
+.activity.working::after {                   /* the orbit while a turn runs */
+  content: ''; position: absolute; inset: 0; border-radius: 50%;
+  border: 1.5px solid transparent; border-top-color: var(--accent);
+  border-right-color: var(--accent); animation: spin 0.9s linear infinite;
+}
+.activity.working::before { background: var(--accent); }
+.agent-list li.working { color: var(--text); }
+@keyframes breathe { 0%, 100% { opacity: 0.45; transform: scale(0.85); }
+                     50% { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .activity.idle::before { animation: none; opacity: 0.8; }
+  /* Still distinct without motion: a full static ring instead of an orbit. */
+  .activity.working::after { animation: none; border-color: var(--accent); }
+}
+
 /* ── panes ──────────────────────────────────────────────────────────── */
 
 .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -156,7 +185,16 @@ body:has(.banner:not(.hidden)) .layout { height: calc(100vh - 38px); }
 .msg .text hr { border: none; border-top: 1px solid var(--line); margin: 8px 0; }
 .msg .text strong { color: #fff; font-weight: 600; }
 .msg .text a { word-break: break-all; }
-.msg .text table { border-collapse: collapse; }
+.msg .text .table-wrap { overflow-x: auto; margin: 6px 0; max-width: 100%; }
+.msg .text table { border-collapse: collapse; font-size: 13px; }
+.msg .text th, .msg .text td {
+  border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top;
+  word-break: normal; overflow-wrap: anywhere;
+}
+.msg .text th { background: var(--bg-3); font-weight: 600; white-space: nowrap; }
+.msg .text tbody tr:nth-child(even) td { background: var(--bg-2); }
+.msg .text .align-center { text-align: center; }
+.msg .text .align-right { text-align: right; }
 .msg.human .who { color: var(--accent); }
 .msg.agent .who { color: var(--accent-2); }
 .msg.system { color: var(--dim); font-style: italic; }

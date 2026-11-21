@@ -56,7 +56,8 @@ class AIAgentServer():
         routes = (
             create_agent_card_routes(self._agent.agent_card)
             + create_jsonrpc_routes(request_handler, DEFAULT_RPC_URL)
-            + [Route("/context", self._context_route, methods=["GET"])]
+            + [Route("/context", self._context_route, methods=["GET"]),
+               Route("/context", self._reset_context_route, methods=["DELETE"])]
         )
 
         self.app = Starlette(routes=routes)
@@ -66,6 +67,23 @@ class AIAgentServer():
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+    async def _reset_context_route(self, request):
+        """
+        Forget one conversation (?session=ID) or every conversation.
+
+        No more exposed than the JSON-RPC endpoint beside it, which takes
+        messages from anyone who can reach the port.
+        """
+        reset = getattr(self._agent, "reset_context", None)
+        if reset is None:
+            return JSONResponse(
+                {"supported": False, "agent": self._agent.name,
+                 "note": "this runtime keeps no history the board can clear"},
+                status_code=501,
+            )
+        result = reset(request.query_params.get("session") or None)
+        return JSONResponse({"supported": True, "agent": self._agent.name, **result})
 
     async def _context_route(self, request):
         """

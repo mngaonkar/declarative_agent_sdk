@@ -206,6 +206,20 @@ class LeanAIAgent(BaseAgent):
         report["model"] = getattr(self._client, "model", "")
         return report
 
+    def reset_context(self, session_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Forget a conversation, or all of them.
+
+        Called by agents-control's "clear conversation" / "clear context". The
+        board also starts a new session id, so this is about freeing what the
+        old one held rather than about the next turn starting clean.
+        """
+        if session_id:
+            known = session_id in self._loop._history or session_id in self._loop._pending
+            self._loop.reset(session_id)
+            return {"cleared": 1 if known else 0, "session": session_id}
+        return {"cleared": self._loop.reset_all(), "session": ""}
+
     async def tool_confirmation(
         self,
         context_id: str,

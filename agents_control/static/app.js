@@ -4,7 +4,10 @@ const state = {
   machines: [], agents: [], channels: [], settings: {}, defaults: {},
   channelId: null, messages: [], members: [], halted: false, autoApprove: '',
   typing: new Set(), approvals: new Map(), lastId: 0, needsAuth: false,
-  contexts: {},
+  contexts: {}, providers: { endpoints: {}, listable: [] },
+  // Agent (qualified name) → channel ids it is taking a turn in, across all
+  // channels — the sidebar shows activity everywhere, not just the open one.
+  working: new Map(),
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -23,7 +26,7 @@ const el = (tag, cls, text) => {
  * process started. Edit the tree without restarting and the new board asks the
  * old server for routes it does not have — which it answers with a bare 404.
  */
-const EXPECTS_API = 20;
+const EXPECTS_API = 25;
 
 /** An agent's address on the board. The bare name is unique only per machine. */
 const fqn = (agent) => agent.qualified || `${agent.name}.${agent.machine_name}`;
@@ -81,7 +84,19 @@ async function checkServerVersion() {
   $('#side-foot').title =
     `agents-control ${health.version || '?'} · api ${revision} · up since ${health.started || '?'}`;
 
-  if (revision >= EXPECTS_API) return;
+  if (revision > EXPECTS_API) {
+    // The other way round: the server moved on while this tab kept the
+    // app.js it loaded earlier. Opening a dialog never re-reads the script,
+    // so new fields stay invisible until the page is reloaded.
+    showStale(
+      `The board was updated (server api ${revision}, this page api ${EXPECTS_API}). ` +
+      'Reload the page to get the new version.');
+    return;
+  }
+  if (revision === EXPECTS_API) {
+    $('#stale-banner').classList.add('hidden');
+    return;
+  }
   showStale(
     `This page expects server api ${EXPECTS_API}, but the running process is ` +
     `${revision ? `api ${revision}` : 'older than api 1'}` +
@@ -113,6 +128,8 @@ async function load() {
   state.channels = data.channels;
   state.settings = data.settings;
   state.defaults = data.defaults || {};
+  state.providers = data.providers || { endpoints: {}, listable: [] };
+  setWorking(data.working);
   state.needsAuth = data.auth;
   renderSidebar();
   renderAgents();
@@ -125,7 +142,16 @@ async function load() {
 function connect() {
   const query = token.get() ? `?token=${encodeURIComponent(token.get())}` : '';
   const stream = new EventSource(`/api/events${query}`);
-  stream.addEventListener('hello', () => $('#conn-dot').classList.add('live'));
+  stream.addEventListener('hello', () => {
+    $('#conn-dot').classList.add('live');
+    // A (re)connect may follow a server restart, which ended every turn
+    // without a typing-off; ask who is really working rather than keep a
+    // stuck spinner (or wipe what load() just learned).
+    syncWorking();
+    // Every (re)connect, not just page load: a hello after a drop usually
+    // means the server restarted, possibly onto newer code than this tab.
+    checkServerVersion();
+  });
   stream.addEventListener('ping', () => {});
   stream.addEventListener('update', (event) => handleEvent(JSON.parse(event.data)));
   stream.onerror = () => {
@@ -137,6 +163,16 @@ function connect() {
 
 function handleEvent(event) {
   switch (event.type) {
+    case 'cleared':
+      // Emptied here rather than refetched: the board's "Conversation cleared"
+      // line follows as an ordinary message event and lands in the empty view.
+      if (event.channel_id === state.channelId) {
+        state.messages = [];
+        state.lastId = 0;
+        state.typing.clear();
+        renderMessages();
+      }
+      break;
     case 'message':
       if (event.channel_id === state.channelId) {
         state.messages.push(event.message);
@@ -149,12 +185,18 @@ function handleEvent(event) {
         $('#typing').textContent = `@${event.agent}: ${event.text}`;
       }
       break;
-    case 'typing':
+    case 'typing': {
       if (event.channel_id === state.channelId) {
         event.on ? state.typing.add(event.agent) : state.typing.delete(event.agent);
         renderTyping();
       }
+      const busy = state.working.get(event.agent) || new Set();
+      event.on ? busy.add(event.channel_id) : busy.delete(event.channel_id);
+      if (busy.size) state.working.set(event.agent, busy);
+      else state.working.delete(event.agent);
+      renderSidebarAgents();
       break;
+    }
     case 'approval':
       state.approvals.set(event.approval.id, event.approval);
       if (event.channel_id === state.channelId) appendApproval(event.approval);
@@ -197,6 +239,45 @@ function liveness(agent) {
 
 const pinClass = (agent) => `pin ${liveness(agent).ok ? 'ready' : 'down'}`;
 
+/*
+ * The Agents list on its own, so a typing event redraws a handful of rows
+ * instead of the whole sidebar. Working comes from the board's typing events;
+ * reachable/down from liveness(), as everywhere else.
+ */
+function renderSidebarAgents() {
+  const agents = $('#sidebar-agents');
+  if (!agents) return;
+  agents.innerHTML = '';
+  state.agents.forEach((agent) => {
+    const name = fqn(agent);
+    const busy = state.working.get(name);
+    const live = liveness(agent);
+    const item = el('li', busy ? 'working' : '');
+    const icon = el('span', `activity ${busy ? 'working' : 'idle'}${live.ok ? '' : ' down'}`);
+    icon.setAttribute('role', 'img');
+    icon.setAttribute('aria-label', busy ? 'working' : (live.ok ? 'idle' : live.label));
+    item.append(icon, el('span', '', name));
+    const where = busy
+      ? `working in ${[...busy].map((id) => `#${state.channels.find((c) => c.id === id)?.name || id}`).join(', ')}`
+      : (live.ok ? 'idle' : live.label);
+    item.title = `${where} · ${agent.model || agent.framework} · ${agent.url || 'no url'}`;
+    agents.append(item);
+  });
+  if (!state.agents.length) agents.append(el('li', '', 'no agents yet'));
+}
+
+function setWorking(working) {
+  state.working = new Map(Object.entries(working || {})
+    .map(([agent, channels]) => [agent, new Set(channels)]));
+}
+
+async function syncWorking() {
+  try {
+    setWorking((await api('/api/state')).working);
+    renderSidebarAgents();
+  } catch { /* offline: the connection dot already says so */ }
+}
+
 function renderSidebar() {
   const channels = $('#channel-list');
   channels.innerHTML = '';
@@ -213,16 +294,7 @@ function renderSidebar() {
     channels.append(el('li', '', 'no channels yet'));
   }
 
-  const agents = $('#sidebar-agents');
-  agents.innerHTML = '';
-  state.agents.forEach((agent) => {
-    const item = el('li');
-    item.append(el('span', pinClass(agent)));
-    item.append(el('span', '', fqn(agent)));
-    item.title = `${agent.model || agent.framework} · ${agent.url || 'no url'}`;
-    agents.append(item);
-  });
-  if (!state.agents.length) agents.append(el('li', '', 'no agents yet'));
+  renderSidebarAgents();
 
   $('#side-foot').textContent =
     `${state.machines.length} machine(s) · ${state.agents.length} agent(s)`;
@@ -253,6 +325,7 @@ function renderBoardHeader() {
   $('#composer').hidden = !channel;
   $('#halt-btn').hidden = !channel;
   $('#delete-channel').hidden = !channel;
+  $('#clear-channel').hidden = !channel;
   $('#input').placeholder = channel
     ? `Message #${channel.name} — use @agent to address one`
     : '';
@@ -465,9 +538,23 @@ function renderAgents() {
     const settings = el('button', 'btn small', '⚙ Settings');
     settings.title = 'Edit agent.yaml on the machine';
     settings.onclick = () => openAgentConfig(agent);
+    const forget = el('button', 'btn small', 'Clear context');
+    forget.title = 'Start this agent on a blank history in every channel';
+    forget.onclick = async () => {
+      if (!confirm(`Clear ${fqn(agent)}'s context?\n\nIt forgets every channel's ` +
+                   'conversation. Channel transcripts stay, and are replayed into ' +
+                   'its next prompt as usual — use Clear conversation for those.')) return;
+      forget.disabled = true;
+      try {
+        const result = await api(`/api/agents/${agent.id}/clear-context`, { method: 'POST' });
+        toast(`${fqn(agent)}: context cleared` +
+              (result.history !== 'freed' ? ` — old history ${result.history}` : ''));
+      } catch (error) { toast(error.message, true); }
+      finally { forget.disabled = false; }
+    };
     const remove = el('button', 'btn danger small', 'Delete');
     remove.onclick = () => deleteAgent(agent);
-    actions.append(settings, remove);
+    actions.append(settings, forget, remove);
     row.append(actions);
     table.append(row);
   });
@@ -741,7 +828,8 @@ async function openAgentConfig(agent) {
   };
   renderStatus(data.status);
   wrap.append(statusRow);
-  wrap.append(el('p', 'note', data.prefix));
+  const prefixNote = el('p', 'note', data.prefix);
+  wrap.append(prefixNote);
 
   // tabs
   const tabs = el('div', 'tabs');
@@ -820,6 +908,122 @@ async function openAgentConfig(agent) {
   form.append(frameworkNote);
   showFor(data.framework || 'lean');
   panes['Properties'].append(form);
+
+  // Model suggestions, read from the endpoint on the agent's own machine with
+  // the key in its .env — the board never sees the key. Unsaved provider and
+  // endpoint edits are passed along, so the list follows the form.
+  const modelField = form.elements.model;
+  if (modelField) {
+    const listId = `agent-models-${agent.id}`;
+    const options = el('datalist');
+    options.id = listId;
+    modelField.setAttribute('list', listId);
+    modelField.autocomplete = 'off';
+    const modelNote = el('small');
+    modelField.after(options, modelNote);
+    let asked = 0;
+    let timer = null;
+    const loadModels = async () => {
+      const mine = ++asked;
+      const query = new URLSearchParams({
+        provider: form.elements.provider?.value || '',
+        endpoint: (form.elements['endpoint.url']?.value || '').trim(),
+      });
+      modelNote.textContent = 'Reading models from the endpoint…';
+      try {
+        const result = await api(`/api/agents/${agent.id}/models?${query}`);
+        if (mine !== asked) return;               // superseded by a newer edit
+        options.innerHTML = '';
+        result.models.forEach((id) => options.append(new Option(id, id)));
+        modelNote.textContent = result.ok
+          ? `${result.models.length} model(s) at ${result.endpoint} — clear the field to see them all`
+          : result.error;
+      } catch (error) {
+        if (mine === asked) modelNote.textContent = `Could not list models: ${error.message}`;
+      }
+    };
+    const soon = () => { clearTimeout(timer); timer = setTimeout(loadModels, 400); };
+    form.elements.provider?.addEventListener('change', soon);
+    form.elements['endpoint.url']?.addEventListener('change', soon);
+    loadModels();
+  }
+
+  // API key. It lives in the agent's .env, not agent.yaml, so it sits outside
+  // the tabs and is saved whichever editor is active. The board only ever
+  // learns which variables are set, never their values.
+  const keyBox = el('div', 'form');
+  const keyLabel = el('label');
+  const keyField = el('input');
+  keyField.type = 'password';
+  keyField.name = 'api_key';
+  keyField.autocomplete = 'new-password';
+  const keyNote = el('small');
+  const describeKey = () => {
+    const provider = form.elements.provider?.value || '';
+    const name = (data.key_names || {})[provider] || data.key_name;
+    const set = (data.env_names || []).includes(name);
+    keyField.placeholder = set ? 'set — leave empty to keep it' : 'not set';
+    keyNote.textContent = `Saved to the agent's .env as ${name} (0600, sent over SSH ` +
+      'stdin, never on a command line). The current value is never read back.';
+  };
+  form.elements.provider?.addEventListener('change', describeKey);
+  describeKey();
+  keyLabel.append(document.createTextNode('API key'), keyField, keyNote);
+  keyBox.append(keyLabel);
+  // Shown at the top, not under the tabs: below the Properties list it sat
+  // past the fold of a scrolling dialog, where nobody found it.
+  prefixNote.after(keyBox);
+
+  // Host interface and published address. Neither is in agent.yaml: HOST is
+  // in the supervisord program and the URL is baked into run_server.py, so
+  // they are read from the machine and saved by their own route on the server.
+  const net = data.network || {};
+  const netBox = el('div', 'form');
+  const original = { bind: net.bind_host || '', advertise: net.advertise_host || '' };
+  const bindSelect = el('select');
+  const advertiseField = el('input');
+  if (net.ok) {
+    const machine = state.machines.find((m) => m.id === agent.machine_id);
+    const interfaces = machine?.interfaces || [];
+    bindSelect.append(new Option('all interfaces (0.0.0.0)', '0.0.0.0'));
+    interfaces.forEach((iface) => bindSelect.append(new Option(
+      `${iface.name} · ${iface.address}${iface.note ? ` — ${iface.note}` : ''}`, iface.address)));
+    if (original.bind && ![...bindSelect.options].some((o) => o.value === original.bind)) {
+      bindSelect.append(new Option(`${original.bind} (current)`, original.bind));
+    }
+    bindSelect.value = original.bind || '0.0.0.0';
+    advertiseField.value = original.advertise;
+    advertiseField.placeholder = 'address peers dial';
+    // A specific interface is also what peers should dial; offer it, and let
+    // the field be overridden for NAT or a proxy.
+    bindSelect.onchange = () => {
+      if (!['0.0.0.0', '::'].includes(bindSelect.value)) advertiseField.value = bindSelect.value;
+    };
+
+    const bindLabel = el('label');
+    bindLabel.append(document.createTextNode('Host interface (HOST)'), bindSelect,
+      el('small', '', 'The address the A2A server binds to.'));
+    const advLabel = el('label');
+    advLabel.append(document.createTextNode('Advertise as'), advertiseField,
+      el('small', '', `Published in the agent card — what other agents connect to. ` +
+        `Now ${net.url}. Changing either restarts the agent.`));
+    netBox.append(bindLabel, advLabel);
+    if (agent.url && net.url && agent.url !== net.url) {
+      netBox.append(el('div', 'warn-box',
+        `The board has ${agent.url} on record, but the card publishes ${net.url}. ` +
+        'Messages go to the card\'s address. Saving either field also updates the board record.'));
+    }
+  } else {
+    netBox.append(el('p', 'note', `Address settings unavailable: ${net.error || 'not reported'}`));
+  }
+  keyBox.after(netBox);
+  const networkChange = () => {
+    if (!net.ok) return null;
+    const bind = bindSelect.value;
+    const advertise = advertiseField.value.trim();
+    if (bind === original.bind && advertise === original.advertise) return null;
+    return { bind_host: bind, advertise_host: advertise };
+  };
   panes['Properties'].append(el('p', 'note',
     'Saving this form rewrites agent.yaml, which keeps the header comment but ' +
     'drops any others. Use Raw YAML to control the file exactly.'));
@@ -839,6 +1043,7 @@ async function openAgentConfig(agent) {
   panes['Instructions'].append(insBox);
   panes['Instructions'].append(el('p', 'note',
     'instructions.md — the system prompt this agent starts from.'));
+
 
   // save
   const warnBox = el('div', 'warn-box');
@@ -866,6 +1071,9 @@ async function openAgentConfig(agent) {
     // Whichever editor you were last in wins, so the two cannot fight.
     if (activeTab() === 'Raw YAML') payload.yaml = rawBox.value;
     else payload.properties = values(form);
+    if (keyField.value.trim()) payload.api_key = keyField.value.trim();
+    const network = networkChange();
+    if (network) payload.network = network;
 
     try {
       const result = await api(`/api/agents/${agent.id}/config`, {
@@ -880,7 +1088,9 @@ async function openAgentConfig(agent) {
         result.warnings.forEach((warning) => list.append(el('li', '', warning)));
         warnBox.append(list);
       } else {
-        toast(`${agent.name} saved${restartBox.checked ? ' and restarted' : ''}`);
+        toast(result.network?.ok
+          ? `${agent.name} saved, restarted on ${result.network.url}`
+          : `${agent.name} saved${restartBox.checked ? ' and restarted' : ''}`);
         closeModal();
       }
       load();
@@ -1098,6 +1308,21 @@ $('#delete-channel').onclick = async () => {
   renderBoardHeader();
 };
 
+$('#clear-channel').onclick = async () => {
+  const channel = state.channels.find((c) => c.id === state.channelId);
+  if (!channel || !confirm(
+    `Clear #${channel.name}?\n\nDeletes its messages and starts every member on a ` +
+    'blank history. The channel and its members stay.')) return;
+  try {
+    const result = await api(`/api/channels/${channel.id}/clear`, { method: 'POST' });
+    const notes = Object.entries(result.agents || {})
+      .filter(([, how]) => how !== 'freed')
+      .map(([name, how]) => `@${name}: ${how}`);
+    toast(`#${channel.name} cleared (${result.messages_removed} messages)` +
+          (notes.length ? ` — ${notes.join('; ')}` : ''));
+  } catch (error) { toast(error.message, true); }
+};
+
 $('#halt-btn').onclick = async () => {
   try {
     await api(`/api/channels/${state.channelId}/halt`, {
@@ -1271,6 +1496,60 @@ $('#new-agent').onclick = () => {
   form.elements.framework.value = state.settings.default_framework;
   form.elements.provider.value = state.settings.default_provider;
   form.elements.model.value = state.settings.default_model;
+
+  // Provider → endpoint and model suggestions. The endpoint is only replaced
+  // while it still holds what this form put there, so a typed one survives a
+  // provider change; the model is suggested, never overwritten.
+  const modelNote = form.querySelector('#model-note');
+  const modelList = form.querySelector('#model-options');
+  let filledEndpoint = '';
+  let modelsTimer = null;
+  let modelsAsked = 0;
+  const fetchModels = async () => {
+    const provider = form.elements.provider.value;
+    modelList.innerHTML = '';
+    if (!state.providers.listable.includes(provider)) {
+      modelNote.textContent = '';
+      return;
+    }
+    const asked = ++modelsAsked;
+    modelNote.textContent = 'Reading models from the endpoint…';
+    try {
+      const result = await api('/api/models', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider,
+          endpoint: form.elements.endpoint.value.trim(),
+          api_key: form.elements.api_key.value,
+        }),
+      });
+      if (asked !== modelsAsked) return;     // a newer request superseded this one
+      result.models.forEach((id) => modelList.append(new Option(id, id)));
+      modelNote.textContent = result.ok
+        ? `${result.models.length} model(s) at ${result.endpoint} — type to filter`
+        : result.error;
+      if (result.ok && !form.elements.model.value.trim() && result.models.length === 1) {
+        form.elements.model.value = result.models[0];   // a vLLM serving one model
+      }
+    } catch (error) {
+      if (asked === modelsAsked) modelNote.textContent = `Could not list models: ${error.message}`;
+    }
+  };
+  const loadModels = () => {
+    clearTimeout(modelsTimer);
+    modelsTimer = setTimeout(fetchModels, 400);
+  };
+  const applyProvider = () => {
+    const field = form.elements.endpoint;
+    const next = state.providers.endpoints[form.elements.provider.value] || '';
+    if (!field.value.trim() || field.value.trim() === filledEndpoint) field.value = next;
+    filledEndpoint = next;
+    loadModels();
+  };
+  form.elements.provider.onchange = applyProvider;
+  form.elements.endpoint.onchange = loadModels;
+  form.elements.api_key.onchange = loadModels;
+  applyProvider();
   form.elements.tools.value = state.settings.default_tools;
   form.elements.sdk_source.value = state.settings.default_sdk_source || 'local';
   form.elements.approval.checked = Boolean(state.settings.default_approval);

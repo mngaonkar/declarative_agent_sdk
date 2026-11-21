@@ -61,6 +61,8 @@
           </select>
         </label>
         <button id="halt-btn" class="btn danger" hidden>Stop</button>
+        <button id="clear-channel" class="btn ghost" hidden
+          title="Delete this channel's messages and start every member on a blank history">Clear conversation</button>
         <button id="delete-channel" class="btn ghost" hidden>Delete channel</button>
       </div>
     </header>
@@ -247,8 +249,11 @@
         <option value="anthropic">anthropic</option><option value="vllm">vllm</option>
       </select></label>
     </div>
-    <label>Model <input name="model"></label>
     <label>Endpoint <input name="endpoint" placeholder="http://10.0.0.147:11434/v1 (vLLM)"></label>
+    <label>Model <input name="model" list="model-options" autocomplete="off">
+      <datalist id="model-options"></datalist>
+      <small id="model-note"></small>
+    </label>
     <label>Host interface (<code>HOST</code>)
       <span class="field-row">
         <select name="bind_host"></select>

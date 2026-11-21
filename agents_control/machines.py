@@ -22,6 +22,7 @@ then removed.
 from __future__ import annotations
 
 import json
+import re
 import os
 import shlex
 import shutil
@@ -42,6 +43,113 @@ logger = get_logger(__name__)
 # in it intact.
 REMOTE_HOME = "$HOME/.agents-control"
 REMOTE_BIN = f"{REMOTE_HOME}/bin"
+
+# Reads or rewrites the three places an installed agent's address lives: HOST
+# in its supervisord program, the URL run_server.py publishes in the card, and
+# .agent-meta, which `install.sh --list` reports back (leave that out and the
+# next machine refresh restores the old URL). Sent on stdin and run by the
+# agent's own venv python, so it needs nothing the target lacks.
+_NETWORK_SCRIPT = r'''
+# Runs on the target, under the agent's own venv python: stdlib only.
+import json, os, re, sys
+
+prefix, name, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+want_bind = sys.argv[4] if len(sys.argv) > 4 else ""
+want_adv = sys.argv[5] if len(sys.argv) > 5 else ""
+root = os.path.dirname(prefix)
+conf = os.path.join(root, "supervisor", "conf.d", name + ".conf")
+server = os.path.join(prefix, "run_server.py")
+meta = os.path.join(prefix, ".agent-meta")
+
+def read(path):
+    with open(path) as handle:
+        return handle.read()
+
+def write(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        handle.write(text)
+    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    os.replace(tmp, path)
+
+for path in (conf, server):
+    if not os.path.isfile(path):
+        print(json.dumps({"ok": False, "error": "missing " + path +
+              " (installed before supervisord, or not by install.sh)"}))
+        sys.exit(0)
+
+conf_text, server_text = read(conf), read(server)
+bind = re.search(r'^environment=.*?\bHOST="([^"]*)"', conf_text, re.M)
+url = re.search(r'url="(https?)://(\[[^\]]+\]|[^"/:]+):(\d+)/"', server_text)
+if not bind or not url:
+    print(json.dumps({"ok": False, "error": "could not find HOST in " + conf +
+          " or the advertised url in " + server}))
+    sys.exit(0)
+scheme, adv_host, port = url.group(1), url.group(2).strip("[]"), url.group(3)
+current = {"bind_host": bind.group(1), "advertise_host": adv_host, "port": int(port),
+           "url": "%s://%s:%s/" % (scheme, url.group(2), port)}
+if mode == "read":
+    print(json.dumps(dict(current, ok=True)))
+    sys.exit(0)
+
+new_bind = want_bind or current["bind_host"]
+# Publish what was asked for; else a specific bind address (that is what a
+# peer must dial); else keep the current one rather than guess from a route.
+new_adv = want_adv or (new_bind if new_bind not in ("0.0.0.0", "::") else adv_host)
+shown = "[%s]" % new_adv if ":" in new_adv else new_adv
+new_url = "%s://%s:%s/" % (scheme, shown, port)
+
+conf_new = re.sub(r'^(environment=.*?\bHOST=)"[^"]*"', lambda m: m.group(1) + '"%s"' % new_bind,
+                  conf_text, count=1, flags=re.M)
+server_new = server_text[:url.start()] + 'url="%s"' % new_url + server_text[url.end():]
+changed_conf = conf_new != conf_text
+if changed_conf:
+    write(conf, conf_new)
+if server_new != server_text:
+    write(server, server_new)
+if os.path.isfile(meta):
+    try:
+        record = json.loads(read(meta))
+        record.update(bind_host=new_bind, advertise_host=new_adv, url=new_url,
+                      agent_card=new_url + ".well-known/agent-card.json")
+        write(meta, json.dumps(record, indent=1) + "\n")
+    except ValueError:
+        pass                      # an unreadable record is --list's problem, not this one's
+print(json.dumps({"ok": True, "bind_host": new_bind, "advertise_host": new_adv,
+                  "port": int(port), "url": new_url, "previous": current,
+                  "conf_changed": changed_conf}))
+'''
+
+# Lists an endpoint's models from the agent's own machine, with the key from
+# the agent's own .env: the key is read and used there, and only model ids come
+# back. Stdlib only, under the agent's venv python.
+_MODELS_SCRIPT = r'''
+import json, os, sys, urllib.error, urllib.request
+
+prefix, endpoint, key_name = sys.argv[1], sys.argv[2].rstrip("/"), sys.argv[3]
+key = os.environ.get(key_name, "")
+path = os.path.join(prefix, ".env")
+if os.path.isfile(path):
+    for line in open(path):
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == key_name:
+            key = value.strip().strip("'\"")
+request = urllib.request.Request(endpoint + "/models")
+if key:
+    request.add_header("Authorization", "Bearer " + key)
+try:
+    with urllib.request.urlopen(request, timeout=8) as response:
+        data = json.load(response).get("data") or []
+    ids = [str(d.get("id")) for d in data if isinstance(d, dict) and d.get("id")]
+    print(json.dumps({"ok": True, "ids": ids, "has_key": bool(key)}))
+except urllib.error.HTTPError as exc:
+    print(json.dumps({"ok": False, "status": exc.code, "has_key": bool(key)}))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": type(exc).__name__, "has_key": bool(key)}))
+'''
 
 PROVIDER_KEY_NAMES = {
     "google": "GOOGLE_API_KEY",
@@ -202,9 +310,12 @@ class MachineDriver:
             # the caller which still gets the JSON on stdout.
             if proc.returncode == 3 and proc.stdout.strip():
                 return proc.stdout
+            # Some tools (supervisorctl among them) report errors on stdout;
+            # without it the UI shows a bare exit code and nothing to act on.
+            detail = proc.stderr.strip() or proc.stdout.strip()[-2000:]
             raise MachineError(
                 f"command failed on '{machine.get('name')}' (exit {proc.returncode})",
-                stderr=proc.stderr,
+                stderr=detail,
                 code=proc.returncode,
             )
         return proc.stdout
@@ -533,6 +644,201 @@ class MachineDriver:
             written.append("instructions.md")
         return {"written": written, "backup": f"{prefix}/agent.yaml.bak"}
 
+    def env_names(
+        self, machine: Dict[str, Any], prefix: str, timeout: int = 60
+    ) -> List[str]:
+        """
+        Which variables an agent's ``.env`` sets — names only.
+
+        Enough for the settings form to say "a key is set" without the value
+        ever leaving the machine: sed prints the name and drops the rest.
+        """
+        prefix = _require_prefix(prefix)
+        env = shlex.quote(f"{prefix}/.env")
+        out = self.run(
+            machine,
+            f"[ -f {env} ] && sed -n -E "
+            r"'s/^(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.+$/\2/p' "
+            f"{env} || true",
+            timeout=timeout,
+        )
+        return sorted({line.strip() for line in out.splitlines() if line.strip()})
+
+    def set_env_var(
+        self,
+        machine: Dict[str, Any],
+        prefix: str,
+        name: str,
+        value: str,
+        timeout: int = 60,
+    ) -> None:
+        """
+        Set one variable in an agent's ``.env``, replacing any earlier line.
+
+        The value travels on stdin, never in argv where ``ps`` would show it,
+        and the file is rebuilt under umask 077 and moved into place, so it
+        stays 0600 and a failed write leaves the old one intact.
+        """
+        prefix = _require_prefix(prefix)
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name or ""):
+            raise MachineError(f"not a usable variable name: {name!r}")
+        if not value or any(ch.isspace() for ch in value) or any(c in value for c in "'\"\\$`"):
+            raise MachineError(
+                "the key must be a single token without spaces, quotes, '$', "
+                "'`' or backslashes")
+        env = shlex.quote(f"{prefix}/.env")
+        tmp = shlex.quote(f"{prefix}/.env.tmp")
+        self.run(
+            machine,
+            f"umask 077; IFS= read -r v; "
+            f"{{ [ -f {env} ] && grep -v -E '^(export[[:space:]]+)?{name}=' {env}; "
+            f"printf '%s=%s\\n' {name} \"$v\"; }} > {tmp} && mv {tmp} {env}",
+            stdin=value + "\n",
+            timeout=timeout,
+        )
+
+    def agent_network(
+        self,
+        machine: Dict[str, Any],
+        prefix: str,
+        name: str,
+        bind_host: str = "",
+        advertise_host: str = "",
+        write: bool = False,
+        timeout: int = 60,
+    ) -> Dict[str, Any]:
+        """
+        An agent's bind address and published URL; with ``write``, change them.
+
+        Writing edits the files only. The running process keeps its socket and
+        its card until :meth:`apply_service_change` restarts it.
+        """
+        prefix = _require_prefix(prefix)
+        for value in (bind_host, advertise_host):
+            if value and not re.match(r"^[A-Za-z0-9_.:\[\]-]{1,255}$", value):
+                raise MachineError(f"not a usable address: {value!r}")
+        args = [prefix, name, "write" if write else "read"]
+        if write:
+            args += [bind_host, advertise_host]
+        python = shlex.quote(f"{prefix}/.venv/bin/python")
+        out = self.run(
+            machine,
+            f"{python} - {' '.join(shlex.quote(a) for a in args)}",
+            stdin=_NETWORK_SCRIPT,
+            timeout=timeout,
+        )
+        return _parse_json(out) or {"ok": False, "error": f"unreadable reply: {out[:200]}"}
+
+    def list_models_on_machine(
+        self,
+        machine: Dict[str, Any],
+        prefix: str,
+        endpoint: str,
+        key_name: str,
+        timeout: int = 30,
+    ) -> Dict[str, Any]:
+        """
+        Ask ``{endpoint}/models`` from the agent's machine, with its own key.
+
+        Run there rather than here for two reasons: the key stays on the box
+        that already holds it, and the endpoint is checked from where the agent
+        will actually call it — a LAN vLLM the board cannot see still lists.
+        """
+        prefix = _require_prefix(prefix)
+        if not re.match(r"^https?://[^\s'\"]+$", endpoint or ""):
+            raise MachineError(f"not a usable endpoint: {endpoint!r}")
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key_name or ""):
+            raise MachineError(f"not a usable variable name: {key_name!r}")
+        python = shlex.quote(f"{prefix}/.venv/bin/python")
+        args = " ".join(shlex.quote(a) for a in (prefix, endpoint, key_name))
+        out = self.run(machine, f"{python} - {args}", stdin=_MODELS_SCRIPT, timeout=timeout)
+        return _parse_json(out) or {"ok": False, "error": f"unreadable reply: {out[:200]}"}
+
+    def start_supervisord(
+        self, machine: Dict[str, Any], prefix: str, timeout: int = 60
+    ) -> Dict[str, Any]:
+        """
+        Bring a dead supervisord back, the way install.sh starts it.
+
+        Every program in conf.d has autostart=true, so this also starts the
+        agents with whatever their files now say — which is what a save that
+        found supervisord down wanted in the first place.
+
+        Where logind kills session processes at logout (KillUserProcesses=yes),
+        a daemon started over SSH dies with the SSH command; it has to run as
+        a systemd user unit, which only survives with lingering on. Enabling
+        lingering needs root, so that case is reported, not attempted.
+        """
+        prefix = _require_prefix(prefix)
+        sup = shlex.quote(f"{Path(prefix).parent}/supervisor")
+        script = (
+            f"S={sup}; "
+            'ctl() { "$S/.venv/bin/supervisorctl" -c "$S/supervisord.conf" "$@"; }; '
+            'ctl pid >/dev/null 2>&1 && { echo STATE:running; exit 0; }; '
+            'reaps=0; [ "$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 '
+            'org.freedesktop.login1.Manager KillUserProcesses 2>/dev/null)" = "b true" ] && reaps=1; '
+            'if [ $reaps = 1 ]; then '
+            '  if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then '
+            '    echo "STATE:needs-linger:$(id -un)"; exit 0; fi; '
+            '  if systemctl --user cat declarative-agent-supervisor >/dev/null 2>&1; then '
+            '    systemctl --user start declarative-agent-supervisor; '
+            '  else systemd-run --user --unit declarative-agent-supervisor-run --collect --quiet '
+            '    -p Restart=on-failure "$S/.venv/bin/supervisord" -c "$S/supervisord.conf" -n; fi; '
+            'else "$S/.venv/bin/supervisord" -c "$S/supervisord.conf"; fi; '
+            'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do '
+            '  ctl pid >/dev/null 2>&1 && { echo STATE:started; exit 0; }; sleep 0.5; done; '
+            'echo STATE:no-socket'
+        )
+        try:
+            out = self.run(machine, script, timeout=timeout)
+        except MachineError as exc:
+            return {"ok": False, "state": "error", "output": exc.detail()[:600]}
+        state = next((l[6:] for l in out.splitlines() if l.startswith("STATE:")), "no-socket")
+        where = machine.get("name")
+        if state in ("running", "started"):
+            return {"ok": True, "state": state, "output":
+                    f"supervisord was not running on '{where}'; started it, which "
+                    "started its agents with their saved config"}
+        if state.startswith("needs-linger"):
+            user = state.partition(":")[2].partition(":")[2] or "<user>"
+            return {"ok": False, "state": "needs-linger", "output":
+                    f"supervisord is not running on '{where}', and the board cannot "
+                    "keep it running: that machine's systemd-logind kills everything "
+                    "started over SSH when the connection closes (KillUserProcesses=yes). "
+                    f"Run once on '{where}': sudo loginctl enable-linger {user} — then "
+                    "save again, and the board will start it."}
+        return {"ok": False, "state": state, "output":
+                f"tried to start supervisord on '{where}' but its socket never "
+                f"appeared; see {Path(prefix).parent}/supervisor/supervisord.log"}
+
+    def apply_service_change(
+        self, machine: Dict[str, Any], prefix: str, name: str, timeout: int = 120
+    ) -> Dict[str, Any]:
+        """
+        Make supervisord run the agent with its current files.
+
+        A changed program section (HOST lives in its environment=) is only
+        picked up by reread + update, which also restarts it; a plain restart
+        would start the process with the old environment. Otherwise — only
+        run_server.py changed — a restart is what is needed.
+        """
+        prefix = _require_prefix(prefix)
+        root = shlex.quote(str(Path(prefix).parent))
+        sctl = f"{root}/supervisor/.venv/bin/supervisorctl -c {root}/supervisor/supervisord.conf"
+        target = shlex.quote(name)
+        command = (
+            f'out=$({sctl} reread); echo "$out"; '
+            f'case "$out" in *"{name}: changed"*) {sctl} update {target} ;; '
+            f'*) {sctl} restart {target} ;; esac'
+        )
+        try:
+            return {"ok": True, "output": self.run(machine, command, timeout=timeout).strip()}
+        except MachineError as exc:
+            output = exc.stderr or str(exc)
+            if supervisor_down_hint(output, machine, prefix):
+                return self.start_supervisord(machine, prefix)
+            return {"ok": False, "output": output}
+
     def supervisor_action(
         self,
         machine: Dict[str, Any],
@@ -564,9 +870,14 @@ class MachineDriver:
             # `supervisorctl status` exits non-zero for a stopped program, and
             # agents installed by an older install.sh may be launchd/systemd
             # units with no supervisord at all. Neither is a server error.
+            output = exc.stderr or str(exc)
+            if action in ("restart", "start") and supervisor_down_hint(output, machine, prefix):
+                # Starting supervisord starts the agent (autostart=true),
+                # which is what restart/start asked for.
+                return dict(self.start_supervisord(machine, prefix), action=action)
             return {
                 "ok": False, "action": action,
-                "output": exc.stderr or str(exc),
+                "output": supervisor_down_hint(output, machine, prefix) or output,
                 "hint": "this agent may predate supervisord (service_kind "
                         "launchagent/systemd) — restart it by hand",
             }
@@ -652,6 +963,37 @@ def _parse_interfaces(block: str) -> List[Dict[str, str]]:
         )
 
     return sorted(out, key=order)
+
+
+def supervisor_down_hint(output: str, machine: Dict[str, Any], prefix: str) -> str:
+    """
+    Name the common failure instead of passing on supervisorctl's wording.
+
+    "s.sock no such file" / "refused connection" mean supervisord itself is not
+    running — nothing a restart of the agent can fix.
+    """
+    text = output or ""
+    if "no such file" not in text and "refused connection" not in text:
+        return ""
+    root = str(Path(prefix).parent) if prefix else "<root>"
+    return (
+        f"supervisord is not running on '{machine.get('name')}', so no agent there "
+        f"can be started or restarted. Start it with: {root}/supervisor/.venv/bin/"
+        f"supervisord -c {root}/supervisor/supervisord.conf — and if it keeps "
+        "dying after you log out, the machine's logind kills session processes: "
+        "run 'sudo loginctl enable-linger <user>' there and reinstall."
+    )
+
+
+def key_name_for(provider: str) -> str:
+    """
+    The variable an agent reads its provider key from.
+
+    vLLM maps to OPENAI_API_KEY rather than to nothing: it speaks the OpenAI
+    API, the lean runtime reads that variable for it, and a vLLM started with
+    --api-key needs it set.
+    """
+    return PROVIDER_KEY_NAMES.get((provider or "").lower()) or "OPENAI_API_KEY"
 
 
 def _env_file_lines(

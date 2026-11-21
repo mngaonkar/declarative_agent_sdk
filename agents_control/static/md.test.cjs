@@ -123,5 +123,37 @@ check('real agent message: bold rendered', render(REAL), has('<strong>17°C (63�
 check('parseBlocks types', JSON.stringify(md.parseBlocks('# h\n- a\n\np').map((b) => b.type)),
       '["h","ul","p"]');
 
+// ── tables ────────────────────────────────────────────────────────────────
+const SPECS = `Here's my home machine, omarchy, as I just probed it:
+| Component | Spec |
+|---|---|
+| CPU | Intel Core i5-4570R, **4C/4T** |
+| Network | wlp2s0 (10.0.0.132), \`ip a | grep inet\` |
+| Uptime/load | 8 days |`;
+check('table under a lead-in line is a table', JSON.stringify(md.parseBlocks(SPECS).map((b) => b.type)),
+      '["p","table"]');
+check('table: no raw pipes in output', render(SPECS), lacks('|---|'));
+check('table: header cells', render(SPECS), has('<thead><tr><th>Component</th><th>Spec</th></tr></thead>'));
+check('table: inline markdown in cells', render(SPECS), has('<strong>4C/4T</strong>'));
+check('table: pipe inside code stays in the cell',
+      md.parseBlocks(SPECS)[1].rows[1][1], 'wlp2s0 (10.0.0.132), `ip a | grep inet`');
+check('table: three body rows', md.parseBlocks(SPECS)[1].rows.length, 3);
+check('table: alignment', JSON.stringify(md.parseBlocks('a | b | c\n:-- | :-: | --:\n1 | 2 | 3')[0].align),
+      '["left","center","right"]');
+check('table: ragged rows padded and cut',
+      JSON.stringify(md.parseBlocks('|a|b|\n|-|-|\n|1|\n|1|2|3|')[0].rows), '[["1",""],["1","2"]]');
+check('table: escaped pipe', md.parseBlocks('|a|\n|-|\n|x \\| y|')[0].rows[0][0], 'x | y');
+check('table: ends at a blank line',
+      JSON.stringify(md.parseBlocks('|a|\n|-|\n|1|\n\nafter').map((b) => b.type)), '["table","p"]');
+check('table: html in a cell is escaped', render('|a|\n|-|\n|<img src=x onerror=1>|'), lacks('<img'));
+check('a rule under a line is not a table', JSON.stringify(md.parseBlocks('text\n\n---').map((b) => b.type)),
+      '["p","hr"]');
+check('pipe text without a delimiter row stays a paragraph',
+      JSON.stringify(md.parseBlocks('a | b\nc | d').map((b) => b.type)), '["p"]');
+
+// ── mentions vs addresses ─────────────────────────────────────────────────
+check('user@host is not a mention', render('ssh mahadev@10.0.0.147'), lacks('class="mention"'));
+check('a word-start @ is a mention', render('ask @coder.box now'), has('<span class="mention">@coder.box</span>'));
+
 console.log(failed ? `\n${failed} failure(s)` : '\nall md.js tests passed');
 process.exit(failed ? 1 : 0);

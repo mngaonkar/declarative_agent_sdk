@@ -372,15 +372,59 @@ wait_for_supervisor() {
   return 1
 }
 
+# systemd-logind with KillUserProcesses=yes (Manjaro, Fedora and others ship
+# it on) kills everything a session started when the session ends. This script
+# usually runs over SSH, so a supervisord daemonised from here would die,
+# agents and all, seconds after the install reports success. Asked of logind
+# itself, so a drop-in or a distro default is seen the same way as the file.
+session_reaps_processes() {
+  [ "$OS" = "Linux" ] && [ "$IS_ROOT" -eq 0 ] || return 1
+  command -v busctl >/dev/null 2>&1 || return 1
+  [ "$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+        org.freedesktop.login1.Manager KillUserProcesses 2>/dev/null)" = "b true" ]
+}
+
+linger_on() {
+  [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = "yes" ]
+}
+
+# Set when supervisord cannot be made to outlive this session; reported as a
+# problem so the board shows the agent as not ready instead of it vanishing.
+SUPERVISOR_PROBLEM=""
+
 ensure_supervisor() {
   ensure_supervisor_installed
+  supervisor_running && return 0
 
-  if ! supervisor_running; then
-    "$SUPERVISOR_VENV/bin/supervisord" -c "$SUPERVISOR_CONF" \
-      || die "supervisord failed to start; see $SUPERVISOR_HOME/supervisord.log"
-    wait_for_supervisor || die "supervisord started but its socket never appeared"
-    info "  started supervisord"
+  if session_reaps_processes; then
+    # Lingering keeps the user's systemd running with no session open, and a
+    # unit under it is outside the session, so the logout leaves it alone.
+    # Many polkit setups let a user enable their own; try before asking.
+    linger_on || loginctl --no-ask-password enable-linger "$(id -un)" >/dev/null 2>&1 || true
+    if linger_on && systemctl --user show-environment >/dev/null 2>&1; then
+      if systemctl --user cat "$BOOT_UNIT" >/dev/null 2>&1; then
+        systemctl --user start "$BOOT_UNIT" \
+          || die "could not start $BOOT_UNIT; see systemctl --user status $BOOT_UNIT"
+      else
+        # Transient: running now without opting into start-at-boot, which
+        # stays --enable-at-boot's decision.
+        systemd-run --user --unit "$BOOT_UNIT-run" --collect --quiet \
+          -p Restart=on-failure --setenv=PATH="$SERVICE_PATH" \
+          "$SUPERVISOR_VENV/bin/supervisord" -c "$SUPERVISOR_CONF" -n \
+          || die "systemd-run could not start supervisord"
+      fi
+      wait_for_supervisor || die "supervisord started but its socket never appeared"
+      info "  started supervisord as a systemd user unit (logind would kill it at logout otherwise)"
+      return 0
+    fi
+    SUPERVISOR_PROBLEM="supervisord will be killed when this SSH session ends (systemd-logind KillUserProcesses=yes, lingering off). Run once: sudo loginctl enable-linger $(id -un) — then install again."
+    warn "$SUPERVISOR_PROBLEM"
   fi
+
+  "$SUPERVISOR_VENV/bin/supervisord" -c "$SUPERVISOR_CONF" \
+    || die "supervisord failed to start; see $SUPERVISOR_HOME/supervisord.log"
+  wait_for_supervisor || die "supervisord started but its socket never appeared"
+  info "  started supervisord"
 }
 
 # The single place a platform service is still involved: keeping supervisord
@@ -987,6 +1031,11 @@ PROGRAM_CONF="$SUPERVISOR_CONFD/$NAME.conf"
 
 if [ "$SERVICE_KIND" = "supervisor" ]; then
   ensure_supervisor
+  if [ -n "$SUPERVISOR_PROBLEM" ]; then
+    PROBLEMS="${PROBLEMS:+$PROBLEMS
+}$SUPERVISOR_PROBLEM"
+    READY=false
+  fi
 
   # `user=` only means anything when supervisord itself runs as root; setting
   # it otherwise makes supervisor refuse to start the program.

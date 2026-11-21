@@ -210,13 +210,16 @@ class Store:
         """Add columns introduced after a store was first created."""
         agent_columns = {row["name"] for row in self._rows("PRAGMA table_info(agents)")}
         for column, ddl in (("prefix", "TEXT NOT NULL DEFAULT ''"),
-                            ("endpoint", "TEXT NOT NULL DEFAULT ''")):
+                            ("endpoint", "TEXT NOT NULL DEFAULT ''"),
+                            # Bumped by "clear context": see context_id_for().
+                            ("context_epoch", "INTEGER NOT NULL DEFAULT 0")):
             if column not in agent_columns:
                 self._write(f"ALTER TABLE agents ADD COLUMN {column} {ddl}")
                 logger.info(f"store: added agents.{column}")
 
         channel_columns = {row["name"] for row in self._rows("PRAGMA table_info(channels)")}
-        for column, ddl in (("auto_approve", "TEXT NOT NULL DEFAULT ''"),):
+        for column, ddl in (("auto_approve", "TEXT NOT NULL DEFAULT ''"),
+                            ("context_epoch", "INTEGER NOT NULL DEFAULT 0")):
             if column not in channel_columns:
                 self._write(f"ALTER TABLE channels ADD COLUMN {column} {ddl}")
                 logger.info(f"store: added channels.{column}")
@@ -374,6 +377,14 @@ class Store:
         )
         return self.agent_by_name(machine_id, name) or {}
 
+    def set_agent_url(self, agent_id: int, url: str) -> None:
+        """Record where an agent now listens, after its address was changed."""
+        url = str(url or "")
+        self._write(
+            "UPDATE agents SET url = ?, agent_card = ? WHERE id = ?",
+            (url, f"{url}.well-known/agent-card.json" if url else "", agent_id),
+        )
+
     def set_agent_endpoint(self, agent_id: int, endpoint: str) -> None:
         """
         Record where an agent's model runs.
@@ -462,6 +473,22 @@ class Store:
         for row in rows:
             row["members"] = [m["name"] for m in self.members(int(row["id"]))]
         return rows
+
+    def clear_messages(self, channel_id: int) -> int:
+        """Drop a channel's transcript; returns how many messages went."""
+        count = int((self._row(
+            "SELECT COUNT(*) AS n FROM messages WHERE channel_id = ?", (channel_id,)
+        ) or {}).get("n") or 0)
+        self._write("DELETE FROM messages WHERE channel_id = ?", (channel_id,))
+        return count
+
+    def bump_channel_context(self, channel_id: int) -> None:
+        self._write("UPDATE channels SET context_epoch = context_epoch + 1 WHERE id = ?",
+                    (channel_id,))
+
+    def bump_agent_context(self, agent_id: int) -> None:
+        self._write("UPDATE agents SET context_epoch = context_epoch + 1 WHERE id = ?",
+                    (agent_id,))
 
     def delete_channel(self, channel_id: int) -> None:
         self._write("DELETE FROM channels WHERE id = ?", (channel_id,))
