@@ -71,7 +71,7 @@ Each agent is independent — its own directory, virtualenv, program and port:
 
 | | |
 |---|---|
-| directory | `<root>/<name>`, where root is `/opt/declarative-agent` as root, `$XDG_DATA_HOME/declarative-agent` on Linux, `~/.declarative-agent` on macOS |
+| directory | `<root>/<name>`, where root is `/opt/declarative-agent` as root and `~/.declarative-agent` otherwise, on Linux and macOS alike (a Linux machine that already has agents under the old `${XDG_DATA_HOME:-~/.local/share}/declarative-agent` keeps using it, with a warning, until that directory is removed) |
 | program | `[program:<name>]` in `<root>/supervisor/conf.d/<name>.conf` |
 | port | `--port`, otherwise the first free one from `--port-base` (default 8000) |
 | address | binds `0.0.0.0` so other machines can reach it; publishes this host's primary address |

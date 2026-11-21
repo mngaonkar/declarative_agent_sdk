@@ -3754,6 +3754,7 @@ class TestAgentContext:
         }))
         assert report["top"]["prompt_tokens"] == 28100
         assert report["session_count"] == 2
+        assert report["reachable"] is True
 
     @pytest.mark.asyncio
     async def test_an_agent_with_no_history_is_not_an_error(self):
@@ -3766,6 +3767,8 @@ class TestAgentContext:
         report = await self._read(self._reply("nope", status=404))
         assert report["supported"] is False
         assert "reinstall" in report["error"]
+        # It answered, so it is up — only the route is missing.
+        assert report["reachable"] is True
 
     @pytest.mark.asyncio
     async def test_a_stopped_agent_reports_the_connection(self):
@@ -3773,12 +3776,15 @@ class TestAgentContext:
             raise httpx.ConnectError("refused")
         report = await self._read(httpx.MockTransport(refuse))
         assert report["supported"] is False and "ConnectError" in report["error"]
+        # The board's status column overrides install-time `ready` with this.
+        assert report["reachable"] is False
 
     @pytest.mark.asyncio
     async def test_an_agent_with_no_address_is_not_fetched(self):
         async with httpx.AsyncClient() as client:
             report = await metrics.agent_context(client, "")
         assert report["error"] == "no address for this agent"
+        assert report["reachable"] is False
 
     @pytest.mark.asyncio
     async def test_contexts_are_keyed_by_agent_id(self):

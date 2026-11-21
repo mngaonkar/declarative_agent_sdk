@@ -317,25 +317,31 @@ async def agent_context(
     """
     root = (url or "").strip().rstrip("/")
     if not root:
-        return {"supported": False, "error": "no address for this agent"}
+        return {"supported": False, "reachable": False,
+                "error": "no address for this agent"}
     try:
         response = await client.get(f"{root}/context", timeout=timeout)
     except Exception as exc:      # noqa: BLE001 — a stopped agent is a result
-        return {"supported": False, "error": f"{type(exc).__name__}: {exc}"}
+        # Doubles as the board's liveness check: install-time `ready` only says
+        # the config was sound, not that anything is listening now.
+        return {"supported": False, "reachable": False,
+                "error": f"{type(exc).__name__}: {exc}"}
     if response.status_code == 404:
-        return {"supported": False, "error":
+        return {"supported": False, "reachable": True, "error":
                 "no /context route — reinstall this agent to report its history"}
     try:
         data = response.json()
     except Exception:             # noqa: BLE001
-        return {"supported": False, "error": f"unreadable reply ({response.status_code})"}
+        return {"supported": False, "reachable": True,
+                "error": f"unreadable reply ({response.status_code})"}
     if not isinstance(data, dict):
-        return {"supported": False, "error": "unexpected reply"}
+        return {"supported": False, "reachable": True, "error": "unexpected reply"}
     # The largest session is the one worth showing on a row; the agent sorts
     # them, so this is just the head.
     sessions = data.get("sessions") or []
     data["top"] = sessions[0] if sessions else None
     data["session_count"] = len(sessions)
+    data["reachable"] = True
     return data
 
 

@@ -70,27 +70,34 @@ OS="$(uname -s)"
 IS_ROOT=0
 [ "$(id -u)" -eq 0 ] && IS_ROOT=1
 
+# One layout everywhere: /opt/declarative-agent as root, ~/.declarative-agent
+# otherwise, on Linux and macOS alike. Not ~/Library/Application Support (a
+# space in the path would need escaping in the plist, the unit and every
+# command that follows), and no longer $XDG_DATA_HOME on Linux, so a path seen
+# on one machine means the same thing on the next.
+#
+# Linux agents installed before that change live in
+# ${XDG_DATA_HOME:-~/.local/share}/declarative-agent. While that root exists
+# and the new one does not, keep using it: switching underneath it would hide
+# those agents from --list, from port allocation and from uninstall.sh, and
+# start a second supervisord beside the first. To move: uninstall those
+# agents, stop that supervisord, remove the old root, then reinstall.
+
 case "$OS" in
-  Linux)
-    if [ "$IS_ROOT" -eq 1 ]; then
-      AGENTS_ROOT="/opt/declarative-agent"
-    else
-      AGENTS_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/declarative-agent"
-    fi
-    ;;
-  Darwin)
-    if [ "$IS_ROOT" -eq 1 ]; then
-      AGENTS_ROOT="/opt/declarative-agent"
-    else
-      # Not ~/Library/Application Support: a space in the path would need
-      # escaping in the plist, the unit and every command that follows.
-      AGENTS_ROOT="$HOME/.declarative-agent"
-    fi
-    ;;
-  *)
-    die "unsupported platform: $OS (Linux and macOS only)"
-    ;;
+  Linux|Darwin) ;;
+  *) die "unsupported platform: $OS (Linux and macOS only)" ;;
 esac
+
+if [ "$IS_ROOT" -eq 1 ]; then
+  AGENTS_ROOT="/opt/declarative-agent"
+else
+  AGENTS_ROOT="$HOME/.declarative-agent"
+  LEGACY_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/declarative-agent"
+  if [ "$OS" = "Linux" ] && [ ! -d "$AGENTS_ROOT" ] && [ -d "$LEGACY_ROOT" ]; then
+    AGENTS_ROOT="$LEGACY_ROOT"
+    printf 'warning: %s\n' "using legacy agents root $LEGACY_ROOT (new installs use ~/.declarative-agent; to move, uninstall these agents, stop their supervisord, remove $LEGACY_ROOT and reinstall)" >&2
+  fi
+fi
 
 SUPERVISOR_HOME="$AGENTS_ROOT/$SUPERVISOR_DIRNAME"
 SUPERVISOR_VENV="$SUPERVISOR_HOME/.venv"
@@ -552,6 +559,13 @@ fi
 if [ -n "$ENV_FILE" ]; then
   [ -f "$ENV_FILE" ] || die "--env-file not found: $ENV_FILE"
 fi
+
+# uv's own installer puts it in ~/.local/bin (older ones, ~/.cargo/bin), which
+# a non-interactive SSH command does not have on PATH: Ubuntu's ~/.bashrc
+# returns before adding it, and ~/.profile is read by login shells only. Look
+# there too, appended so a system uv still wins.
+PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin"
+export PATH
 
 command -v uv >/dev/null || die "uv is required but not on PATH.
   Arch: sudo pacman -S uv | Debian: sudo apt install uv | macOS: brew install uv

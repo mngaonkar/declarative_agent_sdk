@@ -177,6 +177,26 @@ function handleEvent(event) {
 
 /* ── sidebar ────────────────────────────────────────────────────────── */
 
+/*
+ * Whether an agent is usable right now. `ready` is install.sh's verdict on
+ * the config at install time and is never refreshed, so on its own it shows
+ * "ready" for an agent that has since stopped or whose machine is gone. The
+ * Agents-tab poll asks every agent for /context; a failed connection there
+ * overrides the stored flag. Before the first poll, the stored flag is all
+ * there is.
+ */
+function liveness(agent) {
+  const report = state.contexts[String(agent.id)];
+  if (report && report.reachable === false) {
+    return { ok: false, label: 'unreachable', note: report.error || '' };
+  }
+  if (!agent.ready) return { ok: false, label: 'not ready', note: agent.problems || '' };
+  if (report && report.reachable) return { ok: true, label: 'ready', note: '' };
+  return { ok: true, label: 'ready', note: '', unchecked: true };
+}
+
+const pinClass = (agent) => `pin ${liveness(agent).ok ? 'ready' : 'down'}`;
+
 function renderSidebar() {
   const channels = $('#channel-list');
   channels.innerHTML = '';
@@ -197,7 +217,7 @@ function renderSidebar() {
   agents.innerHTML = '';
   state.agents.forEach((agent) => {
     const item = el('li');
-    item.append(el('span', `pin ${agent.ready ? 'ready' : 'down'}`));
+    item.append(el('span', pinClass(agent)));
     item.append(el('span', '', fqn(agent)));
     item.title = `${agent.model || agent.framework} · ${agent.url || 'no url'}`;
     agents.append(item);
@@ -377,7 +397,7 @@ function renderMembers() {
   state.members.forEach((member) => {
     const item = el('li');
     const left = el('span');
-    left.append(el('span', `pin ${member.ready ? 'ready' : 'down'}`));
+    left.append(el('span', pinClass(member)));
     left.append(document.createTextNode(' ' + fqn(member)));
     left.title = `${member.machine_name} · ${member.url || 'no url'}`;
     item.append(left);
@@ -434,10 +454,11 @@ function renderAgents() {
     row.append(url);
 
     const status = el('td');
-    status.append(el('span', `tag ${agent.ready ? 'ok' : 'bad'}`, agent.ready ? 'ready' : 'not ready'));
-    if (agent.problems) {
-      status.append(el('div', 'note', agent.problems));
-    }
+    const live = liveness(agent);
+    const tag = el('span', `tag ${live.ok ? 'ok' : 'bad'}`, live.label);
+    if (live.unchecked) tag.title = 'Install-time check only; not contacted yet.';
+    status.append(tag);
+    if (live.note) status.append(el('div', 'note', live.note));
     row.append(status);
 
     const actions = el('td');
@@ -549,7 +570,7 @@ function serverCard(server) {
 
   const served = el('div', 'served');
   (server.agents || []).forEach((agent) => {
-    served.append(el('span', `tag ${agent.ready ? 'ok' : 'bad'}`, agent.qualified));
+    served.append(el('span', `tag ${liveness(agent).ok ? 'ok' : 'bad'}`, agent.qualified));
   });
   card.append(served);
 
@@ -644,7 +665,8 @@ async function pollServers() {
     serverFailures = 0;
     state.contexts = data.contexts || {};
     renderServers(data.servers || []);
-    renderAgents();            // the Context column comes from this same poll
+    renderAgents();            // the Context and Status columns come from this poll
+    renderSidebar();           // and so do the sidebar's liveness pins
   } catch (error) {
     serverFailures += 1;
     // Three in a row means the board itself is unhappy; stop asking rather
@@ -1428,7 +1450,7 @@ const mention = {
       const item = el('li', i === this.index ? 'sel' : '');
       if (!member) item.classList.add('outside');
       item.setAttribute('role', 'option');
-      item.append(el('span', `pin ${agent.ready ? 'ready' : 'down'}`));
+      item.append(el('span', pinClass(agent)));
       item.append(el('span', 'name', '@' + fqn(agent)));
       item.append(el('span', 'meta', member
         ? (agent.model || agent.framework || '')

@@ -222,6 +222,9 @@ class MachineDriver:
         try:
             out = self.run(
                 machine,
+                # Same extra directories install.sh searches: uv's installer
+                # uses ~/.local/bin, which an SSH command's PATH usually lacks.
+                'PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin"; '
                 "uname -s; command -v uv >/dev/null 2>&1 && echo uv-ok || echo uv-missing; "
                 f"echo {_IFACE_MARK}; {_LIST_INTERFACES}",
                 timeout=30,
