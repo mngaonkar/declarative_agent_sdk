@@ -943,6 +943,43 @@ if [ "$IS_ROOT" -eq 1 ]; then
   chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PREFIX"
 fi
 
+# --- bind address ----------------------------------------------------------
+#
+# A server can only listen on an address this machine has. Given another
+# machine's, the agent starts, fails to bind and exits, and supervisord
+# retries it into BACKOFF: installed, "running" as far as the install could
+# tell, and never reachable. So try the bind here, where the reason can still
+# be reported. Port 0, so it does not matter what holds the agent's own port.
+
+case "$BIND_HOST" in
+  0.0.0.0|::|"") ;;
+  *)
+    if ! BIND_ERR="$("$VENV/bin/python" -c '
+import socket, sys
+host = sys.argv[1]
+try:
+    infos = socket.getaddrinfo(host, 0, type=socket.SOCK_STREAM)
+except socket.gaierror as exc:
+    sys.exit("cannot resolve %s: %s" % (host, exc))
+family, _, _, _, address = infos[0]
+s = socket.socket(family, socket.SOCK_STREAM)
+try:
+    s.bind(address)
+except OSError as exc:
+    sys.exit(exc.strerror or str(exc))
+finally:
+    s.close()
+' "$BIND_HOST" 2>&1)"; then
+      if [ "$OS" = "Linux" ]; then
+        HAVE="$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')"
+      else
+        HAVE="$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | tr '\n' ' ')"
+      fi
+      die "cannot bind --host $BIND_HOST on this machine ($BIND_ERR). Its addresses: ${HAVE:-unknown}. Use one of them, or 0.0.0.0 for all."
+    fi
+    ;;
+esac
+
 # --- advertised address ----------------------------------------------------
 #
 # The bind address and the published address are different things: 0.0.0.0
@@ -1142,11 +1179,25 @@ PROGEOF
     # program needs an explicit restart to pick up a rebuilt venv.
     sctl update >/dev/null 2>&1 || true
     sctl restart "$NAME" >/dev/null 2>&1 || sctl start "$NAME" >/dev/null 2>&1 || true
-    SERVICE_STATE="$(sctl status "$NAME" 2>/dev/null | awk '{print tolower($2)}')"
+    # STARTING lasts until startsecs pass; wait it out (bounded) so the state
+    # reported is the one the program settles in, not the first glimpse.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      SERVICE_STATE="$(sctl status "$NAME" 2>/dev/null | awk '{print tolower($2)}')"
+      [ "$SERVICE_STATE" = "starting" ] || break
+      sleep 1
+    done
     [ -n "$SERVICE_STATE" ] || SERVICE_STATE="unknown"
     if [ "$SERVICE_STATE" = "running" ]; then
       info "  program running"
     else
+      # Installed but not up is not ready: say so, with the program's own
+      # last word, instead of reporting success for an agent that is
+      # crash-looping.
+      LAST_ERR="$(tail -n 40 "$PREFIX/logs/$NAME.err.log" 2>/dev/null \
+        | grep -Ev '^(INFO|DEBUG)|^[0-9-]+ [0-9:,]+ - .* - (INFO|DEBUG) - ' | tail -n 1 || true)"
+      PROBLEMS="${PROBLEMS:+$PROBLEMS
+}the agent did not stay up (supervisord state: $SERVICE_STATE)${LAST_ERR:+: $LAST_ERR}"
+      READY=false
       warn "program state is $SERVICE_STATE — $SUPERVISOR_VENV/bin/supervisorctl -c $SUPERVISOR_CONF tail -100 $NAME stderr"
     fi
   else

@@ -26,8 +26,8 @@ class ToolRegistry:
         'web_request',
         'exec_command',
         'send_to_agent',
-        'share_file',
         'read_shared',
+        'write_link',
     )
 
     # Core only when on a board: off a board it can only report that there is

@@ -48,8 +48,8 @@ class AIAgentServer():
             ))
             logger.info(f"Agent card URL set to: {url}")
 
-        # Shared files are served from the address peers already dial, so a
-        # link minted by share_file works wherever the agent card does.
+        # Workspace files are served from the address peers already dial, so a
+        # /files/<path> link works wherever the agent card does.
         try:
             shares.configure(
                 workspace=str(getattr(agent, "workspace_directory", "") or "workspace"),
@@ -69,7 +69,7 @@ class AIAgentServer():
             + create_jsonrpc_routes(request_handler, DEFAULT_RPC_URL)
             + [Route("/context", self._context_route, methods=["GET"]),
                Route("/context", self._reset_context_route, methods=["DELETE"]),
-               Route("/files/{share_id}", self._file_route, methods=["GET"])]
+               Route("/files/{path:path}", self._file_route, methods=["GET"])]
         )
 
         self.app = Starlette(routes=routes)
@@ -82,27 +82,21 @@ class AIAgentServer():
 
     async def _file_route(self, request):
         """
-        One file this agent shared with share_file, streamed from disk.
+        A file in this agent's workspace, by path, streamed from disk.
 
-        Only explicitly shared files, only with a valid unexpired link; see
-        core/shares.py for what is checked. Errors say why, without naming
-        any path.
+        See core/shares.py for what is served and what is refused. Errors say
+        why without echoing the requested path.
         """
-        registry = shares.current()
-        if registry is None:
-            return JSONResponse({"error": "file sharing is not enabled"}, status_code=404)
+        files = shares.current()
+        if files is None:
+            return JSONResponse({"error": "file serving is not enabled"}, status_code=404)
         try:
-            path, record = registry.resolve(
-                request.path_params["share_id"],
-                request.query_params.get("exp", ""),
-                request.query_params.get("sig", ""),
-            )
+            path, kind = files.resolve(request.path_params["path"])
         except shares.ShareError as exc:
             return JSONResponse({"error": str(exc)}, status_code=exc.status)
         return FileResponse(
-            path, media_type=record.get("type") or "application/octet-stream",
-            filename=path.name, content_disposition_type="inline",
-            # A link is a capability; keep it and the bytes out of caches.
+            path, media_type=kind, filename=path.name, content_disposition_type="inline",
+            # Files change as agents edit them; always read the current one.
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 

@@ -256,7 +256,7 @@ function renderSidebarAgents() {
     const icon = el('span', `activity ${busy ? 'working' : 'idle'}${live.ok ? '' : ' down'}`);
     icon.setAttribute('role', 'img');
     icon.setAttribute('aria-label', busy ? 'working' : (live.ok ? 'idle' : live.label));
-    item.append(icon, el('span', '', name));
+    item.append(icon, tint(el('span', 'agent-name', name), agent));
     const where = busy
       ? `working in ${[...busy].map((id) => `#${state.channels.find((c) => c.id === id)?.name || id}`).join(', ')}`
       : (live.ok ? 'idle' : live.label);
@@ -376,6 +376,100 @@ function buildEmpty() {
   return node;
 }
 
+/*
+ * A bright colour of its own for every agent, the same everywhere it appears
+ * (board, sidebar, members, mentions, tables) — and never shared by two
+ * current agents.
+ *
+ * Colours come from a fixed palette of hues picked to stay apart on this dark
+ * background, not computed from the id: hashing ids onto a colour wheel lands
+ * unrelated ids side by side (ids 25 and 38 were 12° apart — both cyan).
+ *
+ * Allocation runs over the current agents in id order. Each prefers slot
+ * id % palette size and, when that is taken, takes the next free one, so an
+ * agent usually keeps its colour as others come and go. The palette is ordered
+ * so neighbouring slots are far apart in hue, since probing fills neighbours.
+ * Past the palette, the remaining agents are spread evenly over the wheel at a
+ * lighter shade, which keeps them distinct from the palette and each other.
+ *
+ * A name that is no current agent's (a deleted agent in old history, a
+ * hostname) gets a muted colour, so it never passes for a live agent.
+ */
+const AGENT_PALETTE = [
+  '#ff6b6b', // red
+  '#3bc9db', // cyan
+  '#ffd43b', // yellow
+  '#b197fc', // violet
+  '#69db7c', // green
+  '#f783ac', // pink
+  '#4dabf7', // blue
+  '#ffa94d', // orange
+  '#38d9a9', // teal
+  '#e599f7', // orchid
+  '#c0eb75', // lime
+  '#91a7ff', // periwinkle
+];
+let agentPaletteKey = '';
+let agentPaletteMap = new Map();
+
+function agentFor(name) {
+  if (!name) return null;
+  const bare = String(name).replace(/^@/, '');
+  const exact = state.agents.find((a) => fqn(a) === bare);
+  if (exact) return exact;
+  if (bare.includes('.')) return null;
+  const matches = state.agents.filter((a) => a.name === bare);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/** id -> colour for every current agent; recomputed when the set changes. */
+function agentPalette() {
+  const ids = state.agents.map((a) => Number(a.id)).sort((x, y) => x - y);
+  const key = ids.join(',');
+  if (key === agentPaletteKey) return agentPaletteMap;
+  const size = AGENT_PALETTE.length;
+  const taken = new Array(size).fill(false);
+  const map = new Map();
+  const overflow = [];
+  ids.forEach((id) => {
+    const want = ((id % size) + size) % size;
+    for (let step = 0; step < size; step += 1) {
+      const slot = (want + step) % size;
+      if (!taken[slot]) {
+        taken[slot] = true;
+        map.set(id, AGENT_PALETTE[slot]);
+        return;
+      }
+    }
+    overflow.push(id);
+  });
+  overflow.forEach((id, i) => {
+    // Offset by half a step so these sit between palette hues, not on them.
+    const hue = ((i + 0.5) * 360) / overflow.length;
+    map.set(id, `hsl(${hue.toFixed(1)} 90% 80%)`);
+  });
+  agentPaletteKey = key;
+  agentPaletteMap = map;
+  return map;
+}
+
+function agentColor(nameOrAgent) {
+  const agent = typeof nameOrAgent === 'object' && nameOrAgent
+    ? nameOrAgent : agentFor(nameOrAgent);
+  const color = agent && agentPalette().get(Number(agent.id));
+  if (color) return color;
+  let hash = 0;
+  for (const ch of String(nameOrAgent)) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  return `hsl(${hash % 360} 25% 68%)`;
+}
+
+/** Colour a node for an agent: sets --agent-color, which the CSS uses. */
+function tint(node, nameOrAgent) {
+  node.style.setProperty('--agent-color', agentColor(nameOrAgent));
+  node.classList.add('tinted');
+  return node;
+}
+
 /**
  * How a sender is shown. Messages written before an agent had a machine — or
  * by an agent whose .env predates AGENT_QUALIFIED_NAME — carry a bare name, so
@@ -394,10 +488,14 @@ function appendMessage(message, scroll = true) {
   const who = el('span', 'who',
     message.sender_kind === 'system' ? '*' : displaySender(message.sender));
   who.title = message.sender;
+  if (message.sender_kind === 'agent') tint(who, displaySender(message.sender));
   row.append(who);
   const body = el('span', 'text');
   if (message.target) {
-    body.append(el('span', 'to', `→ @${displaySender(message.target)} `));
+    const to = el('span', 'to', '→ ');
+    to.append(tint(el('span', 'to-name', `@${displaySender(message.target)}`),
+      displaySender(message.target)), document.createTextNode(' '));
+    body.append(to);
   }
   body.append(renderBody(message.text));
   row.append(body);
@@ -411,20 +509,27 @@ function appendMessage(message, scroll = true) {
  * AgentMarkdown builds nodes rather than HTML strings — the text came from a
  * model, which is to say from whatever that model just read.
  */
-// A link minted by share_file: …/files/<id>?exp=<unix>&sig=<hex>.
-const SHARED_LINK = /\/files\/[A-Za-z0-9_-]{8,64}\?exp=(\d+)&sig=[0-9a-f]{16,64}$/;
+// An agent's file link: http(s)://<agent>/files/<path in its workspace>.
+const SHARED_LINK = /^https?:\/\/[^/\s?#]+(?:\/[^\s?#]*)?\/files\/([^\s?#]+)$/;
 
-/** A shared-file link as a chip that previews through the board's relay. */
+/** An agent file link as a chip that previews through the board's relay. */
 function sharedFileChip(href) {
   const match = SHARED_LINK.exec(href);
   if (!match) return null;
-  const expires = Number(match[1]) * 1000;
-  const left = expires - Date.now();
-  const chip = el('button', `file-chip${left <= 0 ? ' expired' : ''}`);
+  // Only links on a registered agent's address: the relay refuses others,
+  // and an unrelated site's /files/ URL should stay an ordinary link.
+  let host = '';
+  try { host = new URL(href).host; } catch { return null; }
+  const owner = state.agents.find((a) => {
+    try { return new URL(a.url).host === host; } catch { return false; }
+  });
+  if (!owner) return null;
+  let name = match[1];
+  try { name = decodeURIComponent(name); } catch { /* keep it encoded */ }
+  const chip = el('button', 'file-chip');
   chip.type = 'button';
-  chip.append(el('span', 'icon', '📎'), el('span', 'label', 'shared file'));
-  chip.append(el('span', 'meta', left <= 0 ? 'expired'
-    : `expires in ${left > 3600e3 ? `${Math.round(left / 3600e3)}h` : `${Math.max(1, Math.round(left / 60e3))}m`}`));
+  chip.append(el('span', 'icon', '📎'), el('span', 'label', name.split('/').pop()));
+  chip.append(el('span', 'meta', `@${fqn(owner)}`));
   chip.title = href;
   chip.onclick = () => previewShared(href);
   return chip;
@@ -494,6 +599,7 @@ function renderBody(text) {
         const span = doc.createElement('span');
         span.className = 'mention';
         span.textContent = '@' + displaySender(token.name);
+        if (agentFor(token.name)) tint(span, agentFor(token.name));
         return span;
       },
       onLink: (link) => sharedFileChip(link.href),
@@ -548,7 +654,8 @@ function renderMembers() {
     const item = el('li');
     const left = el('span');
     left.append(el('span', pinClass(member)));
-    left.append(document.createTextNode(' ' + fqn(member)));
+    left.append(document.createTextNode(' '),
+      tint(el('span', 'agent-name', fqn(member)), member));
     left.title = `${member.machine_name} · ${member.url || 'no url'}`;
     item.append(left);
     const remove = el('span', 'x', '×');
@@ -591,7 +698,7 @@ function renderAgents() {
   }
   state.agents.forEach((agent) => {
     const row = el('tr');
-    row.append(cell(fqn(agent), 'mono'), cell(agent.machine_name));
+    row.append(tint(cell(fqn(agent), 'mono agent-name'), agent), cell(agent.machine_name));
     row.append(cell(`${agent.framework} · ${agent.provider} · ${agent.model || '—'}`));
     row.append(contextCell(state.contexts[String(agent.id)]));
     const url = el('td', 'mono');
@@ -1258,9 +1365,12 @@ function openReinstall(agent) {
       closeModal();
       const problems = result.result?.problems;
       const list = Array.isArray(problems) ? problems.join('; ') : (problems || '');
+      const address = result.address_fixed
+        ? ` — ${result.address_fixed}`
+        : (result.kept_address ? '' : ' — address re-detected by install.sh');
       toast(result.agent?.ready
-        ? `${fqn(agent)} reinstalled${result.kept_address ? '' : ' — address re-detected by install.sh'}`
-        : `${fqn(agent)} reinstalled but not ready: ${list || 'see its log'}`,
+        ? `${fqn(agent)} reinstalled${address}`
+        : `${fqn(agent)} reinstalled but not ready: ${list || 'see its log'}${address}`,
         !result.agent?.ready);
       load();
     } catch (error) {
@@ -2134,7 +2244,7 @@ const mention = {
       if (!member) item.classList.add('outside');
       item.setAttribute('role', 'option');
       item.append(el('span', pinClass(agent)));
-      item.append(el('span', 'name', '@' + fqn(agent)));
+      item.append(tint(el('span', 'name', '@' + fqn(agent)), agent));
       item.append(el('span', 'meta', member
         ? (agent.model || agent.framework || '')
         : '+ add to channel'));

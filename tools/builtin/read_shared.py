@@ -1,5 +1,5 @@
 """
-read_shared — read a file another agent shared with share_file.
+read_shared — read a file from another agent's workspace by its link.
 
 The file stays where it is: this fetches it from the owner's link straight into
 the reply, without saving it anywhere. Text comes back as text, bounded so a
@@ -28,8 +28,11 @@ def read_shared(url: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
     """
     Read a shared file from the link another agent gave you.
 
+    To keep the file (to edit it, build on it, or pass it on), use write_link
+    instead: it saves the file directly, so you never retype its contents.
+
     Args:
-        url: the link exactly as given (it ends in ?exp=...&sig=...).
+        url: the link exactly as given (http://<agent>/files/<path>).
         max_chars: most characters of text to return (default 40000). The
             reply says when the file was longer.
 
@@ -37,8 +40,9 @@ def read_shared(url: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
         The file's text, marked as shared data, or a description of a file
         that is not text.
     """
-    if not url.startswith(("http://", "https://")) or "/files/" not in url:
-        return "Error: that is not a shared-file link (expected …/files/<id>?exp=…&sig=…)"
+    from declarative_agent_sdk.tools.builtin._links import is_share_link
+    if not is_share_link(url):
+        return "Error: that is not an agent file link (expected http://<agent>/files/<path>)"
     limit = max(1, min(int(max_chars or DEFAULT_MAX_CHARS), HARD_MAX_CHARS))
     try:
         result = _fetch(url, limit)

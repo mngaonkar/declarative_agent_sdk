@@ -2527,12 +2527,12 @@ class TestBoardToolsAreCore:
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         names = self._registry().core_tool_names()
         assert "list_agents" not in names
-        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared"]
+        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "read_shared", "write_link"]
 
     def test_core_tools_returns_the_callables(self, monkeypatch):
         monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
         got = [fn.__name__ for fn in self._registry().core_tools()]
-        assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared", "list_agents"]
+        assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "read_shared", "write_link", "list_agents"]
 
     def test_the_lean_runtime_registers_them(self, tmp_path, monkeypatch):
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
@@ -2842,12 +2842,12 @@ class TestBoardToolsAreCore:
         monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
         names = self._registry().core_tool_names()
         assert "list_agents" not in names
-        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared"]
+        assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "read_shared", "write_link"]
 
     def test_core_tools_returns_the_callables(self, monkeypatch):
         monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
         got = [fn.__name__ for fn in self._registry().core_tools()]
-        assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "share_file", "read_shared", "list_agents"]
+        assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "read_shared", "write_link", "list_agents"]
 
     def test_the_lean_runtime_registers_them(self, tmp_path, monkeypatch):
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
@@ -4357,7 +4357,7 @@ class TestAgentsKnowTheirOwnTools:
         prompt = router._prompt_for(channel["id"], "master.MacBook-pro", "hi", "you")
         assert "You run on the machine 'MacBook-pro'" in prompt
         assert "(read_file, write_file, web_request, exec_command, send_to_agent, " in prompt
-        assert "read_shared, tavily_search)" in prompt
+        assert "read_shared, write_link, tavily_search)" in prompt
         assert "user@host is not an agent" in prompt
 
 
@@ -4508,9 +4508,9 @@ class TestHeldThroughput:
 
 
 class TestFileRelay:
-    """/api/files/relay passes a shared file through from its owner, and only that."""
+    """/api/files/relay passes an agent's file through from its owner, and only that."""
 
-    LINK = "http://100.83.163.18:8000/files/AbCdEfGh12345678?exp=9999999999&sig=" + "a" * 32
+    LINK = "http://100.83.163.18:8000/files/drafts/day%201.md"
 
     @pytest.fixture
     def owner(self, plane):
@@ -4537,13 +4537,13 @@ class TestFileRelay:
         assert reply.status_code == 200 and reply.text == "# findings\n"
         assert reply.headers["x-shared-by"] == "reviewer.omarchy"
         assert reply.headers["cache-control"] == "no-store"
-        assert seen[0].startswith("http://100.83.163.18:8000/files/AbCdEfGh12345678?")
-        assert "sig=" + "a" * 32 in seen[0]
+        # The path goes on still encoded, and nothing is added to it.
+        assert seen[0] == "http://100.83.163.18:8000/files/drafts/day%201.md"
 
     def test_the_owners_refusal_passes_through(self, client, owner, monkeypatch):
-        self._upstream(monkeypatch, lambda r: httpx.Response(410, json={"error": "expired"}))
+        self._upstream(monkeypatch, lambda r: httpx.Response(404, json={"error": "no such file"}))
         reply = client.get("/api/files/relay", params={"url": self.LINK}, headers=AUTH)
-        assert reply.status_code == 410
+        assert reply.status_code == 404
 
     def test_a_host_that_is_not_a_board_agent_is_refused(self, client, owner):
         other = self.LINK.replace("100.83.163.18", "169.254.169.254")
@@ -4552,7 +4552,9 @@ class TestFileRelay:
 
     def test_only_files_links_are_relayed(self, client, owner):
         for url in ("http://100.83.163.18:8000/", "http://100.83.163.18:8000/context",
-                    "http://100.83.163.18:8000/files/../etc?exp=1&sig=a", "file:///etc/passwd"):
+                    "http://100.83.163.18:8000/files/a/../../etc",
+                    "http://100.83.163.18:8000/files/%2e%2e/etc",
+                    "http://100.83.163.18:8000/files/.env", "file:///etc/passwd"):
             assert client.get("/api/files/relay", params={"url": url},
                               headers=AUTH).status_code == 400, url
 
@@ -4566,13 +4568,15 @@ class TestFileRelay:
         reply = client.get("/api/files/relay", params={"url": self.LINK}, headers=AUTH)
         assert reply.status_code == 502 and "reviewer.omarchy" in reply.json()["error"]
 
-    def test_the_prompt_mentions_sharing_to_every_agent(self, store):
-        """share_file / read_shared are core, so no tools: list is needed."""
+    def test_the_prompt_gives_each_agent_its_own_link_base(self, store):
         router = ChannelRouter(store, EventBus())
         machine = store.add_machine("here", "localhost", is_local=True)
-        store.upsert_agent(machine["id"], {"name": "b", "tools": ""})
+        store.upsert_agent(machine["id"], {"name": "b", "tools": "",
+                                           "url": "http://100.1.1.1:8000/"})
         block = router._self_block("b.here")
-        assert "call share_file" in block and "with read_shared" in block
+        assert "http://100.1.1.1:8000/files/report.md" in block
+        assert "with read_shared" in block and "write_link" in block
+        assert "share_file" not in block
 
 
 class TestReinstall:

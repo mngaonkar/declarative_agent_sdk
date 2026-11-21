@@ -440,6 +440,7 @@ class MachineDriver:
                 "uv is needed to build a wheel from the working tree "
                 "(https://astral.sh/uv), or create the agent from git instead"
             )
+        _clear_setuptools_staging(root)
         try:
             proc = subprocess.run(
                 [tool, "build", "--wheel", "--out-dir", str(out), str(root)],
@@ -1039,6 +1040,29 @@ class MachineDriver:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _clear_setuptools_staging(root: Path) -> None:
+    """
+    Empty the build/ staging setuptools reuses between wheel builds.
+
+    setuptools copies the sources into build/lib and packs the wheel from
+    there, but never deletes from it: a module removed from the tree stays in
+    build/lib and keeps shipping in every wheel built afterwards. Observed:
+    share_file.py, deleted from tools/builtin, still installed — and offered
+    to the model — on every agent re-installed from this checkout.
+
+    Only setuptools' own staging (build/lib, build/bdist.*) is removed, and
+    only directly under this checkout's build/.
+    """
+    staging = root / "build"
+    if not staging.is_dir():
+        return
+    for target in [staging / "lib", *staging.glob("bdist.*")]:
+        real = target.resolve()
+        if target.is_dir() and not target.is_symlink() and real.parent == staging.resolve():
+            shutil.rmtree(real)
+            logger.info(f"cleared stale wheel staging {real}")
+
 
 def _require_prefix(prefix: str) -> str:
     """

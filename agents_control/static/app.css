@@ -457,3 +457,21 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   .log-src { display: none; }
   .logs-path { margin-left: 0; max-width: 100%; }
 }
+
+/* ── per-agent colours (see agentColor in app.js) ───────────────────── */
+
+.tinted { color: var(--agent-color); }
+.msg .who.tinted { color: var(--agent-color); }
+.msg .text .mention.tinted {
+  color: var(--agent-color);
+  background: color-mix(in srgb, var(--agent-color) 14%, transparent);
+}
+.msg .to .to-name { font-weight: 600; }
+.agent-list li .agent-name, .member-list .agent-name { font-family: var(--mono); }
+/* Dimmed, not uncoloured: still recognisable, but plainly not here. */
+.agent-list li:not(.working) .agent-name.tinted { opacity: .85; }
+.mention-pop li .name.tinted { color: var(--agent-color); }
+.mention-pop li.outside .name.tinted { opacity: .6; }
+/* On the accent-filled selection, a light hue would vanish; keep it dark. */
+.mention-pop li.sel .name.tinted { color: #06121f; opacity: 1; }
+td.agent-name.tinted { font-weight: 600; }

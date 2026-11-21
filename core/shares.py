@@ -1,191 +1,129 @@
 """
-Files an agent has chosen to share, served from where they already are.
+An agent's workspace files, served by path at ``/files/<path>``.
 
-Agents on different machines cannot read each other's workspace, and copying a
-file into every reader's context or directory is what this avoids. Instead the
-owner registers one file and hands out a link; its own A2A server streams the
-file from disk when the link is followed (``GET /files/{id}``).
+Agents on different machines cannot read each other's workspace, and pasting a
+file into a message copies it into every reader's context. Instead an agent
+hands out a plain link to the file where it already is::
 
-Deliberately narrow, because that server listens without authentication:
+    http://<agent address>/files/<path inside the workspace>
 
-- nothing is browsable: only a file explicitly shared can be fetched, by an
-  unguessable id;
-- a link carries an expiry and an HMAC over (id, expiry), so it cannot be
-  forged or extended, and it stops working on its own;
-- the file must resolve, symlinks included, to somewhere inside the workspace,
-  checked again on every read, so a link cannot be turned into a path out;
-- read-only, and revocable (``unshare_file``).
+The agent's own A2A server streams the file from disk when the link is
+followed. There is no share step, no expiry and no signature: any file in the
+workspace can be read by anyone who can reach the agent's port — the same
+reach that can already send it tasks over JSON-RPC. That is a deliberate
+trade for simplicity; keep anything private out of the workspace.
 
-State lives beside the workspace (``.shares.json`` and a 0600 ``.share-key``)
-so links survive a restart of the agent.
+What is still enforced, on every read:
+
+- only the workspace: a path must resolve, symlinks included, to a file inside
+  it, so neither ``../`` nor a symlink leads out;
+- no hidden names: a path with any component starting with ``.`` (``.env``,
+  ``.git/…``) is refused;
+- files only, read-only: a directory is not listed.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import mimetypes
-import os
-import secrets
-import threading
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path, PurePosixPath
+from typing import Optional, Tuple
+from urllib.parse import quote
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_TTL_HOURS = 24.0
-MAX_TTL_HOURS = 24.0 * 30
-
 
 class ShareError(ValueError):
-    """A share could not be created or a link does not resolve."""
+    """A path that cannot be served; ``status`` is the HTTP answer."""
 
     def __init__(self, message: str, status: int = 400) -> None:
         super().__init__(message)
         self.status = status
 
 
-class ShareRegistry:
-    def __init__(self, workspace: str, base_url: str, state_dir: Optional[str] = None) -> None:
+class WorkspaceFiles:
+    """Maps link paths to workspace files and back."""
+
+    def __init__(self, workspace: str, base_url: str) -> None:
         self.workspace = Path(workspace).resolve()
         self.base_url = base_url.rstrip("/") + "/"
-        state = Path(state_dir).resolve() if state_dir else self.workspace.parent
-        self._index_path = state / ".shares.json"
-        self._key_path = state / ".share-key"
-        self._lock = threading.Lock()
-        self._key = self._load_key()
-        self._shares: Dict[str, Dict[str, Any]] = self._load_index()
 
-    # ------------------------------------------------------------- state
+    def relative(self, path: str) -> str:
+        """
+        A path a link may name, as a workspace-relative POSIX path.
 
-    def _load_key(self) -> bytes:
-        env = os.environ.get("AGENT_SHARE_KEY", "").strip()
-        if env:
-            return env.encode()
-        try:
-            return self._key_path.read_bytes().strip()
-        except FileNotFoundError:
-            pass
-        key = secrets.token_hex(32).encode()
-        self._key_path.parent.mkdir(parents=True, exist_ok=True)
-        # Created 0600 rather than chmod'ed after, so it is never readable by
-        # others even for a moment.
-        fd = os.open(str(self._key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(key)
-        return key
+        Accepts a path relative to the workspace or to the agent's directory
+        (``workspace/report.md`` — what a lean agent passes to write_file), or
+        an absolute path inside the workspace.
+        """
+        candidate = Path(path).expanduser()
+        if candidate.is_absolute():
+            real = candidate.resolve()
+        else:
+            # The agent's process runs in its own directory, so a path the
+            # model wrote with (workspace/report.md) resolves from there;
+            # failing that, read it as relative to the workspace itself.
+            real = candidate.resolve()
+            if not self._inside(real):
+                real = (self.workspace / candidate).resolve()
+        if not self._inside(real):
+            raise ShareError(f"{path} is outside this agent's workspace", status=403)
+        rel = real.relative_to(self.workspace).as_posix()
+        if any(part.startswith(".") for part in PurePosixPath(rel).parts):
+            raise ShareError("hidden files are not served", status=403)
+        return rel
 
-    def _load_index(self) -> Dict[str, Dict[str, Any]]:
-        try:
-            data = json.loads(self._index_path.read_text())
-        except (FileNotFoundError, ValueError):
-            return {}
-        return {k: v for k, v in data.items() if isinstance(v, dict)}
+    def _inside(self, real: Path) -> bool:
+        return real == self.workspace or self.workspace in real.parents
 
-    def _save(self) -> None:
-        now = time.time()
-        live = {k: v for k, v in self._shares.items() if float(v.get("exp", 0)) > now}
-        self._shares = live
-        tmp = self._index_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(live, indent=1))
-        os.replace(tmp, self._index_path)
+    def url_for(self, path: str) -> str:
+        """The link for a workspace file (it need not exist yet)."""
+        return f"{self.base_url}files/{quote(self.relative(path))}"
 
-    # ----------------------------------------------------------- helpers
+    def resolve(self, link_path: str) -> Tuple[Path, str]:
+        """
+        The file a ``/files/<link_path>`` request may read, and its type.
 
-    def _sign(self, share_id: str, exp: int) -> str:
-        return hmac.new(self._key, f"{share_id}.{exp}".encode(), hashlib.sha256).hexdigest()[:32]
-
-    def _inside(self, path: Path) -> Path:
-        """Resolve ``path`` (relative to the workspace) and refuse anything outside it."""
-        candidate = path if path.is_absolute() else self.workspace / path
-        real = candidate.resolve()
-        if real != self.workspace and self.workspace not in real.parents:
-            raise ShareError(
-                f"{path} is outside this agent's workspace ({self.workspace}); "
-                "only files in the workspace can be shared", status=403)
-        return real
-
-    def url_for(self, share_id: str) -> str:
-        record = self._shares[share_id]
-        exp = int(record["exp"])
-        return f"{self.base_url}files/{share_id}?exp={exp}&sig={self._sign(share_id, exp)}"
-
-    # ------------------------------------------------------------- tools
-
-    def share(self, path: str, ttl_hours: float = DEFAULT_TTL_HOURS) -> Dict[str, Any]:
-        real = self._inside(Path(path))
+        ``link_path`` arrives percent-decoded. Checked against the workspace
+        on every request, so a file swapped for a symlink is caught.
+        """
+        rel = (link_path or "").strip("/")
+        if not rel:
+            raise ShareError("no file named", status=404)
+        parts = PurePosixPath(rel).parts
+        if any(part in ("..", "") or part.startswith(".") for part in parts):
+            raise ShareError("that path is not served", status=403)
+        real = (self.workspace / PurePosixPath(*parts)).resolve()
+        if not self._inside(real):
+            raise ShareError("that path is not served", status=403)
         if not real.is_file():
-            raise ShareError(f"{path} is not a file in the workspace", status=404)
-        ttl = max(0.01, min(float(ttl_hours or DEFAULT_TTL_HOURS), MAX_TTL_HOURS))
-        relative = str(real.relative_to(self.workspace))
-        with self._lock:
-            share_id = secrets.token_urlsafe(12)
-            self._shares[share_id] = {
-                "path": relative,
-                "created": int(time.time()),
-                "exp": int(time.time() + ttl * 3600),
-                "type": mimetypes.guess_type(real.name)[0] or "application/octet-stream",
-                "size": real.stat().st_size,
-            }
-            self._save()
-        record = self._shares[share_id]
-        logger.info(f"[shares] shared {relative} as {share_id} for {ttl:g}h")
-        return {"id": share_id, "url": self.url_for(share_id), **record}
-
-    def unshare(self, id_or_path: str) -> int:
-        """Revoke by id, or every share of one path. Returns how many went."""
-        with self._lock:
-            doomed = [k for k, v in self._shares.items()
-                      if k == id_or_path or v.get("path") == id_or_path.strip("/")]
-            for key in doomed:
-                self._shares.pop(key, None)
-            if doomed:
-                self._save()
-        return len(doomed)
-
-    def list(self) -> List[Dict[str, Any]]:
-        now = time.time()
-        return [
-            {"id": k, "url": self.url_for(k), **v}
-            for k, v in sorted(self._shares.items(), key=lambda kv: kv[1].get("created", 0))
-            if float(v.get("exp", 0)) > now
-        ]
-
-    # ------------------------------------------------------------- route
-
-    def resolve(self, share_id: str, exp: str, sig: str) -> Tuple[Path, Dict[str, Any]]:
-        """Check a link and return the file it may read. Raises ShareError."""
-        try:
-            expiry = int(exp)
-        except (TypeError, ValueError):
-            raise ShareError("malformed link", status=403) from None
-        if not hmac.compare_digest(self._sign(share_id, expiry), str(sig or "")):
-            raise ShareError("invalid link", status=403)
-        if expiry <= time.time():
-            raise ShareError("this link has expired", status=410)
-        record = self._shares.get(share_id)
-        if record is None or int(record.get("exp", 0)) != expiry:
-            raise ShareError("this file is no longer shared", status=410)
-        # Again at read time: the file may have been swapped for a symlink.
-        real = self._inside(Path(record["path"]))
-        if not real.is_file():
-            raise ShareError("the shared file no longer exists", status=410)
-        return real, record
+            raise ShareError("no such file in this agent's workspace", status=404)
+        kind = mimetypes.guess_type(real.name)[0] or "application/octet-stream"
+        return real, kind
 
 
-_current: Optional[ShareRegistry] = None
+_current: Optional[WorkspaceFiles] = None
 
 
-def configure(workspace: str, base_url: str, state_dir: Optional[str] = None) -> ShareRegistry:
-    """Called by the A2A server at startup; the tools use what it set up."""
+def configure(workspace: str, base_url: str) -> WorkspaceFiles:
+    """Called by the A2A server at startup; links and tools use what it set up."""
     global _current
-    _current = ShareRegistry(workspace, base_url, state_dir)
+    _current = WorkspaceFiles(workspace, base_url)
+    logger.info(f"[files] serving {_current.workspace} at {_current.base_url}files/")
     return _current
 
 
-def current() -> Optional[ShareRegistry]:
+def current() -> Optional[WorkspaceFiles]:
     return _current
+
+
+def link_for(path: str) -> Optional[str]:
+    """The link for a path, or None when not serving or not in the workspace."""
+    files = current()
+    if files is None:
+        return None
+    try:
+        return files.url_for(path)
+    except ShareError:
+        return None

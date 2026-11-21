@@ -381,12 +381,21 @@ class ChannelRouter:
             "can reach (a command such as ssh runs from it like any other). "
             "@mentions are only for the agents listed above — a hostname or "
             "user@host is not an agent, and the board will not deliver to it."
-            # Other agents cannot open your workspace; say how to hand a file over.
-            " To give another agent a file from your workspace, call share_file "
-            "and put the link it returns in your reply — do not paste the file's "
-            "contents. Read a shared-file link (…/files/…?exp=…&sig=…) with "
-            "read_shared."
         )
+        # Other agents cannot open your workspace, but they can fetch from it
+        # by link. Say what this agent's links look like, so it can write one
+        # instead of pasting a file.
+        base = str(agent.get("url") or "").rstrip("/")
+        if base:
+            text += (
+                f" Every file in your workspace is at {base}/files/<path inside "
+                f"the workspace> — e.g. workspace/report.md is {base}/files/report.md. "
+                "To give another agent a file, put its link in your reply; do "
+                "not paste the file's contents."
+            )
+        text += (" Read another agent's file link (http://…/files/…) with "
+                 "read_shared; to keep, edit or pass on that file, save it with "
+                 "write_link instead of retyping it.")
         return text
 
     def _roster_block(self, channel_id: int, agent_name: str) -> str:

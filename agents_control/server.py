@@ -11,6 +11,7 @@ bind demands a token (``AGENTS_CONTROL_TOKEN``) or refuses to start.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -19,11 +20,11 @@ import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 from starlette.background import BackgroundTask
@@ -53,14 +54,47 @@ STATIC_DIR = Path(__file__).parent / "static"
 # The board itself is unauthenticated (it is a shell that asks for the token);
 # every /api path is not. Exact paths and prefixes are kept apart deliberately:
 # a prefix list containing "/" matches every request and opens the whole API.
-# A shared-file link as share_file mints it: /files/<id>?exp=<int>&sig=<hex>.
-SHARE_PATH_RE = re.compile(r"^/files/([A-Za-z0-9_-]{8,64})$")
+# An agent's file link: /files/<path inside its workspace> (core/shares.py).
+SHARE_PATH_RE = re.compile(r"^/files/(.+)$")
 
 
-def parse_qs_one(query: str, key: str) -> str:
-    from urllib.parse import parse_qs
-    values = parse_qs(query or "").get(key) or [""]
-    return values[0]
+# Bind addresses that are valid on any machine, so never checked against one.
+ANY_HOST = {"", "0.0.0.0", "::", "127.0.0.1", "::1", "localhost"}
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _nearest_address(addresses: List[str], wanted: str) -> str:
+    """
+    The machine address most like ``wanted``: same family and first octet
+    (a 100.x tailnet address for a 100.x one), else "".
+
+    Used to repair an agent bound to an address its machine does not have,
+    keeping it on the same kind of network it was meant to be on.
+    """
+    try:
+        want = ipaddress.ip_address(wanted)
+    except ValueError:
+        return ""
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if ip.version == want.version == 4 and str(ip).split(".")[0] == str(want).split(".")[0]:
+            return address
+    return ""
+
+
+def _servable(path: str) -> bool:
+    """No empty, parent or hidden segments — the owner refuses them anyway."""
+    return not any(part in ("", "..") or part.startswith(".") for part in path.split("/"))
 
 
 def _netloc(url: str) -> str:
@@ -263,6 +297,50 @@ def create_app(cp: "ControlPlane") -> Starlette:
     def in_thread(fn, *args, **kwargs):
         """SSH and SQLite calls are blocking; keep the event loop free."""
         return asyncio.to_thread(fn, *args, **kwargs)
+
+    async def machine_addresses(machine: Dict[str, Any], fresh: bool = False) -> List[str]:
+        """
+        The IP addresses a machine has: as recorded, or read again now.
+
+        A fresh read also updates the record, so the create form's picker
+        shows the same list the check used.
+        """
+        if not fresh:
+            recorded = [str(i.get("address") or "") for i in machine.get("interfaces") or []]
+            if recorded:
+                return recorded
+        probe = await in_thread(driver.probe, machine)
+        if not probe.get("ok"):
+            return []
+        await in_thread(
+            store.set_machine_status, int(machine["id"]),
+            "ready" if probe.get("uv") else "no-uv",
+            probe.get("error", ""), probe.get("os", ""), probe.get("interfaces"))
+        return [str(i.get("address") or "") for i in probe.get("interfaces") or []]
+
+    async def bind_problem(machine: Dict[str, Any], host: str) -> Optional[str]:
+        """
+        Why ``host`` cannot be bound on ``machine``, or None when it can.
+
+        A server can only listen on an address its own machine has. Bound to
+        another machine's, it starts, fails to bind and exits — supervisord
+        retries it into BACKOFF and the agent is simply never reachable.
+        Hostnames and wildcards are left to install.sh, which tries the bind
+        itself; the recorded list is re-read before refusing, since it may
+        predate an interface that has come up since.
+        """
+        host = (host or "").strip()
+        if host in ANY_HOST or not _is_ip(host):
+            return None
+        if host in await machine_addresses(machine):
+            return None
+        addresses = await machine_addresses(machine, fresh=True)
+        if not addresses or host in addresses:
+            return None           # unreachable or found: let install.sh decide
+        listed = ", ".join(a for a in addresses if _is_ip(a) and ":" not in a) or "none found"
+        return (f"{host} is not an address of '{machine['name']}' (its addresses: "
+                f"{listed}). An agent can only listen on its own machine's "
+                "addresses — pick one of those, or 0.0.0.0 for all of them.")
 
     def _qualify(name: str) -> str:
         """
@@ -471,6 +549,10 @@ def create_app(cp: "ControlPlane") -> Starlette:
                     "address or a hostname"
                 )
 
+        problem = await bind_problem(machine, str(payload.get("bind_host") or ""))
+        if problem:
+            raise ValueError(problem)
+
         if store.agent_by_name(int(machine["id"]), name) is not None:
             raise ValueError(
                 f"'{name}.{machine['name']}' already exists. Agent names are unique "
@@ -546,6 +628,25 @@ def create_app(cp: "ControlPlane") -> Starlette:
         except MachineError:
             network = {}
 
+        # Reinstall passes the current address back, so a wrong one would be
+        # kept forever. One the machine does not have can never work; repair
+        # it to the machine's nearest address (or all interfaces) instead.
+        bind_host = str(network.get("bind_host") or "") if network.get("ok") else ""
+        advertise_host = str(network.get("advertise_host") or "") if network.get("ok") else ""
+        address_fixed = ""
+        problem = await bind_problem(machine, bind_host)
+        if problem:
+            addresses = await machine_addresses(machine)
+            replacement = _nearest_address(addresses, bind_host)
+            address_fixed = (f"{bind_host} is not an address of '{machine['name']}'; "
+                             f"rebound to {replacement or 'all interfaces (0.0.0.0)'}")
+            logger.warning(f"reinstall of {agent['qualified']}: {address_fixed}")
+            if advertise_host == bind_host:
+                # It published the same wrong address; publish the new one,
+                # or let install.sh pick when binding everything.
+                advertise_host = replacement
+            bind_host = replacement or "0.0.0.0"
+
         refreshed = []
         if payload.get("refresh_board_env", True):
             for key, value in cp.agent_env(agent["name"], str(machine["name"])).items():
@@ -566,8 +667,8 @@ def create_app(cp: "ControlPlane") -> Starlette:
             description=str(parsed.get("description") or ""),
             tools=str(tools or ""),
             approval=bool(parsed.get("tools_approval_required", True)),
-            bind_host=str(network.get("bind_host") or "") if network.get("ok") else "",
-            advertise_host=str(network.get("advertise_host") or "") if network.get("ok") else "",
+            bind_host=bind_host,
+            advertise_host=advertise_host,
             sdk_source=str(payload.get("sdk_source") or settings["default_sdk_source"]),
             sdk_ref=str(payload.get("sdk_ref") or ""),
             seed_env=False,
@@ -580,7 +681,8 @@ def create_app(cp: "ControlPlane") -> Starlette:
         bus.publish({"type": "agents"})
         return JSONResponse({"agent": record, "result": result,
                              "refreshed_env": refreshed,
-                             "kept_address": bool(network.get("ok"))})
+                             "kept_address": bool(network.get("ok")) and not address_fixed,
+                             "address_fixed": address_fixed})
 
     @guard
     async def delete_agent(request: Request) -> Response:
@@ -675,27 +777,23 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Not an open proxy: the link must be a /files/ link whose address is a
         registered agent's, and the request goes to that agent's recorded
         address, never to whatever host the link names. The owner still checks
-        the link's signature and expiry itself.
+        the path stays inside its workspace.
         """
         link = str(request.query_params.get("url") or "")
         parsed = urlparse(link)
         match = SHARE_PATH_RE.match(parsed.path or "")
-        if parsed.scheme not in ("http", "https") or not match:
-            raise ValueError("not a shared-file link (expected …/files/<id>?exp=…&sig=…)")
+        if parsed.scheme not in ("http", "https") or not match or not _servable(
+                unquote(match.group(1))):
+            raise ValueError("not an agent file link (expected http://<agent>/files/<path>)")
         wanted = _netloc(link)
         owner = next((a for a in store.agents() if _netloc(str(a.get("url") or "")) == wanted), None)
         if owner is None:
             raise LookupError(f"no agent on this board serves {wanted}")
+        # Still percent-encoded as it was in the link, so it goes on unchanged.
         target = f"{str(owner['url']).rstrip('/')}/files/{match.group(1)}"
         client = httpx.AsyncClient(timeout=httpx.Timeout(30, read=120))
         try:
-            upstream = await client.send(
-                client.build_request("GET", target, params=dict(
-                    exp=request.query_params.get("exp") or parse_qs_one(parsed.query, "exp"),
-                    sig=request.query_params.get("sig") or parse_qs_one(parsed.query, "sig"),
-                )),
-                stream=True,
-            )
+            upstream = await client.send(client.build_request("GET", target), stream=True)
         except Exception as exc:  # noqa: BLE001 — reported to the reader
             await client.aclose()
             return JSONResponse(
@@ -860,6 +958,10 @@ def create_app(cp: "ControlPlane") -> Starlette:
             value = str(network.get(field) or "").strip()
             if value and not HOST_RE.match(value):
                 raise ValueError(f"'{value}' is not a usable address for {field}")
+        if network:
+            problem = await bind_problem(machine, str(network.get("bind_host") or ""))
+            if problem:
+                raise ValueError(problem)
 
         written = await in_thread(
             driver.write_agent_files, machine, prefix,

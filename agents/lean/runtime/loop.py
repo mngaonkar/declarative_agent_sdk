@@ -21,7 +21,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.agents.lean.runtime.chat_backend import ChatBackend
-from declarative_agent_sdk.agents.lean.runtime.llm import LLMError
+from declarative_agent_sdk.agents.lean.runtime.llm import LLMError, MalformedToolCall
 from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
 from declarative_agent_sdk.agents.lean.runtime.tools import AUTO_APPROVE_TOOLS, LeanToolRegistry
 
@@ -159,6 +159,25 @@ class LoopEvent:
     tool_args: Dict[str, Any] = field(default_factory=dict)
 
 
+MAX_MALFORMED_RECOVERIES = 2
+
+
+def _malformed_nudge(chars: Optional[int]) -> str:
+    where = f" after about {chars:,} characters" if chars else ""
+    return (
+        "[runtime] Your last tool call could not be read: its arguments were "
+        f"corrupted{where}, so nothing ran and nothing was written. Do the same "
+        "work again in smaller calls:\n"
+        "- to change a file that already exists, use edit_file, one change per "
+        "call, quoting only the passage you replace;\n"
+        "- to save a file another agent shared, use write_link with its link — "
+        "do not retype it;\n"
+        "- to write a new long file, write_file the first few KB, then "
+        "write_file with append=true for each further part of a few KB.\n"
+        "Keep every tool call under about 4,000 characters."
+    )
+
+
 @dataclass
 class _TurnState:
     consecutive_failures: int = 0
@@ -166,6 +185,7 @@ class _TurnState:
     tools_used_this_turn: bool = False
     asked_for_an_answer: bool = False
     tools_called: List[str] = field(default_factory=list)
+    malformed_recoveries: int = 0
 
 
 class LeanLoop:
@@ -513,6 +533,24 @@ class LeanLoop:
 
             try:
                 message = self.client.chat(messages, tools=self.tools.schemas())
+            except MalformedToolCall as exc:
+                # Nothing ran and nothing was added to the conversation, so the
+                # turn is recoverable: say what happened and ask for the same
+                # work in smaller calls. Unlike retry_malformed_tool_calls,
+                # which resends the same prompt and usually gets the same
+                # oversized call back, this changes what the model is asked.
+                if turn.malformed_recoveries >= MAX_MALFORMED_RECOVERIES or rounds_left <= 0:
+                    yield LoopEvent(kind="error", text=f"LLM error: {exc}")
+                    return
+                turn.malformed_recoveries += 1
+                yield LoopEvent(
+                    kind="status",
+                    text="The last tool call was too large and arrived corrupted; "
+                         "asking the model to redo it in smaller pieces "
+                         f"({turn.malformed_recoveries}/{MAX_MALFORMED_RECOVERIES}).",
+                )
+                self._inject_system(messages, history, _malformed_nudge(exc.chars))
+                continue
             except LLMError as exc:
                 yield LoopEvent(kind="error", text=f"LLM error: {exc}")
                 return

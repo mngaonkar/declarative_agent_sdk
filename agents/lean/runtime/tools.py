@@ -205,13 +205,68 @@ class LeanToolRegistry:
             "the skills tree. For a new skill write skills/<name>/SKILL.md. "
             "When saving a file for the user to see in Discord, write under "
             "attachments/ and include [[attach:attachments/filename.ext]] in "
-            "your final answer so the bot uploads it.",
+            "your final answer so the bot uploads it. Keep each call to a few "
+            "KB: write a long document in parts (the first with write_file, "
+            "the rest with append=true). To change an existing file use "
+            "edit_file; to save a file another agent shared use write_link — "
+            "never retype either.",
             {
                 "path": {"type": "string", "description": "File path."},
-                "content": {"type": "string", "description": "Full file contents."},
+                "content": {
+                    "type": "string",
+                    "description": "File contents, or the next part when append is true.",
+                },
+                "append": {
+                    "type": "boolean",
+                    "description": "Add content to the end of the file instead of "
+                                   "replacing it (default false).",
+                },
             },
             ["path", "content"],
             self._write_file,
+        )
+        self.add(
+            "edit_file",
+            "Change part of an existing text file: replace old_text with "
+            "new_text. Use this to revise a draft instead of rewriting the "
+            "whole file — one call per change, each quoting just enough of the "
+            "original to be unique. read_file first to quote it exactly.",
+            {
+                "path": {"type": "string", "description": "File path."},
+                "old_text": {
+                    "type": "string",
+                    "description": "Exact text to replace, as it appears in the file.",
+                },
+                "new_text": {"type": "string", "description": "Replacement text."},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence (default false: "
+                                   "old_text must occur exactly once).",
+                },
+            },
+            ["path", "old_text", "new_text"],
+            self._edit_file,
+        )
+        self.add(
+            "write_link",
+            "Save a file from another agent's link (http://<agent>/files/<path>) "
+            "straight to a file under workspace/. "
+            "Use this instead of read_shared + write_file whenever you want to "
+            "keep, edit or pass on a shared file: it is copied directly, so you "
+            "never retype it. Returns a short receipt, not the content.",
+            {
+                "url": {"type": "string", "description": "The link exactly as given."},
+                "path": {
+                    "type": "string",
+                    "description": "Where to save it, e.g. workspace/review.md.",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "Replace an existing file (default false).",
+                },
+            },
+            ["url", "path"],
+            self._write_link,
         )
         self.add(
             "run_script",
@@ -279,22 +334,37 @@ class LeanToolRegistry:
             text += "\n...[truncated]"
         return text
 
-    def _write_file(self, a: Dict[str, Any]) -> str:
-        path = a.get("path", "")
-        content = a.get("content", "")
+    def _writable(self, path: str) -> "tuple[Optional[str], str]":
+        """(error, absolute path) for a path a tool wants to write."""
         if not path:
-            return "Error: path is required"
+            return "Error: path is required", ""
         abs_path = str(Path(path).expanduser().resolve())
         if not self._is_mutable(abs_path):
             return (
                 f"Error: path '{path}' is not writable. "
                 f"Write under workspace ({self.workspace}) or the skills tree."
-            )
+            ), abs_path
+        return None, abs_path
 
-        # Guardrails for skill manifests (ESP lesson)
+    def _write_file(self, a: Dict[str, Any]) -> str:
+        path = a.get("path", "")
+        content = a.get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        append = _truthy(a.get("append"))
+        error, abs_path = self._writable(path)
+        if error:
+            return error
+
+        # Guardrails for skill manifests (ESP lesson). An append is checked as
+        # the file it will produce, not as the fragment being added.
         if abs_path.endswith("SKILL.md") or abs_path.endswith("/SKILL.md"):
             dir_name = Path(abs_path).parent.name
-            problem = _validate_manifest(content, dir_name)
+            whole = content
+            if append and os.path.isfile(abs_path):
+                with open(abs_path, encoding="utf-8", errors="replace") as f:
+                    whole = f.read() + content
+            problem = _validate_manifest(whole, dir_name)
             if problem:
                 return f"Error: invalid SKILL.md — {problem}"
 
@@ -309,8 +379,8 @@ class LeanToolRegistry:
 
         try:
             Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(abs_path, "w", encoding="utf-8") as f:
-                f.write(content if isinstance(content, str) else str(content))
+            with open(abs_path, "a" if append else "w", encoding="utf-8") as f:
+                f.write(content)
         except OSError as exc:
             return f"Error writing {path}: {exc}"
 
@@ -318,7 +388,85 @@ class LeanToolRegistry:
         if abs_path.endswith("SKILL.md"):
             self.skills.discover()
             return f"Wrote {abs_path} and reindexed skills ({len(self.skills.skills)} loaded)."
-        return f"Wrote {abs_path} ({len(content)} chars)."
+        if append:
+            return (f"Appended {len(content)} chars to {abs_path} "
+                    f"(now {os.path.getsize(abs_path):,} bytes).{_link_note(abs_path)}")
+        return f"Wrote {abs_path} ({len(content)} chars).{_link_note(abs_path)}"
+
+    def _edit_file(self, a: Dict[str, Any]) -> str:
+        path = a.get("path", "")
+        old = a.get("old_text", "")
+        new = a.get("new_text", "")
+        old = old if isinstance(old, str) else str(old)
+        new = new if isinstance(new, str) else str(new)
+        replace_all = _truthy(a.get("replace_all"))
+        error, abs_path = self._writable(path)
+        if error:
+            return error
+        if not old:
+            return "Error: old_text is required (to add to the end, use write_file with append=true)"
+        try:
+            with open(abs_path, encoding="utf-8") as f:
+                text = f.read()
+        except FileNotFoundError:
+            return f"Error: {path} does not exist — create it with write_file first"
+        except (OSError, UnicodeDecodeError) as exc:
+            return f"Error reading {path}: {exc}"
+
+        count = text.count(old)
+        if count == 0:
+            return (f"Error: old_text was not found in {path}. It must match the "
+                    "file exactly, including spaces and line breaks — read_file "
+                    "it and copy the passage.")
+        if count > 1 and not replace_all:
+            return (f"Error: old_text occurs {count} times in {path}. Quote more "
+                    "of the surrounding text so it is unique, or pass "
+                    "replace_all=true to change every one.")
+        updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+
+        if abs_path.endswith("SKILL.md"):
+            problem = _validate_manifest(updated, Path(abs_path).parent.name)
+            if problem:
+                return f"Error: the edit would leave an invalid SKILL.md — {problem}"
+        try:
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(updated)
+        except OSError as exc:
+            return f"Error writing {path}: {exc}"
+        if abs_path.endswith("SKILL.md"):
+            self.skills.discover()
+        done = count if replace_all else 1
+        return (f"Edited {abs_path}: replaced {done} occurrence{'s' if done != 1 else ''} "
+                f"({len(text):,} → {len(updated):,} chars).{_link_note(abs_path)}")
+
+    def _write_link(self, a: Dict[str, Any]) -> str:
+        from declarative_agent_sdk.tools.builtin import _links
+
+        path = a.get("path", "")
+        error, abs_path = self._writable(path)
+        if error:
+            return error
+        if os.path.isdir(abs_path):
+            return f"Error: {path} is a directory; give a file name"
+        if os.path.exists(abs_path) and not _truthy(a.get("overwrite")):
+            return f"Error: {path} already exists; pass overwrite=true to replace it"
+        if abs_path.endswith("SKILL.md"):
+            return "Error: write_link does not write SKILL.md; use write_file so it is validated"
+        try:
+            data, kind = _links.download(str(a.get("url") or ""))
+        except _links.LinkError as exc:
+            return f"Error: {exc}"
+        try:
+            Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(abs_path, "wb") as f:
+                f.write(data)
+        except OSError as exc:
+            return f"Error writing {path}: {exc}"
+        return _links.receipt(
+            abs_path, data, kind,
+            hint="The file is on disk: read_file it only if you need its content, "
+                 "and change it with edit_file rather than rewriting it."
+                 + _link_note(abs_path))
 
     def _run_script(self, a: Dict[str, Any]) -> str:
         path = a.get("path", "")
@@ -357,6 +505,21 @@ class LeanToolRegistry:
         if glb.get("result") is not None:
             parts.append(f"result={glb['result']!r}")
         return "\n".join(parts) if parts else "(script finished with no output)"
+
+
+def _link_note(abs_path: str) -> str:
+    """The file's link, when this agent serves its workspace and it is in it."""
+    from declarative_agent_sdk.core import shares
+
+    link = shares.link_for(abs_path)
+    return f" Link for other agents: {link}" if link else ""
+
+
+def _truthy(value: Any) -> bool:
+    """A boolean argument as models send it: true, "true", 1, "yes"…"""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y")
+    return bool(value)
 
 
 def _coerce_arg(value: Any, annotation: Any) -> Any:
