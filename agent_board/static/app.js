@@ -2020,7 +2020,16 @@ function browseRegistry() {
   query.placeholder = 'search — e.g. github, postgres, filesystem, browser';
   const go = el('button', 'btn primary', 'Search');
   go.type = 'submit';
-  bar.append(query, go);
+  // MCP-CAT-14: servers their own vendor published, unless asked otherwise.
+  const officialBox = el('input');
+  officialBox.type = 'checkbox';
+  officialBox.checked = true;
+  const officialLabel = el('label', 'check', ' Official publishers only');
+  officialLabel.prepend(officialBox);
+  officialLabel.title = 'Only servers published under the vendor\'s own namespace ' +
+    '(for example io.github.github or com.stripe). Most services also have many ' +
+    'third-party servers; untick to see those too.';
+  bar.append(query, go, officialLabel);
   const results = el('div', 'registry-results');
   const more = el('button', 'btn small hidden', 'More results');
   wrap.append(bar, el('p', 'note', 'From registry.modelcontextprotocol.io — servers published ' +
@@ -2035,10 +2044,16 @@ function browseRegistry() {
     const status = el('p', 'note', 'Searching…');
     results.append(status);
     try {
-      const params = new URLSearchParams({ search: query.value.trim(), cursor });
+      const params = new URLSearchParams({ search: query.value.trim(), cursor,
+                                           official: officialBox.checked ? '1' : '' });
       const data = await api(`/api/mcp/registry?${params}`);
       status.remove();
-      if (!append && !data.servers.length) results.append(el('p', 'note', 'Nothing found.'));
+      if (!append && !data.servers.length) {
+        results.append(el('p', 'note', officialBox.checked
+          ? 'No official server matches. Untick "Official publishers only" to search ' +
+            'third-party servers too. The presets in Add server cover fetch, time, git and files.'
+          : 'Nothing found.'));
+      }
       data.servers.forEach((entry) => results.append(registryResult(entry)));
       cursor = data.next || '';
       more.classList.toggle('hidden', !cursor);
@@ -2048,6 +2063,7 @@ function browseRegistry() {
     } finally { go.disabled = false; more.disabled = false; }
   };
   bar.onsubmit = (event) => { event.preventDefault(); search(false); };
+  officialBox.onchange = () => search(false);
   more.onclick = () => search(true);
   openModal('MCP Registry', wrap);
   search(false);
@@ -2058,6 +2074,9 @@ function registryResult(entry) {
   const head = el('div', 'registry-head');
   head.append(el('strong', '', entry.title || entry.slug),
               el('span', 'note mono', ` ${entry.name} ${entry.version ? 'v' + entry.version : ''}`));
+  head.append(entry.publisher
+    ? el('span', 'tag ok', `✓ ${entry.publisher}`)
+    : el('span', 'tag', 'community'));
   box.append(head);
   if (entry.description) box.append(el('div', '', entry.description));
   const links = el('div', 'note');

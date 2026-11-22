@@ -92,7 +92,10 @@ templates.
   (MCP-CAT-13), with More results for the next page. Each result shows its
   name, description and repository link, and a button per usable option;
   choosing one opens Add server filled in, with a note naming the source,
-  the variables and that the entry is not reviewed.
+  the variables and that the entry is not reviewed. **Official publishers
+  only** is ticked by default (MCP-CAT-14); each result is badged with its
+  vendor (✓ GitHub) or as community; with nothing typed it lists every
+  official server.
 - AC-UI-MCP-2: An agent's Settings has an MCP tab (MCP-CAT-12). Its changes
   apply at once and say the agent restarts; warnings from attaching
   (MCP-CAT-8) are shown.

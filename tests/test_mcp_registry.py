@@ -127,3 +127,69 @@ class TestRoute:
     def test_needs_the_token(self, tmp_path, monkeypatch):
         client, seen = self._board(tmp_path, monkeypatch, lambda r: httpx.Response(200, json={}))
         assert client.get("/api/mcp/registry").status_code == 401 and seen == []
+
+
+class TestOfficial:
+    """MCP-CAT-14: only servers published under their vendor's own namespace."""
+
+    def test_publisher_needs_the_exact_namespace(self):
+        assert mcp_catalog.publisher("io.github.github/github-mcp-server") == "GitHub"
+        assert mcp_catalog.publisher("com.stripe/mcp") == "Stripe"
+        assert mcp_catalog.publisher("io.github.GitHub30/zenn-mcp-server") == ""
+        assert mcp_catalog.publisher("com.thenextgennexus/github-mcp-server") == ""
+        assert mcp_catalog.publisher("io.github.ClickHouse/mcp-clickhouse") == "ClickHouse"
+
+    def test_an_entry_carries_its_publisher(self):
+        assert registry_entry(item(name="com.notion/mcp"))["publisher"] == "Notion"
+        assert registry_entry(NPM)["publisher"] == ""
+
+    def _board(self, tmp_path, monkeypatch, fail=()):
+        """A registry answering each namespace search with its servers, plus look-alikes."""
+        asked = []
+
+        def answer(request):
+            search = request.url.params.get("search", "")
+            asked.append(search)
+            if search in fail:
+                return httpx.Response(503)
+            servers = [item(name=f"{search}/server", description="a server"),
+                       item(name=f"{search}-copycat/server")]
+            if search == "io.github.github":
+                servers.append(item(name="io.github.GitHub30/note-mcp-server"))
+            return httpx.Response(200, json={"servers": servers, "metadata": {}})
+
+        original = server_module.httpx.AsyncClient
+        monkeypatch.setattr(server_module.httpx, "AsyncClient",
+                            lambda **kw: original(transport=httpx.MockTransport(answer)))
+        plane = ControlPlane(db_path=str(tmp_path / "b.db"), token="t0ken")
+        return TestClient(plane.app), asked
+
+    def test_an_empty_search_lists_every_vendors_servers_only(self, tmp_path, monkeypatch):
+        client, asked = self._board(tmp_path, monkeypatch)
+        body = client.get("/api/mcp/registry", params={"official": "1"}, headers=AUTH).json()
+        names = {s["name"] for s in body["servers"]}
+        assert "io.github.github/server" in names and "com.stripe/server" in names
+        assert not any("copycat" in n or "GitHub30" in n for n in names)
+        assert set(asked) == set(mcp_catalog.OFFICIAL_PUBLISHERS)
+
+    def test_it_is_cached(self, tmp_path, monkeypatch):
+        client, asked = self._board(tmp_path, monkeypatch)
+        client.get("/api/mcp/registry", params={"official": "1"}, headers=AUTH)
+        first = len(asked)
+        client.get("/api/mcp/registry", params={"official": "1", "search": "stripe"},
+                   headers=AUTH)
+        assert len(asked) == first
+
+    def test_search_words_match_outside_the_namespace(self, tmp_path, monkeypatch):
+        client, _ = self._board(tmp_path, monkeypatch)
+        body = client.get("/api/mcp/registry", params={"official": "1", "search": "github"},
+                          headers=AUTH).json()
+        assert [s["publisher"] for s in body["servers"]][0] == "GitHub"
+        # io.github.redis/server is not a match just for its namespace.
+        assert "io.github.redis/server" not in {s["name"] for s in body["servers"]}
+
+    def test_one_vendor_failing_hides_only_that_vendor(self, tmp_path, monkeypatch):
+        client, _ = self._board(tmp_path, monkeypatch, fail=("com.stripe",))
+        body = client.get("/api/mcp/registry", params={"official": "1"}, headers=AUTH).json()
+        publishers = {s["publisher"] for s in body["servers"]}
+        assert "Stripe" not in publishers and "GitHub" in publishers

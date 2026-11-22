@@ -319,6 +319,19 @@ definitions, not running servers.
   shown with why it cannot be used. Choosing an option only fills in the Add
   server form, which says where it came from and that registry entries are
   not reviewed; nothing is saved until the user saves it.
+- MCP-CAT-14: **Official publishers only** (on by default) keeps to servers
+  published under their vendor's own namespace, from `OFFICIAL_PUBLISHERS`
+  (`io.github.github` → GitHub, `com.stripe` → Stripe, …), matched exactly.
+  The registry proves who owns a namespace (a GitHub login, or a domain), so
+  that is what "official" means; every other result is marked community.
+  The official set is gathered by searching each namespace, in parallel,
+  cached for 10 minutes, and searched on the board — the registry ranks a
+  vendor's own server below dozens of third-party ones. Search words are
+  matched against a server's name after the namespace, its title,
+  description and vendor; the vendor named in the search comes first. A
+  vendor whose search fails is left out; the rest are shown. Unticked, the
+  registry is searched as in MCP-CAT-13. The reference servers (fetch, time,
+  git, filesystem) are not in the registry; the presets cover them.
 
 ## `agent_board/mcp_catalog.py`
 
@@ -342,9 +355,11 @@ entry, presets, the `${NAME}`s an entry uses, and writing an agent's
 
 - MCP-CATF-5: `registry_entry(item)` turns one registry result into the
   options of MCP-CAT-13; every option it offers passes `check`, and links are
-  kept only when they are http(s).
+  kept only when they are http(s). Its `publisher` is the vendor for an
+  official namespace, else empty (`publisher(name)`, MCP-CAT-14).
 
-**Interface:** `PRESETS`, `BOARD_KEY`, `REGISTRY_URL`, `check`, `clean_spec`,
+**Interface:** `PRESETS`, `BOARD_KEY`, `REGISTRY_URL`, `OFFICIAL_PUBLISHERS`,
+`publisher`, `check`, `clean_spec`,
 `referenced_vars`, `runner_for`, `render`, `board_servers`, `apply`, `current`,
 `hand_written`, `registry_entry`.
 
@@ -387,7 +402,7 @@ entry, presets, the `${NAME}`s an entry uses, and writing an agent's
    *Built.*
 2. **ADK and deepagent adapters** (MCP-RT-2, MCP-RT-3). *Built.*
 3. **Board:** MCP-BOARD-1..4. *Built.*
-4. **MCP catalog** on the board (MCP-CAT-1..13), with the registry browser.
+4. **MCP catalog** on the board (MCP-CAT-1..14), with the registry browser.
    *Built.*
 5. **Later:** MCP resources (read like `read_shared`), MCP prompts (offered
    like skills), OAuth for remote servers, tool search for servers with very

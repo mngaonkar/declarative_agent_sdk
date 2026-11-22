@@ -1350,31 +1350,76 @@ def create_app(cp: "ControlPlane") -> Starlette:
             warnings.append(f"could not check the agent's files: {exc}")
         return warnings
 
+    # Every official server, gathered once per 10 minutes (MCP-CAT-14).
+    official_cache: Dict[str, Any] = {"at": 0.0, "servers": []}
+
+    async def _registry_page(client: Any, params: Dict[str, str]) -> Dict[str, Any]:
+        reply = await client.get(mcp_catalog.REGISTRY_URL, params=params)
+        reply.raise_for_status()
+        return reply.json()
+
+    async def _official_servers(client: Any) -> List[Dict[str, Any]]:
+        if time.time() - official_cache["at"] < 600 and official_cache["servers"]:
+            return official_cache["servers"]
+        namespaces = sorted(mcp_catalog.OFFICIAL_PUBLISHERS)
+        pages = await asyncio.gather(*(
+            _registry_page(client, {"limit": "100", "version": "latest", "search": ns})
+            for ns in namespaces), return_exceptions=True)
+        found: Dict[str, Dict[str, Any]] = {}
+        for page in pages:
+            if isinstance(page, BaseException):
+                continue                    # one vendor's search failing hides only it
+            for item in page.get("servers") or []:
+                entry = mcp_catalog.registry_entry(item)
+                if entry["publisher"] and entry["status"] != "deleted":
+                    found[entry["name"]] = entry
+        servers = sorted(found.values(), key=lambda e: (e["publisher"].lower(), e["name"]))
+        if servers:
+            official_cache.update(at=time.time(), servers=servers)
+        return servers
+
     @guard
     async def search_mcp_registry(request: Request) -> Response:
         """
         Search the official MCP Registry and offer each result as ready
-        catalog specs (MCP-CAT-13). Only the search words and the page cursor
-        are sent; nothing is added to the catalog from here.
+        catalog specs (MCP-CAT-13). ``official=1`` searches only servers their
+        vendor published (MCP-CAT-14), on the board: the registry ranks a
+        vendor's own server below dozens of third-party ones, so asking it for
+        "github" never reached GitHub's.
+        Only the search words and the page cursor are sent; nothing is added
+        to the catalog from here.
         """
-        params = {"limit": "30", "version": "latest"}
         search = str(request.query_params.get("search") or "").strip()[:100]
         cursor = str(request.query_params.get("cursor") or "").strip()[:300]
-        if search:
-            params["search"] = search
-        if cursor:
-            params["cursor"] = cursor
+        official = str(request.query_params.get("official") or "") in ("1", "true")
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(20)) as client:
-                reply = await client.get(mcp_catalog.REGISTRY_URL, params=params)
-            reply.raise_for_status()
-            data = reply.json()
+                if official:
+                    words = search.lower().split()
+
+                    def text(s: Dict[str, Any]) -> str:
+                        # Not the namespace: every io.github.* name contains "github".
+                        return " ".join((s["name"].split("/", 1)[-1], s["title"],
+                                         s["description"], s["publisher"])).lower()
+
+                    matches = [s for s in await _official_servers(client)
+                               if all(w in text(s) for w in words)]
+                    # The vendor named in the search comes first.
+                    matches.sort(key=lambda s: not any(
+                        w in s["publisher"].lower() for w in words))
+                    return JSONResponse({"servers": matches, "next": ""})
+                params = {"limit": "30", "version": "latest"}
+                if search:
+                    params["search"] = search
+                if cursor:
+                    params["cursor"] = cursor
+                data = await _registry_page(client, params)
         except Exception as exc:  # noqa: BLE001 — reported to the page
             return JSONResponse({"error": f"could not read the MCP Registry: "
                                           f"{type(exc).__name__}: {exc}"}, status_code=502)
         servers = [mcp_catalog.registry_entry(item) for item in data.get("servers") or []
                    if isinstance(item, dict)]
-        servers = [s for s in servers if s["status"] not in ("deleted",)]
+        servers = [s for s in servers if s["status"] != "deleted"]
         return JSONResponse({"servers": servers,
                              "next": (data.get("metadata") or {}).get("nextCursor") or ""})
 

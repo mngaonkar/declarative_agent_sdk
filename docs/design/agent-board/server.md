@@ -105,7 +105,7 @@ stream and the static UI.
 | POST | `/api/models` | list a provider's models for the create form |
 | GET | `/api/files/relay` | AC-SERVER-8 |
 | GET / POST | `/api/mcp` | the MCP catalog and presets; add an entry (MCP-CAT-1) |
-| GET | `/api/mcp/registry?search=&cursor=` | search the MCP Registry (MCP-CAT-13); 502 when it cannot be read |
+| GET | `/api/mcp/registry?search=&cursor=&official=` | search the MCP Registry (MCP-CAT-13), or only official publishers (MCP-CAT-14); 502 when it cannot be read |
 | PUT / DELETE | `/api/mcp/{id}` | edit (optionally updating attached agents) or delete (MCP-CAT-9) |
 | POST | `/api/mcp/{id}/secret` | write one `${NAME}` into attached agents' `.env` (MCP-CAT-3) |
 | GET / POST | `/api/agents/{id}/mcp` | an agent's attached entries; attach or change overrides (MCP-CAT-5) |

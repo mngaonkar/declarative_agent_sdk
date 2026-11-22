@@ -514,3 +514,6 @@ td.agent-name.tinted { font-weight: 600; }
   display: flex; flex-direction: column; gap: 6px; }
 .registry-item .btns { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .registry-note ul { margin: 4px 0 0 18px; padding: 0; }
+
+.registry-bar label.check { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 12px; }
+.registry-head .tag { margin-left: auto; }

@@ -610,8 +610,10 @@ it has.
    filesystem, GitHub, browser), fill in the command or URL — or **Browse
    registry** to search the [MCP Registry](https://registry.modelcontextprotocol.io)
    for servers published from GitHub, npm, PyPI and Docker, and pick one to
-   fill in the form. Registry entries are not reviewed: read the repository
-   first. Write secrets as
+   fill in the form. **Official publishers only** (on by default) shows just
+   servers their vendor published — GitHub's, Stripe's, Notion's and so on,
+   each marked ✓; untick it to see third-party servers too, which are not
+   reviewed: read the repository first. Write secrets as
    `${NAME}` — for example `Authorization: Bearer ${GITHUB_TOKEN}` — never the
    value.
 2. **Agent → ⚙ Settings → MCP → Attach.** Optionally narrow its tools or change

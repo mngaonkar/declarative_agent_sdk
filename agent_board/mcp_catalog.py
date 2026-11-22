@@ -146,6 +146,63 @@ def hand_written(yaml_text: str) -> List[str]:
 
 REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers"
 
+# MCP-CAT-14: namespaces that belong to the service's own company. The
+# registry proves who owns a namespace — io.github.<org> by GitHub login,
+# com.example by domain — so a server under one of these was published by
+# that vendor. Anyone can publish under their own name, and most services
+# have dozens of third-party servers; this list is what "official" means.
+# Kept to namespaces checked against the registry; add more the same way.
+OFFICIAL_PUBLISHERS: Dict[str, str] = {
+    "io.github.github": "GitHub",
+    "com.stripe": "Stripe",
+    "com.notion": "Notion",
+    "com.cloudflare.mcp": "Cloudflare",
+    "com.atlassian": "Atlassian",
+    "io.github.getsentry": "Sentry",
+    "com.figma.mcp": "Figma",
+    "app.linear": "Linear",
+    "com.supabase": "Supabase",
+    "com.microsoft": "Microsoft",
+    "io.github.microsoft": "Microsoft",
+    "co.huggingface": "Hugging Face",
+    "io.github.mongodb-js": "MongoDB",
+    "io.github.redis": "Redis",
+    "com.gitlab": "GitLab",
+    "com.paypal.mcp": "PayPal",
+    "io.github.paypal": "PayPal",
+    "com.zapier": "Zapier",
+    "io.github.browserbase": "Browserbase",
+    "com.neon": "Neon",
+    "io.github.grafana": "Grafana",
+    "io.github.pagerduty": "PagerDuty",
+    "com.postman": "Postman",
+    "com.airtable": "Airtable",
+    "com.canva.mcp": "Canva",
+    "io.github.brave": "Brave",
+    "ai.exa": "Exa",
+    "io.github.tavily-ai": "Tavily",
+    "io.github.firecrawl": "Firecrawl",
+    "com.apify": "Apify",
+    "ai.perplexity": "Perplexity",
+    "io.github.perplexityai": "Perplexity",
+    "io.github.upstash": "Upstash",
+    "com.auth0": "Auth0",
+    "com.webflow": "Webflow",
+    "com.wix": "Wix",
+    "com.digitalocean": "DigitalOcean",
+    "io.github.snowflake-labs": "Snowflake",
+    "io.github.clickhouse": "ClickHouse",
+    "io.prisma": "Prisma",
+    "io.github.planetscale": "PlanetScale",
+    "io.github.mapbox": "Mapbox",
+}
+
+
+def publisher(registry_name: str) -> str:
+    """The vendor that published a registry server, or "" when it is third-party."""
+    namespace = str(registry_name or "").split("/", 1)[0].lower()
+    return OFFICIAL_PUBLISHERS.get(namespace, "")
+
 
 def _slug(registry_name: str) -> str:
     """A catalog name from a registry name: io.github.owner/some-server → some-server."""
@@ -291,5 +348,6 @@ def registry_entry(item: Dict[str, Any]) -> Dict[str, Any]:
         "repository": repository if re.match(r"^https?://", str(repository)) else "",
         "website": website if re.match(r"^https?://", str(website)) else "",
         "status": str(meta.get("status") or ""),
+        "publisher": publisher(server.get("name")),
         "options": options,
     }
