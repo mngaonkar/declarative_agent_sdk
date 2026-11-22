@@ -1,4 +1,4 @@
-"""Unit tests for agents-control: store, machine driver, router, API, peer tool."""
+"""Unit tests for agent-board: store, machine driver, router, API, peer tool."""
 
 import asyncio
 import json
@@ -12,21 +12,21 @@ import pytest
 from a2a.types import TaskState
 from starlette.testclient import TestClient
 
-from declarative_agent_sdk.agents_control.machines import (
+from declarative_agent_sdk.agent_board.machines import (
     MachineDriver,
     MachineError,
     _env_file_lines,
     _parse_json,
 )
-from declarative_agent_sdk.agents_control.router import (
+from declarative_agent_sdk.agent_board.router import (
     ChannelRouter,
     EventBus,
     mentions,
     resolve_member,
 )
-from declarative_agent_sdk.agents_control import metrics
-from declarative_agent_sdk.agents_control.server import ControlPlane
-from declarative_agent_sdk.agents_control.store import Store
+from declarative_agent_sdk.agent_board import metrics
+from declarative_agent_sdk.agent_board.server import ControlPlane
+from declarative_agent_sdk.agent_board.store import Store
 
 
 @pytest.fixture
@@ -317,8 +317,8 @@ class TestEnvFile:
         assert _env_file_lines("vllm", "ignored", None) == []
 
     def test_control_handshake_is_included(self):
-        lines = _env_file_lines("openai", "", {"AGENTS_CONTROL_URL": "http://c", "EMPTY": ""})
-        assert lines == ["AGENTS_CONTROL_URL=http://c"]
+        lines = _env_file_lines("openai", "", {"AGENT_BOARD_URL": "http://c", "EMPTY": ""})
+        assert lines == ["AGENT_BOARD_URL=http://c"]
 
 
 class TestParseJson:
@@ -535,25 +535,25 @@ class TestSendToAgentTool:
             assert helper not in available
 
     def test_rejects_an_empty_target(self, monkeypatch):
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         assert "no agent named" in self._tool()("", "hi")
 
     def test_rejects_an_empty_message(self, monkeypatch):
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         assert "message is empty" in self._tool()("bob", "  ")
 
     def test_explains_a_missing_board(self, monkeypatch):
-        monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
-        assert "AGENTS_CONTROL_URL" in self._tool()("bob", "hello")
+        monkeypatch.delenv("AGENT_BOARD_URL", raising=False)
+        assert "AGENT_BOARD_URL" in self._tool()("bob", "hello")
 
     def test_unreachable_board_is_reported(self, monkeypatch):
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:1")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:1")
         monkeypatch.setenv("AGENT_NAME", "alice")
         assert "could not post to the board" in self._tool()("bob", "hello")
 
     def test_posts_the_mention_and_reports_delivery(self, monkeypatch):
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         monkeypatch.setenv("AGENT_QUALIFIED_NAME", "alice.here")
         sent = {}
 
@@ -573,7 +573,7 @@ class TestSendToAgentTool:
 
     def test_reports_an_unmatched_mention_with_the_roster(self, monkeypatch):
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         monkeypatch.setattr(mod, "post_to_board", lambda *a, **k: {
             "channel": "dev", "relayed": [], "members": ["bob.here", "carol.box"],
         })
@@ -584,7 +584,7 @@ class TestSendToAgentTool:
     def test_halted_channel_is_reported_as_refused(self, monkeypatch):
         """The board refuses to relay; the tool must not read that as 'no such member'."""
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         monkeypatch.setattr(mod, "post_to_board", lambda *a, **k: {
             "channel": "dev", "relayed": [], "halted": True, "members": ["bob.here"],
         })
@@ -594,7 +594,7 @@ class TestSendToAgentTool:
 
     def test_board_errors_surface_as_text(self, monkeypatch):
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
 
         def boom(*args, **kwargs):
             raise mod.BoardError("'alice' is in several channels (dev, ops) — name one")
@@ -620,12 +620,12 @@ class TestListAgentsTool:
         assert "list_agents" not in ToolRegistry.CORE_TOOL_NAMES
 
     def test_explains_a_missing_board(self, monkeypatch):
-        monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
+        monkeypatch.delenv("AGENT_BOARD_URL", raising=False)
         assert "not on a board" in self._module().list_agents()
 
     def test_lists_addressable_members_with_detail(self, monkeypatch):
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         monkeypatch.setattr(mod, "roster", lambda link, channel="", scope="channel": [
             {"qualified": "bob.here", "description": "reads logs",
              "model": "gpt-4o-mini", "channel": "dev", "ready": True},
@@ -635,7 +635,7 @@ class TestListAgentsTool:
 
     def test_marks_an_agent_that_is_not_running(self, monkeypatch):
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         monkeypatch.setattr(mod, "roster", lambda link, channel="", scope="channel": [
             {"qualified": "bob.here", "ready": False, "channel": "dev"},
         ])
@@ -643,7 +643,7 @@ class TestListAgentsTool:
 
     def test_says_so_when_nobody_shares_a_channel(self, monkeypatch):
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         monkeypatch.setattr(mod, "roster", lambda link, channel="", scope="channel": [])
         out = mod.list_agents()
         assert "nobody to address" in out
@@ -651,7 +651,7 @@ class TestListAgentsTool:
 
     def test_include_all_separates_the_unreachable(self, monkeypatch):
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
         monkeypatch.setenv("AGENT_QUALIFIED_NAME", "alice.here")
 
         def fake_roster(link, channel="", scope="channel"):
@@ -670,7 +670,7 @@ class TestListAgentsTool:
 
     def test_board_error_is_reported(self, monkeypatch):
         mod = self._module()
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://c")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://c")
 
         def boom(*args, **kwargs):
             raise mod.BoardError("could not read /api/peer/roster: 401")
@@ -710,7 +710,7 @@ tools_approval_required: true
 
 class TestConfigParsing:
     def test_properties_are_flattened_for_the_form(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         props = config.properties(config.parse(SAMPLE_YAML))
         assert props["model"] == "qwen2.5-coder:latest"
@@ -720,19 +720,19 @@ class TestConfigParsing:
         assert props["temperature"] == ""        # absent keys come back blank
 
     def test_bad_yaml_is_rejected(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         with pytest.raises(config.ConfigError, match="not valid YAML"):
             config.parse("name: [unclosed")
 
     def test_a_scalar_document_is_not_a_config(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         with pytest.raises(config.ConfigError, match="must be a mapping"):
             config.parse("just a string")
 
     def test_leading_comments_are_identified(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         header = config.leading_comments(SAMPLE_YAML)
         assert header.startswith("# Generated by install.sh")
@@ -741,7 +741,7 @@ class TestConfigParsing:
 
 class TestConfigMerge:
     def test_updates_a_scalar_and_keeps_the_header(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         merged = config.merge(SAMPLE_YAML, {"model": "gpt-4o-mini"})
         data = config.parse(merged)
@@ -750,50 +750,50 @@ class TestConfigMerge:
         assert merged.startswith("# Generated by install.sh")
 
     def test_nested_endpoint_url(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         merged = config.merge(SAMPLE_YAML, {"endpoint.url": "http://new:8000/v1"})
         assert config.parse(merged)["endpoint"]["url"] == "http://new:8000/v1"
 
     def test_empty_value_removes_the_key(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         merged = config.merge(SAMPLE_YAML, {"endpoint.url": ""})
         assert "endpoint" not in config.parse(merged)
 
     def test_tools_accept_a_comma_string(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         merged = config.merge(SAMPLE_YAML, {"tools": "web_request, send_to_agent"})
         assert config.parse(merged)["tools"] == ["web_request", "send_to_agent"]
 
     def test_bool_round_trip(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         merged = config.merge(SAMPLE_YAML, {"tools_approval_required": False})
         assert config.parse(merged)["tools_approval_required"] is False
 
     def test_numbers_are_typed_not_stringified(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         data = config.parse(config.merge(
             SAMPLE_YAML, {"temperature": "0.2", "max_tokens": "2048"}))
         assert data["temperature"] == 0.2 and isinstance(data["max_tokens"], int)
 
     def test_a_non_number_is_refused(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         with pytest.raises(config.ConfigError, match="must be a number"):
             config.merge(SAMPLE_YAML, {"temperature": "warm"})
 
     def test_unknown_form_keys_are_ignored(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         merged = config.merge(SAMPLE_YAML, {"evil": "value"})
         assert "evil" not in config.parse(merged)
 
     def test_a_bad_choice_is_refused(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         with pytest.raises(config.ConfigError, match="must be one of"):
             config.merge(SAMPLE_YAML, {"agent_framework": "nonsense"})
@@ -801,20 +801,20 @@ class TestConfigMerge:
 
 class TestConfigValidation:
     def test_renaming_is_refused(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         with pytest.raises(config.ConfigError, match="cannot be changed"):
             config.prepare(SAMPLE_YAML, "coder",
                            raw=SAMPLE_YAML.replace("name: coder", "name: renamed"))
 
     def test_missing_name_is_refused(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         with pytest.raises(config.ConfigError, match="'name' is required"):
             config.prepare(SAMPLE_YAML, "coder", raw="model: x\n")
 
     def test_unknown_tool_warns_but_saves(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         text, warnings = config.prepare(
             SAMPLE_YAML, "coder", updates={"tools": "web_request, nonexistent_tool"})
@@ -822,26 +822,26 @@ class TestConfigValidation:
         assert any("nonexistent_tool" in w for w in warnings)
 
     def test_approval_off_with_exec_command_warns(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         _, warnings = config.prepare(
             SAMPLE_YAML, "coder", updates={"tools_approval_required": False})
         assert any("without asking" in w for w in warnings)
 
     def test_vllm_without_endpoint_warns(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         _, warnings = config.prepare(SAMPLE_YAML, "coder", updates={"endpoint.url": ""})
         assert any("endpoint.url" in w for w in warnings)
 
     def test_clean_edit_has_no_warnings(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         _, warnings = config.prepare(SAMPLE_YAML, "coder", updates={"model": "gpt-4o"})
         assert warnings == []
 
     def test_nothing_to_save_is_an_error(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         with pytest.raises(config.ConfigError, match="nothing to save"):
             config.prepare(SAMPLE_YAML, "coder")
@@ -1257,9 +1257,9 @@ class TestBoardMarkdown:
 
         node = shutil.which("node")
         if node is None:
-            pytest.skip("node is not installed; run agents_control/static/md.test.cjs by hand")
+            pytest.skip("node is not installed; run agent_board/static/md.test.cjs by hand")
 
-        suite = Path(__file__).resolve().parents[1] / "agents_control" / "static" / "md.test.cjs"
+        suite = Path(__file__).resolve().parents[1] / "agent_board" / "static" / "md.test.cjs"
         assert suite.is_file(), f"missing {suite}"
         result = subprocess.run(
             [node, str(suite)], capture_output=True, text=True, timeout=60
@@ -1588,11 +1588,11 @@ class TestServerVersion:
         """
         import re
 
-        from declarative_agent_sdk.agents_control import API_REVISION
+        from declarative_agent_sdk.agent_board import API_REVISION
 
         app_js = (
             Path(__file__).resolve().parents[1]
-            / "agents_control" / "static" / "app.js"
+            / "agent_board" / "static" / "app.js"
         ).read_text()
         match = re.search(r"const EXPECTS_API = (\d+);", app_js)
         assert match, "EXPECTS_API is missing from app.js"
@@ -1660,7 +1660,7 @@ class TestEnvFileHandoff:
             script = deploy / name
             script.write_text(STUB_INSTALLER)
             script.chmod(0o755)
-        monkeypatch.setenv("AGENTS_CONTROL_DEPLOY_DIR", str(deploy))
+        monkeypatch.setenv("AGENT_BOARD_DEPLOY_DIR", str(deploy))
         return deploy
 
     @staticmethod
@@ -1688,7 +1688,7 @@ class TestEnvFileHandoff:
         driver, sent = self._capture()
         driver.create_agent(self.REMOTE, name="researcher", api_key="sk-x")
         install = next(c for c in sent if "install.sh" in c)
-        assert '--env-file "$HOME/.agents-control/env.researcher"' in install
+        assert '--env-file "$HOME/.agent-board/env.researcher"' in install
         assert "--env-file '" not in install     # the bug
 
     def test_installs_ask_for_start_at_boot(self, stub):
@@ -1729,23 +1729,23 @@ class TestEnvFileHandoff:
         local = {"id": 1, "name": "here", "is_local": 1, "host": "localhost"}
         result = driver.create_agent(
             local, name="researcher", api_key="sk-test",
-            control_env={"AGENTS_CONTROL_URL": "http://127.0.0.1:8900"},
+            control_env={"AGENT_BOARD_URL": "http://127.0.0.1:8900"},
         )
         assert result["name"] == "researcher" and result["ready"] is True
 
         # the stub copied what it was given: the key and the handshake arrived
-        seen = tmp_path / "home" / ".agents-control" / "env.researcher.seen"
+        seen = tmp_path / "home" / ".agent-board" / "env.researcher.seen"
         assert seen.is_file()
         body = seen.read_text()
         assert "OPENAI_API_KEY=sk-test" in body
-        assert "AGENTS_CONTROL_URL=http://127.0.0.1:8900" in body
+        assert "AGENT_BOARD_URL=http://127.0.0.1:8900" in body
 
     def test_the_staged_copy_is_removed_afterwards(self, stub, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         (tmp_path / "home").mkdir()
         local = {"id": 1, "name": "here", "is_local": 1, "host": "localhost"}
         MachineDriver().create_agent(local, name="researcher", api_key="sk-test")
-        staged = tmp_path / "home" / ".agents-control" / "env.researcher"
+        staged = tmp_path / "home" / ".agent-board" / "env.researcher"
         assert not staged.exists(), "the key must not be left lying about"
 
     def test_a_home_with_a_space_still_works(self, stub, tmp_path, monkeypatch):
@@ -1830,7 +1830,7 @@ class TestSdkSource:
         assert payload == wheel.read_bytes()
 
         install = next(s["script"] for s in sent if "install.sh" in s["script"])
-        assert '--source wheel --wheel "$HOME/.agents-control/wheels/' in install
+        assert '--source wheel --wheel "$HOME/.agent-board/wheels/' in install
 
     def test_a_truncated_transfer_is_caught(self, monkeypatch, tmp_path):
         wheel = tmp_path / "x.whl"
@@ -1863,10 +1863,10 @@ class TestSdkSource:
         wheel = MachineDriver().build_wheel(force=True)
         names = zipfile.ZipFile(wheel).namelist()
         for expected in (
-            "declarative_agent_sdk/agents_control/router.py",
+            "declarative_agent_sdk/agent_board/router.py",
             "declarative_agent_sdk/tools/builtin/send_to_agent.py",
             "declarative_agent_sdk/tools/builtin/list_agents.py",
-            "declarative_agent_sdk/agents_control/static/app.js",
+            "declarative_agent_sdk/agent_board/static/app.js",
         ):
             assert expected in names, f"{expected} missing from the wheel"
 
@@ -1967,7 +1967,7 @@ class TestRequestTimeout:
         assert agent._client.timeout == DEFAULT_REQUEST_TIMEOUT
 
     def test_the_config_editor_exposes_it(self):
-        from declarative_agent_sdk.agents_control import config
+        from declarative_agent_sdk.agent_board import config
 
         assert any(p["key"] == "request_timeout" for p in config.EDITABLE_PROPERTIES)
         text = config.merge("name: a\n", {"request_timeout": "900"})
@@ -2022,7 +2022,7 @@ class TestBoardScriptWiring:
     @staticmethod
     def _static(name: str) -> str:
         return (
-            Path(__file__).resolve().parents[1] / "agents_control" / "static" / name
+            Path(__file__).resolve().parents[1] / "agent_board" / "static" / name
         ).read_text()
 
     def test_template_ids_are_not_queried_on_the_document(self):
@@ -2061,7 +2061,7 @@ class TestBoardScriptWiring:
         """
         import re
 
-        from declarative_agent_sdk.agents_control.config import EDITABLE_PROPERTIES
+        from declarative_agent_sdk.agent_board.config import EDITABLE_PROPERTIES
 
         html = self._static("index.html")
         app_js = self._static("app.js")
@@ -2167,7 +2167,7 @@ class TestSettingsDrift:
     def test_the_board_surfaces_the_difference(self):
         app_js = (
             Path(__file__).resolve().parents[1]
-            / "agents_control" / "static" / "app.js"
+            / "agent_board" / "static" / "app.js"
         ).read_text()
         assert "markDrift" in app_js
         assert "state.defaults" in app_js
@@ -2294,7 +2294,7 @@ class TestApprovalFlow:
         assert "could not be read" in store.messages(channel["id"])[-1]["text"]
 
     def test_the_approval_carries_what_resuming_needs(self):
-        from declarative_agent_sdk.agents_control.router import PendingApproval
+        from declarative_agent_sdk.agent_board.router import PendingApproval
 
         approval = PendingApproval(
             1, "a.b", "web_request", {}, task_id="t", context_id="c", function_id="f")
@@ -2438,7 +2438,7 @@ def _polling_board(store, monkeypatch, tasks, after_confirmation=None, prefix=""
     `tasks` is walked by submit() then get_task(); `after_confirmation` takes
     over once a tool approval has been answered.
     """
-    import declarative_agent_sdk.agents_control.router as mod
+    import declarative_agent_sdk.agent_board.router as mod
 
     queue = list(tasks)
     resumed = list(after_confirmation or [])
@@ -2518,19 +2518,19 @@ class TestBoardToolsAreCore:
         return ToolRegistry
 
     def test_they_are_core_on_a_board(self, monkeypatch):
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:8900")
         names = self._registry().core_tool_names()
         assert "send_to_agent" in names and "list_agents" in names
 
     def test_list_agents_is_absent_off_a_board(self, monkeypatch):
         """Off a board list_agents could only report that there is no board."""
-        monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
+        monkeypatch.delenv("AGENT_BOARD_URL", raising=False)
         names = self._registry().core_tool_names()
         assert "list_agents" not in names
         assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "read_shared", "write_link"]
 
     def test_core_tools_returns_the_callables(self, monkeypatch):
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:8900")
         got = [fn.__name__ for fn in self._registry().core_tools()]
         assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "read_shared", "write_link", "list_agents"]
 
@@ -2538,7 +2538,7 @@ class TestBoardToolsAreCore:
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
         from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
 
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:8900")
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
         assert "send_to_agent" in registry.names()
@@ -2548,7 +2548,7 @@ class TestBoardToolsAreCore:
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
         from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
 
-        monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
+        monkeypatch.delenv("AGENT_BOARD_URL", raising=False)
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
         assert "send_to_agent" in registry.names()
@@ -2560,7 +2560,7 @@ class TestBoardToolsAreCore:
         from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
         from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:8900")
         ToolRegistry.register_built_in_tools()
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
@@ -2753,7 +2753,7 @@ def _polling_board(store, monkeypatch, tasks, after_confirmation=None, prefix=""
     `tasks` is walked by submit() then get_task(); `after_confirmation` takes
     over once a tool approval has been answered.
     """
-    import declarative_agent_sdk.agents_control.router as mod
+    import declarative_agent_sdk.agent_board.router as mod
 
     queue = list(tasks)
     resumed = list(after_confirmation or [])
@@ -2833,19 +2833,19 @@ class TestBoardToolsAreCore:
         return ToolRegistry
 
     def test_they_are_core_on_a_board(self, monkeypatch):
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:8900")
         names = self._registry().core_tool_names()
         assert "send_to_agent" in names and "list_agents" in names
 
     def test_list_agents_is_absent_off_a_board(self, monkeypatch):
         """Off a board list_agents could only report that there is no board."""
-        monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
+        monkeypatch.delenv("AGENT_BOARD_URL", raising=False)
         names = self._registry().core_tool_names()
         assert "list_agents" not in names
         assert names == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "read_shared", "write_link"]
 
     def test_core_tools_returns_the_callables(self, monkeypatch):
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:8900")
         got = [fn.__name__ for fn in self._registry().core_tools()]
         assert got == ["read_file", "write_file", "web_request", "exec_command", "send_to_agent", "read_shared", "write_link", "list_agents"]
 
@@ -2853,7 +2853,7 @@ class TestBoardToolsAreCore:
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
         from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
 
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:8900")
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
         assert "send_to_agent" in registry.names()
@@ -2863,7 +2863,7 @@ class TestBoardToolsAreCore:
         from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
         from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
 
-        monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
+        monkeypatch.delenv("AGENT_BOARD_URL", raising=False)
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
         assert "send_to_agent" in registry.names()
@@ -2875,7 +2875,7 @@ class TestBoardToolsAreCore:
         from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
         from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://127.0.0.1:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://127.0.0.1:8900")
         ToolRegistry.register_built_in_tools()
         registry = LeanToolRegistry(
             SkillRegistry(root=str(tmp_path / "skills")), workspace=str(tmp_path / "ws"))
@@ -3103,7 +3103,7 @@ class TestPerRuntimeProperties:
 
     @staticmethod
     def _keys(framework):
-        from declarative_agent_sdk.agents_control.config import properties_for
+        from declarative_agent_sdk.agent_board.config import properties_for
         return {prop["key"] for prop in properties_for(framework)}
 
     def test_lean_only_knobs_are_hidden_from_the_others(self):
@@ -3147,7 +3147,7 @@ class TestPerRuntimeProperties:
 
     def test_every_runtime_only_knob_declares_its_runtimes(self):
         """A new lean-only knob added without the marker would silently mislead."""
-        from declarative_agent_sdk.agents_control.config import EDITABLE_PROPERTIES
+        from declarative_agent_sdk.agent_board.config import EDITABLE_PROPERTIES
 
         lean_only = {"history_limit", "max_tool_iterations", "request_timeout",
                      "tool_payload_keep", "tool_payload_max_chars"}
@@ -3158,7 +3158,7 @@ class TestPerRuntimeProperties:
     def test_the_board_hides_the_rows_it_should(self):
         app_js = (
             Path(__file__).resolve().parents[1]
-            / "agents_control" / "static" / "app.js"
+            / "agent_board" / "static" / "app.js"
         ).read_text()
         assert "appliesTo" in app_js
         assert "prop.runtimes" in app_js
@@ -3186,7 +3186,7 @@ class TestAutoApprove:
 
     @staticmethod
     def _approval(channel_id, tool):
-        from declarative_agent_sdk.agents_control.router import PendingApproval
+        from declarative_agent_sdk.agent_board.router import PendingApproval
         return PendingApproval(channel_id, "researcher.here", tool, {},
                                task_id="t", context_id="c", function_id="f")
 
@@ -3279,9 +3279,9 @@ class TestAutoApprove:
 
     def test_the_board_shows_it_next_to_stop(self):
         html = (Path(__file__).resolve().parents[1]
-                / "agents_control" / "static" / "index.html").read_text()
+                / "agent_board" / "static" / "index.html").read_text()
         app_js = (Path(__file__).resolve().parents[1]
-                  / "agents_control" / "static" / "app.js").read_text()
+                  / "agent_board" / "static" / "app.js").read_text()
         assert 'id="auto-approve"' in html
         assert "auto-approve`" in app_js
         assert "armed" in app_js          # visibly on, not a quiet default
@@ -3751,7 +3751,7 @@ class TestMetricsRoute:
         assert client.get("/api/agents/metrics", headers=AUTH).status_code == 200
 
     def test_the_agents_tab_renders_the_cards(self):
-        root = Path(__file__).resolve().parents[1] / "agents_control" / "static"
+        root = Path(__file__).resolve().parents[1] / "agent_board" / "static"
         html = (root / "index.html").read_text()
         app_js = (root / "app.js").read_text()
         assert 'id="server-cards"' in html
@@ -3853,7 +3853,7 @@ class TestAgentContext:
 
     def test_the_agents_table_has_a_context_column(self):
         app_js = (Path(__file__).resolve().parents[1]
-                  / "agents_control" / "static" / "app.js").read_text()
+                  / "agent_board" / "static" / "app.js").read_text()
         assert "contextCell" in app_js
         assert "'Context'" in app_js
 
@@ -3943,7 +3943,7 @@ class TestModelCatalog:
 
     @pytest.mark.asyncio
     async def test_openai_defaults_its_endpoint_and_drops_non_chat_models(self):
-        from declarative_agent_sdk.agents_control import catalog
+        from declarative_agent_sdk.agent_board import catalog
         seen = []
         result = await catalog.list_models(
             "openai", "", "sk-test",
@@ -3958,14 +3958,14 @@ class TestModelCatalog:
 
     @pytest.mark.asyncio
     async def test_openai_without_a_key_says_so_instead_of_calling(self, monkeypatch):
-        from declarative_agent_sdk.agents_control import catalog
+        from declarative_agent_sdk.agent_board import catalog
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         result = await catalog.list_models("openai", "", "")
         assert not result["ok"] and "API key" in result["error"]
 
     @pytest.mark.asyncio
     async def test_vllm_lists_everything_it_serves_without_a_key(self, monkeypatch):
-        from declarative_agent_sdk.agents_control import catalog
+        from declarative_agent_sdk.agent_board import catalog
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         seen = []
         result = await catalog.list_models(
@@ -3979,14 +3979,14 @@ class TestModelCatalog:
 
     @pytest.mark.asyncio
     async def test_a_rejected_key_is_named(self):
-        from declarative_agent_sdk.agents_control import catalog
+        from declarative_agent_sdk.agent_board import catalog
         result = await catalog.list_models(
             "openai", "", "bad", transport=self._serving({}, status=401))
         assert not result["ok"] and "rejected" in result["error"]
 
     @pytest.mark.asyncio
     async def test_an_unreachable_endpoint_is_a_result(self):
-        from declarative_agent_sdk.agents_control import catalog
+        from declarative_agent_sdk.agent_board import catalog
         def refuse(request):
             raise httpx.ConnectError("refused")
         result = await catalog.list_models(
@@ -3995,7 +3995,7 @@ class TestModelCatalog:
 
     @pytest.mark.asyncio
     async def test_providers_without_a_listing_are_declined(self):
-        from declarative_agent_sdk.agents_control import catalog
+        from declarative_agent_sdk.agent_board import catalog
         result = await catalog.list_models("anthropic", "", "key")
         assert not result["ok"] and result["models"] == []
 
@@ -4019,14 +4019,14 @@ class TestAgentApiKey:
     def test_set_replaces_the_line_keeps_others_and_stays_private(self, tmp_path):
         env = tmp_path / ".env"
         env.write_text("OPENAI_API_KEY=old\nexport OPENAI_API_KEY=older\n"
-                       "AGENTS_CONTROL_URL=http://board:8900\n")
+                       "AGENT_BOARD_URL=http://board:8900\n")
         env.chmod(0o600)
         driver = MachineDriver()
         driver.set_env_var(self.LOCAL, str(tmp_path), "OPENAI_API_KEY", "sk-new")
         lines = env.read_text().splitlines()
         assert lines.count("OPENAI_API_KEY=sk-new") == 1
         assert not any("old" in line for line in lines)
-        assert "AGENTS_CONTROL_URL=http://board:8900" in lines
+        assert "AGENT_BOARD_URL=http://board:8900" in lines
         assert (env.stat().st_mode & 0o777) == 0o600
         assert not (tmp_path / ".env.tmp").exists()
 
@@ -4050,7 +4050,7 @@ class TestAgentApiKey:
             MachineDriver().set_env_var(self.LOCAL, str(tmp_path), "OPENAI_API_KEY", bad)
 
     def test_vllm_keys_go_to_openai_api_key(self):
-        from declarative_agent_sdk.agents_control.machines import key_name_for
+        from declarative_agent_sdk.agent_board.machines import key_name_for
         assert key_name_for("vllm") == "OPENAI_API_KEY"
         assert key_name_for("anthropic") == "ANTHROPIC_API_KEY"
 
@@ -4329,7 +4329,7 @@ class TestSupervisordDown:
         assert not marker.exists()                  # nothing started that would die
 
     def test_other_failures_pass_through(self):
-        from declarative_agent_sdk.agents_control.machines import supervisor_down_hint
+        from declarative_agent_sdk.agent_board.machines import supervisor_down_hint
         assert supervisor_down_hint("coder: ERROR (no such process)", self.LOCAL, "/r/a") == ""
 
 
@@ -4374,13 +4374,13 @@ class TestClearing:
         return router, channel, agent
 
     def test_an_untouched_board_keeps_its_original_ids(self):
-        from declarative_agent_sdk.agents_control.router import context_id_for
+        from declarative_agent_sdk.agent_board.router import context_id_for
         assert context_id_for({"name": "dev"}, {"qualified": "coder.here"}) == "ac-dev-coder.here"
 
     @pytest.mark.asyncio
     async def test_clear_conversation_empties_and_moves_every_member_on(
             self, setup, store, monkeypatch):
-        from declarative_agent_sdk.agents_control.router import context_id_for
+        from declarative_agent_sdk.agent_board.router import context_id_for
         router, channel, agent = setup
         asked = []
 
@@ -4401,7 +4401,7 @@ class TestClearing:
 
     @pytest.mark.asyncio
     async def test_clear_context_moves_one_agent_on_everywhere(self, setup, store, monkeypatch):
-        from declarative_agent_sdk.agents_control.router import context_id_for
+        from declarative_agent_sdk.agent_board.router import context_id_for
         router, channel, agent = setup
         other = store.add_channel("ops")
         store.join(other["id"], agent["id"])
@@ -4474,13 +4474,13 @@ class TestHeldThroughput:
     """tok/s keeps the last measured value between turns instead of reading 0."""
 
     def test_a_measured_window_passes_through_and_is_remembered(self):
-        from declarative_agent_sdk.agents_control.metrics import Sampler
+        from declarative_agent_sdk.agent_board.metrics import Sampler
         sampler = Sampler()
         rates = {"window_seconds": 5.0, "decode_rate": 41.2, "decode_tokens": 300}
         assert sampler.held("http://box", rates) == rates
 
     def test_an_empty_window_shows_the_last_figure_with_its_age(self):
-        from declarative_agent_sdk.agents_control.metrics import Sampler
+        from declarative_agent_sdk.agent_board.metrics import Sampler
         sampler = Sampler()
         sampler.held("http://box", {"window_seconds": 5.0, "decode_rate": 41.2,
                                     "prefill_rate": 900.0})
@@ -4490,18 +4490,18 @@ class TestHeldThroughput:
         assert "measured_at" not in held
 
     def test_a_new_measurement_replaces_the_held_one(self):
-        from declarative_agent_sdk.agents_control.metrics import Sampler
+        from declarative_agent_sdk.agent_board.metrics import Sampler
         sampler = Sampler()
         sampler.held("http://box", {"decode_rate": 41.2})
         assert sampler.held("http://box", {"decode_rate": 12.0}) == {"decode_rate": 12.0}
         assert sampler.held("http://box", {})["decode_rate"] == 12.0
 
     def test_nothing_measured_yet_stays_empty(self):
-        from declarative_agent_sdk.agents_control.metrics import Sampler
+        from declarative_agent_sdk.agent_board.metrics import Sampler
         assert Sampler().held("http://box", {}) == {}
 
     def test_endpoints_are_held_separately(self):
-        from declarative_agent_sdk.agents_control.metrics import Sampler
+        from declarative_agent_sdk.agent_board.metrics import Sampler
         sampler = Sampler()
         sampler.held("http://a", {"decode_rate": 41.2})
         assert sampler.held("http://b", {}) == {}
@@ -4519,7 +4519,7 @@ class TestFileRelay:
             "name": "reviewer", "url": "http://100.83.163.18:8000/"})
 
     def _upstream(self, monkeypatch, handler):
-        import declarative_agent_sdk.agents_control.server as server_module
+        import declarative_agent_sdk.agent_board.server as server_module
         original = server_module.httpx.AsyncClient
         monkeypatch.setattr(server_module.httpx, "AsyncClient", lambda **kw: original(
             transport=httpx.MockTransport(handler)))
@@ -4628,7 +4628,7 @@ class TestReinstall:
         calls = self._fake(plane, monkeypatch)
         client.post(f"/api/agents/{agent['id']}/reinstall", json={}, headers=AUTH)
         keys = [k for k, _ in calls["env"]]
-        assert "AGENTS_CONTROL_URL" in keys and "AGENT_QUALIFIED_NAME" in keys
+        assert "AGENT_BOARD_URL" in keys and "AGENT_QUALIFIED_NAME" in keys
         assert ("AGENT_QUALIFIED_NAME", "coder.here") in calls["env"]
         assert not any(k.endswith("API_KEY") for k in keys)   # the key is left alone
 
@@ -4650,7 +4650,7 @@ class TestReinstall:
         monkeypatch.setattr(driver, "_script_path", lambda m, k: "install.sh")
         monkeypatch.setattr(driver, "run", lambda m, c, **kw: commands.append(c) or '{"name": "coder"}')
         driver.create_agent({"name": "here", "host": "box"}, name="coder", provider="vllm",
-                            control_env={"AGENTS_CONTROL_URL": "http://b"}, seed_env=False,
+                            control_env={"AGENT_BOARD_URL": "http://b"}, seed_env=False,
                             prefix="/home/u/.declarative-agent/coder", sdk_source="git")
         assert len(commands) == 1                       # no env file staged or removed
         assert "--prefix /home/u/.declarative-agent/coder" in commands[0]

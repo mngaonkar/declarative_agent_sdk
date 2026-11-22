@@ -1,11 +1,11 @@
 """
-agents-control service — JSON API, SSE stream and the static board.
+agent-board service — JSON API, SSE stream and the static board.
 
 Security posture, stated up front because it decides the defaults: this service
 creates agents whose default toolset includes ``exec_command`` on every
 registered machine, over SSH keys it holds. It is a remote-code-execution
 control plane. So it binds 127.0.0.1 unless told otherwise, and any non-loopback
-bind demands a token (``AGENTS_CONTROL_TOKEN``) or refuses to start.
+bind demands a token (``AGENT_BOARD_TOKEN``) or refuses to start.
 """
 
 from __future__ import annotations
@@ -34,15 +34,16 @@ from starlette.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from declarative_agent_sdk.core.agent_logging import get_logger
-from declarative_agent_sdk.agents_control import config as agent_config
-from declarative_agent_sdk.agents_control import catalog as model_catalog
-from declarative_agent_sdk.agents_control import metrics as model_metrics
-from declarative_agent_sdk.agents_control import logbook
-from declarative_agent_sdk.agents_control.machines import (
+from declarative_agent_sdk.agent_board import config as agent_config
+from declarative_agent_sdk.agent_board import catalog as model_catalog
+from declarative_agent_sdk.agent_board import metrics as model_metrics
+from declarative_agent_sdk.agent_board import logbook
+from declarative_agent_sdk.agent_board.machines import (
     MachineDriver, MachineError, key_name_for,
 )
-from declarative_agent_sdk.agents_control.router import ChannelRouter, EventBus
-from declarative_agent_sdk.agents_control.store import Store, DEFAULT_DB_PATH
+from declarative_agent_sdk.agent_board.router import ChannelRouter, EventBus
+from declarative_agent_sdk.agent_board.store import Store, running_from_checkout
+from declarative_agent_sdk.core.board_env import board_env
 
 logger = get_logger(__name__)
 
@@ -137,12 +138,12 @@ class ControlPlane:
 
     def __init__(
         self,
-        db_path: str = DEFAULT_DB_PATH,
+        db_path: Optional[str] = None,
         token: Optional[str] = None,
         public_url: str = "",
     ) -> None:
         self.store = Store(db_path)
-        # Beside the database: ~/.agents-control/logs/control.log by default.
+        # Beside the database: ~/.agent-board/logs/control.log by default.
         self.logbook = logbook.install(str(Path(self.store.path).parent / "logs"))
         self.driver = MachineDriver()
         self.bus = EventBus()
@@ -150,7 +151,7 @@ class ControlPlane:
         # Holds the previous /metrics reading per endpoint so throughput can be
         # reported over the window between polls, not just since boot.
         self.sampler = model_metrics.Sampler()
-        self.token = token if token is not None else os.environ.get("AGENTS_CONTROL_TOKEN", "")
+        self.token = token if token is not None else board_env("TOKEN")
         self.public_url = public_url.rstrip("/")
         self.app = create_app(self)
 
@@ -161,7 +162,7 @@ class ControlPlane:
             raise RuntimeError(
                 f"refusing to bind {host} without a token: this service provisions "
                 "agents with shell access on every registered machine.\n"
-                "  export AGENTS_CONTROL_TOKEN=$(openssl rand -hex 24)\n"
+                "  export AGENT_BOARD_TOKEN=$(openssl rand -hex 24)\n"
                 "  ...or bind 127.0.0.1 and reach it over an SSH tunnel."
             )
         if not self.public_url:
@@ -174,9 +175,9 @@ class ControlPlane:
         except ImportError as exc:
             raise RuntimeError("uvicorn is required — pip install uvicorn") from exc
 
-        logger.info(f"agents-control on http://{host}:{port} (db {self.store.path})")
+        logger.info(f"agent-board on http://{host}:{port} (db {self.store.path})")
         if not self.token:
-            logger.warning("no AGENTS_CONTROL_TOKEN set — API is open to anything "
+            logger.warning("no AGENT_BOARD_TOKEN set — API is open to anything "
                            "that can reach the loopback port")
         uvicorn.run(self.app, host=host, port=port)
 
@@ -191,6 +192,10 @@ class ControlPlane:
         talks to a peer.
         """
         return {
+            "AGENT_BOARD_URL": self.public_url,
+            "AGENT_BOARD_TOKEN": self.token,
+            # The names from when agent-board was agents-control, for agents
+            # still running an SDK that only knows those (an older --sdk-ref).
             "AGENTS_CONTROL_URL": self.public_url,
             "AGENTS_CONTROL_TOKEN": self.token,
             "AGENT_NAME": agent_name,
@@ -298,6 +303,21 @@ def create_app(cp: "ControlPlane") -> Starlette:
         """SSH and SQLite calls are blocking; keep the event loop free."""
         return asyncio.to_thread(fn, *args, **kwargs)
 
+    def sdk_source_for(payload: Dict[str, Any], settings: Dict[str, Any]) -> str:
+        """
+        The SDK source an install uses: the request's, else the default.
+
+        "local" needs a source checkout; an installed control plane (the
+        one-line installer) has none, so it falls back to git rather than
+        failing every create and reinstall.
+        """
+        source = str(payload.get("sdk_source") or settings["default_sdk_source"])
+        if source == "local" and not running_from_checkout():
+            logger.warning("SDK source 'local' needs a source checkout; "
+                           "this control plane is installed as a package, using git")
+            return "git"
+        return source
+
     async def machine_addresses(machine: Dict[str, Any], fresh: bool = False) -> List[str]:
         """
         The IP addresses a machine has: as recorded, or read again now.
@@ -367,7 +387,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
         to find out whether this process is as new as the files it was served.
         """
         from declarative_agent_sdk.__version__ import __version__
-        from declarative_agent_sdk.agents_control import API_REVISION
+        from declarative_agent_sdk.agent_board import API_REVISION
 
         return JSONResponse({
             "ok": True,
@@ -379,7 +399,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
 
     @guard
     async def get_state(request: Request) -> Response:
-        from declarative_agent_sdk.agents_control.store import DEFAULT_SETTINGS
+        from declarative_agent_sdk.agent_board.store import DEFAULT_SETTINGS
 
         return JSONResponse({
             "machines": store.machines(),
@@ -581,7 +601,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
             bind_host=str(payload.get("bind_host") or ""),
             advertise_host=str(payload.get("advertise_host") or ""),
             control_env=cp.agent_env(name, str(machine["name"])),
-            sdk_source=str(payload.get("sdk_source") or settings["default_sdk_source"]),
+            sdk_source=sdk_source_for(payload, settings),
             sdk_ref=str(payload.get("sdk_ref") or ""),
         )
         result.setdefault("name", name)
@@ -669,7 +689,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
             approval=bool(parsed.get("tools_approval_required", True)),
             bind_host=bind_host,
             advertise_host=advertise_host,
-            sdk_source=str(payload.get("sdk_source") or settings["default_sdk_source"]),
+            sdk_source=sdk_source_for(payload, settings),
             sdk_ref=str(payload.get("sdk_ref") or ""),
             seed_env=False,
             prefix=prefix,
@@ -1164,7 +1184,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
         an existing store. The board shows the difference rather than
         overwriting a value someone may have chosen deliberately.
         """
-        from declarative_agent_sdk.agents_control.store import DEFAULT_SETTINGS
+        from declarative_agent_sdk.agent_board.store import DEFAULT_SETTINGS
 
         return JSONResponse({
             "settings": store.settings(),
@@ -1360,7 +1380,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
             text = "".join(
                 f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r['ts']))} - "
                 f"{r['logger']} - {r['level']} - {r['message']}\n" for r in records)
-        return attachment(text, f"agents-control-{stamp}.log")
+        return attachment(text, f"agent-board-{stamp}.log")
 
     @guard
     async def agent_log_download(request: Request) -> Response:

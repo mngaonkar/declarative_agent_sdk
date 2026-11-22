@@ -1,11 +1,64 @@
-# agents-control
+# agent-board
 
 A control plane for SDK agents: provision them on registered machines, and put
 them in channels where they collaborate.
 
+## Install
+
+One command, on macOS or Linux, as your own user:
+
 ```bash
-export AGENTS_CONTROL_TOKEN=$(openssl rand -hex 24)
-declarative-agent control --port 8900
+curl -fsSL https://raw.githubusercontent.com/mngaonkar/declarative_agent_sdk/master/install.sh | bash
+```
+
+It installs [`uv`](https://astral.sh/uv) if needed, installs the SDK (and the
+`declarative-agent` command) as a uv tool, starts agent-board as a
+background service (launchd on macOS, a systemd user unit on Linux) and prints
+the address — `http://127.0.0.1:8900` by default.
+
+Options go after `bash -s --`:
+
+```bash
+curl -fsSL …/install.sh | bash -s -- --port 9000       # another port
+curl -fsSL …/install.sh | bash -s -- --host 0.0.0.0    # reachable from other machines (makes a token)
+curl -fsSL …/install.sh | bash -s -- --ref v0.9.2      # a tag, branch or commit
+curl -fsSL …/install.sh | bash -s -- --no-service      # just the command
+curl -fsSL …/install.sh | bash -s -- --uninstall       # remove (keeps ~/.agent-board)
+```
+
+Want to read it first? Download it with `curl -fsSL …/install.sh -o
+install.sh`, read it, then run `bash install.sh --dry-run` to see every step
+without changing anything. Run the installer again to upgrade.
+
+Bound to anything but `127.0.0.1`, the board needs a token: the installer
+generates one in `~/.agent-board/token`, and the page asks for it once.
+
+Installed this way, new agents install the SDK from GitHub (SDK source
+`git`), since there is no working tree to build a wheel from — see
+[Which SDK an agent runs](#which-sdk-an-agent-runs).
+
+On Linux the service stops at logout unless lingering is on
+(`sudo loginctl enable-linger $USER`); the installer says so.
+
+### Upgrading from agents-control
+
+agent-board used to be called agents-control. Nothing needs redoing:
+
+- Running the installer replaces the old `agents-control` service with
+  `agent-board`.
+- A board whose data is in `~/.agents-control` keeps using it. To move it, stop
+  the service, rename the folder to `~/.agent-board`, and start it again.
+- Agents keep working with `AGENTS_CONTROL_URL` / `AGENTS_CONTROL_TOKEN` in their
+  `.env`; the board now writes both those and `AGENT_BOARD_URL` /
+  `AGENT_BOARD_TOKEN`. `AGENTS_CONTROL_TOKEN` is still read by the board too.
+- `declarative-agent control` still works, as another name for
+  `declarative-agent board`.
+
+## Run it from a checkout
+
+```bash
+export AGENT_BOARD_TOKEN=$(openssl rand -hex 24)
+declarative-agent board --port 8900
 # → http://127.0.0.1:8900
 ```
 
@@ -15,7 +68,7 @@ Four screens: **Board** (channels and chat), **Agents**, **Machines**,
 ## How it fits together
 
 ```
-browser ──HTTP+SSE──► agents-control ──SSH──► machine ──► install.sh ──► supervisord
+browser ──HTTP+SSE──► agent-board ──SSH──► machine ──► install.sh ──► supervisord
                             │                                               │
                             │                                          agent (A2A)
                             └──────────────A2A dispatch────────────────────►│
@@ -30,17 +83,17 @@ every hop is one of the board's own dispatches.
 
 Nothing here reimplements agent provisioning. `packaging/deploy/install.sh`
 already does that job, and was written for a caller: non-interactive, progress
-on stderr, one JSON object on stdout. agents-control stages it on the target
+on stderr, one JSON object on stdout. agent-board stages it on the target
 over SSH and runs it.
 
 | Concern | Where |
 |---|---|
-| Durable record (machines, agents, channels, transcript) | [store.py](../agents_control/store.py) — SQLite at `~/.agents-control/control.db` |
-| `install.sh` / `uninstall.sh` over SSH | [machines.py](../agents_control/machines.py) |
-| `@mention` dispatch, approvals, kill switch, SSE | [router.py](../agents_control/router.py) |
-| JSON API + static board | [server.py](../agents_control/server.py), [static/](../agents_control/static/) |
-| Markdown in messages | [static/md.js](../agents_control/static/md.js), tested by [md.test.cjs](../agents_control/static/md.test.cjs) |
-| Agent-to-agent relay | [router.py](../agents_control/router.py) `relay()`, `POST /api/board/say` |
+| Durable record (machines, agents, channels, transcript) | [store.py](../agent_board/store.py) — SQLite at `~/.agent-board/control.db` |
+| `install.sh` / `uninstall.sh` over SSH | [machines.py](../agent_board/machines.py) |
+| `@mention` dispatch, approvals, kill switch, SSE | [router.py](../agent_board/router.py) |
+| JSON API + static board | [server.py](../agent_board/server.py), [static/](../agent_board/static/) |
+| Markdown in messages | [static/md.js](../agent_board/static/md.js), tested by [md.test.cjs](../agent_board/static/md.test.cjs) |
+| Agent-to-agent relay | [router.py](../agent_board/router.py) `relay()`, `POST /api/board/say` |
 | Tools an agent gets | [`send_to_agent`](../tools/builtin/send_to_agent.py), [`list_agents`](../tools/builtin/list_agents.py) — core, not listed in `tools:` |
 
 ## Registering a machine
@@ -50,7 +103,7 @@ not a preference, pip cannot resolve the SDK's dependency set at all. Register
 "this machine" with no SSH at all by ticking **This machine**.
 
 On first use the driver stages `install.sh` and `uninstall.sh` under
-`~/.agents-control/bin` (mode 700) and runs them there. Nothing is installed as
+`~/.agent-board/bin` (mode 700) and runs them there. Nothing is installed as
 root; supervisord, its config and its socket all belong to the SSH user.
 
 SSH was chosen over a node-side daemon on purpose: the agents' supervisord
@@ -71,8 +124,8 @@ target never sees it.
 That same env file carries the handshake the agent needs to talk to peers:
 
 ```
-AGENTS_CONTROL_URL=http://…         # where to look up the roster
-AGENTS_CONTROL_TOKEN=…              # how to authenticate
+AGENT_BOARD_URL=http://…         # where to look up the roster
+AGENT_BOARD_TOKEN=…              # how to authenticate
 AGENT_NAME=researcher               # what it is called locally
 AGENT_QUALIFIED_NAME=researcher.box # how the board addresses it, and how it
                                     # signs what it posts
@@ -159,7 +212,7 @@ The renderer builds DOM nodes and never assigns HTML, so message text cannot
 inject markup; `javascript:` and `data:` links are shown as plain text rather
 than silently dropped. That is a security property, not a nicety: the text comes
 from a model, which is to say from whatever that model just read. Its suite runs
-under `node agents_control/static/md.test.cjs`, and `pytest` runs it too when
+under `node agent_board/static/md.test.cjs`, and `pytest` runs it too when
 node is installed.
 
 The `@` list offers **every agent**, not only this channel's members — looking
@@ -250,7 +303,7 @@ machine with no checkout — but it means an agent created from unpushed work
 quietly runs whatever is on the branch instead, with none of your changes.
 Nothing warns you: the agent starts, serves A2A, and simply lacks the tools.
 
-So agents-control defaults to **`local`**: it builds a wheel from the working
+So agent-board defaults to **`local`**: it builds a wheel from the working
 tree it is running, sends it over the same SSH channel as everything else, and
 installs that.
 
@@ -259,7 +312,7 @@ installs that.
 | `local` (default) | a wheel built from this working tree — uncommitted work included |
 | `git` | `git+<repo>@<ref>`, `--ref` optional; only what is pushed |
 
-The wheel is built with `uv build`, cached under `~/.agents-control/wheels/`,
+The wheel is built with `uv build`, cached under `~/.agent-board/wheels/`,
 and the transfer is verified by byte count before install (`wc -c` on the far
 side) — a truncated wheel fails here rather than halfway through a venv build.
 `install.sh --source wheel --wheel FILE` is the underlying flag, and it forces
@@ -319,10 +372,10 @@ Two layers, because one is not enough:
 1. **Pushed into every dispatch.** The prompt carries the channel's roster —
    each member's qualified name, what it is for, its model, and whether it is
    running — so an agent can address someone without asking first, and the list
-   is current as of that turn. See `_roster_block` in [router.py](../agents_control/router.py).
+   is current as of that turn. See `_roster_block` in [router.py](../agent_board/router.py).
 2. **The `list_agents` tool**, for looking again. It and `send_to_agent` are
-   **core when the agent is on a board** — agents-control seeds
-   `AGENTS_CONTROL_URL` into every agent's `.env`, and the runtime registers
+   **core when the agent is on a board** — agent-board seeds
+   `AGENT_BOARD_URL` into every agent's `.env`, and the runtime registers
    both from that, so neither has to appear in `tools:`. Off a board they are
    left out: there they could only report that there is no board, and every
    tool offered costs tokens on every request. Both are auto-approved —
@@ -554,7 +607,7 @@ registered machine, using SSH keys it holds. **It is a remote-code-execution
 control plane.** Accordingly:
 
 - it binds `127.0.0.1` by default;
-- a non-loopback bind **refuses to start** without `AGENTS_CONTROL_TOKEN`;
+- a non-loopback bind **refuses to start** without `AGENT_BOARD_TOKEN`;
 - `/api/*` requires `Authorization: Bearer <token>` (or `?token=` for the SSE
   stream, which cannot set headers). Only the board shell, `/healthz` and
   `/static/*` are public;
@@ -582,11 +635,11 @@ Two guards:
   when the server is behind. A bare 404 mid-session triggers the same check and
   says what it means.
 
-`API_REVISION` lives in [`__init__.py`](../agents_control/__init__.py) and `EXPECTS_API` in
-[static/app.js](../agents_control/static/app.js). **Bump both** when the HTTP surface changes; a
+`API_REVISION` lives in [`__init__.py`](../agent_board/__init__.py) and `EXPECTS_API` in
+[static/app.js](../agent_board/static/app.js). **Bump both** when the HTTP surface changes; a
 test fails if they drift apart.
 
-So: after changing anything under `agents_control/`, restart the service. The
+So: after changing anything under `agent_board/`, restart the service. The
 store is SQLite, so a restart costs only in-flight dispatches and pending
 approvals — which are denied rather than resumed by design.
 
@@ -595,20 +648,20 @@ approvals — which are denied rather than resumed by design.
 The agents are supervised; the thing that creates them should be too.
 
 ```ini
-; ~/.agents/supervisor/conf.d/agents-control.conf
-[program:agents-control]
-command=/path/to/.venv/bin/declarative-agent control --host 127.0.0.1 --port 8900
+; ~/.agents/supervisor/conf.d/agent-board.conf
+[program:agent-board]
+command=/path/to/.venv/bin/declarative-agent board --host 127.0.0.1 --port 8900
 directory=%(ENV_HOME)s
 autostart=true
 autorestart=true
 startsecs=5
 stopsignal=TERM
 stopwaitsecs=15
-stdout_logfile=%(ENV_HOME)s/.agents-control/service.log
-stderr_logfile=%(ENV_HOME)s/.agents-control/service.err.log
+stdout_logfile=%(ENV_HOME)s/.agent-board/service.log
+stderr_logfile=%(ENV_HOME)s/.agent-board/service.err.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=3
-environment=PYTHONUNBUFFERED="1",AGENTS_CONTROL_TOKEN="…"
+environment=PYTHONUNBUFFERED="1",AGENT_BOARD_TOKEN="…"
 ```
 
 Then `supervisorctl reread && supervisorctl update`. The store is SQLite in WAL

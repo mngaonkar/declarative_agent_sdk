@@ -1,11 +1,49 @@
 # Installing agents on a machine — design spec
 
 How an agent becomes a long-running service on a macOS or Linux machine. The
-board runs these scripts over SSH ([agents-control/machines.md](agents-control/machines.md));
+board runs these scripts over SSH ([agent-board/machines.md](agent-board/machines.md));
 people can run them by hand too. User guide: [../deployment.md](../deployment.md).
 
-Code: `packaging/deploy/`, `Dockerfile`, `build-docker.sh`,
-`run_agents_control.sh`, `run_ui.sh`.
+Code: `install.sh` (installs agent-board itself), `packaging/deploy/`
+(installs one agent), `Dockerfile`, `build-docker.sh`,
+`run_agent_board.sh`, `run_ui.sh`.
+
+## `install.sh`
+
+**Does:** the one-line installer for agent-board, fetched from GitHub
+(`raw.githubusercontent.com/…/master/install.sh`) and piped to bash. Not to be
+confused with `packaging/deploy/install.sh`, which installs one agent.
+
+**Rules:**
+
+- DEPLOY-CTL-1: Runs as the current user only; refuses root. Supports macOS
+  and Linux.
+- DEPLOY-CTL-2: The whole script is one function called on the last line, so
+  a download cut short runs nothing.
+- DEPLOY-CTL-3: Installs `uv` from astral.sh when missing (unless
+  `--no-uv-install`), then installs the SDK as a uv tool from git
+  (`--ref`, default `master`; `--source` for a local path or wheel) with
+  `--force`, so running it again upgrades.
+- DEPLOY-CTL-4: Starts `declarative-agent board --host H --port P` as a
+  background service that restarts on failure and starts again at login: a
+  LaunchAgent (`com.declarative-agent.board`) on macOS, a systemd user unit
+  (`agent-board`) on Linux, which warns when lingering is off.
+  `--no-service` installs the command only.
+- DEPLOY-CTL-5: Defaults `--host 127.0.0.1`, `--port 8900`. Any non-loopback
+  host gets a token, generated once into `~/.agent-board/token` (0600) and
+  passed to the service; service files are written 0600 because they hold it.
+- DEPLOY-CTL-6: After starting, it waits up to 30 s for `/healthz` and fails
+  with where to look when the service does not answer.
+- DEPLOY-CTL-9: The service runs `declarative-agent board`. A service left
+  under the old names (`com.declarative-agent.control`, `agents-control`) is
+  removed on install and on uninstall, since it would hold the same port. A
+  board whose data is only in `~/.agents-control` keeps using it.
+- DEPLOY-CTL-7: `--uninstall` removes the service and the uv tool and keeps
+  `~/.agent-board` (the board's data).
+- DEPLOY-CTL-8: `--dry-run` prints every step and changes nothing, not even
+  creating `~/.agent-board`.
+
+**Tests:** `tests/test_board_installer.py`.
 
 ## `packaging/deploy/install.sh`
 
@@ -92,9 +130,9 @@ folder too.
 
 **Does:** builds the image `declarative-agent:<tag>` with `docker buildx`.
 
-## `run_agents_control.sh`
+## `run_agent_board.sh`
 
-**Does:** starts agents-control on port 8900 (`declarative-agent control`).
+**Does:** starts agent-board on port 8900 (`declarative-agent board`).
 
 ## `run_ui.sh`
 

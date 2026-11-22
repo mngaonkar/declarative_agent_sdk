@@ -199,7 +199,7 @@ class LeanAIAgent(BaseAgent):
         """
         How big the prompt this agent prefixes to every request has grown.
 
-        Read over HTTP by agents-control, which cannot see it any other way:
+        Read over HTTP by agent-board, which cannot see it any other way:
         the history lives in this process, and a model server only knows about
         whichever request it was last handed.
         """
@@ -212,7 +212,7 @@ class LeanAIAgent(BaseAgent):
         """
         Forget a conversation, or all of them.
 
-        Called by agents-control's "clear conversation" / "clear context". The
+        Called by agent-board's "clear conversation" / "clear context". The
         board also starts a new session id, so this is about freeing what the
         old one held rather than about the next turn starting clean.
         """

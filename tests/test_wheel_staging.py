@@ -1,6 +1,6 @@
 """Wheels built from the working tree must not ship modules deleted from it."""
 
-from declarative_agent_sdk.agents_control.machines import _clear_setuptools_staging
+from declarative_agent_sdk.agent_board.machines import _clear_setuptools_staging
 
 
 def test_stale_staging_is_cleared(tmp_path):

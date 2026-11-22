@@ -26,8 +26,12 @@ from declarative_agent_sdk.tools.builtin import _links
 @pytest.fixture
 def lean(tmp_path) -> LeanToolRegistry:
     (tmp_path / "skills").mkdir()
-    return LeanToolRegistry(SkillRegistry(root=str(tmp_path / "skills")),
-                            workspace=str(tmp_path / "ws"))
+    registry = LeanToolRegistry(SkillRegistry(root=str(tmp_path / "skills")),
+                                workspace=str(tmp_path / "ws"))
+    # /tmp/ is writable by default, and on Linux tmp_path lives under it, so
+    # the "outside the sandbox" files below would be inside it.
+    registry._mutable_prefixes = [p for p in registry._mutable_prefixes if p != "/tmp/"]
+    return registry
 
 
 @pytest.fixture
@@ -215,7 +219,7 @@ class TestLinks:
         assert "larger than" in str(exc.value)
 
     def test_falls_back_to_the_board_relay(self, monkeypatch):
-        monkeypatch.setenv("AGENTS_CONTROL_URL", "http://board:8900")
+        monkeypatch.setenv("AGENT_BOARD_URL", "http://board:8900")
         calls = []
 
         def answer(url, kwargs):

@@ -26,7 +26,7 @@ tools, resolves a YAML `tools:` list, and says which tools are core.
 - TOOLS-REG-3: Core tools are given to every agent without being listed:
   `read_file`, `write_file`, `web_request`, `exec_command`, `send_to_agent`,
   `read_shared`, `write_link`. `list_agents` is added only when the agent is
-  on a board (`AGENTS_CONTROL_URL` is set).
+  on a board (`AGENT_BOARD_URL` is set).
 - TOOLS-REG-4: `dedupe` drops repeated tools by name, keeping the first, so
   listing a core tool again changes nothing.
 - TOOLS-REG-5: `register_from_scripts_folder` registers the public functions
@@ -55,8 +55,8 @@ to folders and registers each skill's `scripts/` functions as tools.
 
 ## `tools/builtin/_board.py`
 
-**Does:** helper (not a tool): the agent's connection to the agents-control
-board, read from `AGENTS_CONTROL_URL`, `AGENTS_CONTROL_TOKEN` and
+**Does:** helper (not a tool): the agent's connection to the agent-board
+board, read from `AGENT_BOARD_URL`, `AGENT_BOARD_TOKEN` and
 `AGENT_QUALIFIED_NAME`.
 
 **Rules:**

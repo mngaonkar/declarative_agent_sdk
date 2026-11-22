@@ -1,11 +1,11 @@
-# agents-control store — design spec
+# agent-board store — design spec
 
-Code: `agents_control/store.py`.
+Code: `agent_board/store.py`.
 
-## `agents_control/store.py`
+## `agent_board/store.py`
 
 **Does:** `Store`, a thin synchronous SQLite wrapper (one connection behind a
-lock) at `~/.agents-control/control.db`. It is the board's only durable
+lock) at `~/.agent-board/control.db`. It is the board's only durable
 state.
 
 **Rules — tables:**
@@ -25,10 +25,16 @@ state.
 
 **Rules — behaviour:**
 
+- AC-STORE-11: With no path given the database is
+  `~/.agent-board/control.db`. When that folder does not exist and the old
+  `~/.agents-control/control.db` does (a board set up before the rename), the
+  old one is used where it is (`board_home`, `default_db_path`).
+
 - AC-STORE-5: `settings()` returns the shipped defaults overlaid with stored
   values. `update_settings` ignores unknown keys. Defaults:
   `default_framework` lean, `default_provider` openai, `default_model`
-  gpt-4o-mini, `default_approval` true, `default_sdk_source` local,
+  gpt-4o-mini, `default_approval` true, `default_sdk_source` local in a
+  source checkout and git when installed as a package (`running_from_checkout`),
   `agent_timeout_seconds` 1800, `poll_interval_seconds` 2,
   `poll_max_interval_seconds` 10, `poll_request_timeout_seconds` 60,
   `approval_timeout_seconds` 300, `transcript_context_messages` 8,
@@ -47,4 +53,4 @@ state.
   last lines for a prompt, without the message being dispatched (it is added
   separately) and with runs of approval bookkeeping squashed into one line.
 
-**Tests:** `tests/test_agents_control.py` (`TestStore` and others).
+**Tests:** `tests/test_agent_board.py` (`TestStore` and others).

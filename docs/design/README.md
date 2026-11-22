@@ -26,7 +26,7 @@ for a code change.
 | Workflows | [workflows.md](workflows.md) | `workflows/` |
 | Command line | [cli.md](cli.md) | `cli/` |
 | Installing agents on a machine | [deploy.md](deploy.md) | `packaging/deploy/`, Docker files, run scripts |
-| agents-control (the board) | [agents-control/](agents-control/README.md) | `agents_control/` |
+| agent-board (the board) | [agent-board/](agent-board/README.md) | `agent_board/` |
 | A2UI web client | [a2ui.md](a2ui.md) | `a2ui/` |
 
 ## How to read a section
@@ -52,10 +52,10 @@ the code obeys them.
 
 Example prompt:
 
-> In `docs/design/agents-control/router.md`, rule ROUTER-RELAY-6 is new:
+> In `docs/design/agent-board/router.md`, rule ROUTER-RELAY-6 is new:
 > "When an agent was asked by another agent and its reply mentions nobody,
 > the board sends the reply back to the agent that asked." Change
-> `agents_control/router.py` to follow it, keep the other rules, and add a
+> `agent_board/router.py` to follow it, keep the other rules, and add a
 > test.
 
 ## Keeping it in sync
@@ -74,7 +74,7 @@ Example prompt:
 - **Runtime** (`agent_framework`) — the engine that runs the agent loop:
   `lean`, `adk` or `deepagent`.
 - **Transport** — how an agent is reached: A2A (HTTP JSON-RPC) or Discord.
-- **Board** — agents-control: the service that installs agents on machines
+- **Board** — agent-board: the service that installs agents on machines
   and lets them talk in channels.
 - **Machine** — a computer the board reaches over SSH (or the local one) and
   installs agents on.

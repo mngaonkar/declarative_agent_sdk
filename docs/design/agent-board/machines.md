@@ -1,8 +1,8 @@
-# agents-control machine driver — design spec
+# agent-board machine driver — design spec
 
-Code: `agents_control/machines.py`.
+Code: `agent_board/machines.py`.
 
-## `agents_control/machines.py`
+## `agent_board/machines.py`
 
 **Does:** `MachineDriver` runs everything that happens on a machine: probing
 it, staging the install scripts, building and sending the SDK wheel,
@@ -30,12 +30,14 @@ supervisord. A thin wrapper over [install.sh](../deploy.md).
 **Rules — installing:**
 
 - AC-MACH-5: `install.sh` and `uninstall.sh` are copied to
-  `~/.agents-control/bin` once per machine per control-plane process.
+  `~/.agent-board/bin` once per machine per control-plane process.
 - AC-MACH-6: `sdk_source=local` builds a wheel from this working tree with
   `uv build --wheel`, after clearing setuptools' `build/lib` and
   `build/bdist.*` staging (otherwise files deleted from the tree keep
   shipping), and sends it to the machine. `git` installs from the
-  repository, optionally at `sdk_ref`.
+  repository, optionally at `sdk_ref`. An installed control plane has no
+  working tree: building a local wheel there fails with a message to use
+  `git`.
 - AC-MACH-7: `create_agent` always passes `--enable-at-boot` (unless
   `start_at_boot=False`), so supervisord comes back after a reboot
   (DEPLOY-INST-14).
@@ -67,5 +69,5 @@ supervisord. A thin wrapper over [install.sh](../deploy.md).
   `LookupError` (404).
 - AC-MACH-16: `delete_agent` runs `uninstall.sh` (with `--purge` when asked).
 
-**Tests:** `tests/test_agents_control.py`, `tests/test_control_logs.py`,
+**Tests:** `tests/test_agent_board.py`, `tests/test_board_logs.py`,
 `tests/test_wheel_staging.py`.

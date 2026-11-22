@@ -12,7 +12,7 @@ uv sync
 export OPENAI_API_KEY=sk-...
 ```
 
-Installing from a release wheel instead? See [Install](../../README.md#install);
+Installing from a release wheel instead? See [Install](../sdk.md#install);
 `examples/` is not packaged, so take this directory from the matching tag.
 
 ## Start the server

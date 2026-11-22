@@ -10,7 +10,7 @@ board marked it ready; every Reinstall passed the same address back.
 import pytest
 from starlette.testclient import TestClient
 
-from declarative_agent_sdk.agents_control.server import ControlPlane, _nearest_address
+from declarative_agent_sdk.agent_board.server import ControlPlane, _nearest_address
 
 AUTH = {"Authorization": "Bearer t0ken"}
 

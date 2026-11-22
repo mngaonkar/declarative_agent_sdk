@@ -23,9 +23,9 @@ which would hide the `cli.main` submodule.
 - CLI-1: `discord --config agent.yaml` serves an agent on Discord. Options:
   `--check` (log in, report what the bot can see, log out), `--env-file`,
   `--prefix` (default `!ask `), `--activity`, `--embed`, `--log-level`.
-- CLI-2: `control` runs agents-control. Options: `--host` (default
+- CLI-2: `control` runs agent-board. Options: `--host` (default
   `127.0.0.1`), `--port` (default 8900), `--db` (default
-  `~/.agents-control/control.db`), `--token`, `--public-url`, `--log-level`.
+  `~/.agent-board/control.db`), `--token`, `--public-url`, `--log-level`.
 - CLI-3: `version` prints the SDK version (CORE-VER-1).
 - CLI-4: `a2a` is reserved and exits with status 2, pointing to
   `AIAgentServer`.

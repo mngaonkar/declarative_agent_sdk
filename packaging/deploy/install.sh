@@ -50,7 +50,7 @@ BOOT_LABEL="com.declarative-agent.supervisor"
 BOOT_UNIT="declarative-agent-supervisor"
 
 # :-$0 keeps `set -u` happy when the script is piped (ssh ... 'bash -s' < install.sh),
-# which is how agents-control provisions a remote machine.
+# which is how agent-board provisions a remote machine.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo .)"
 if [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
   UNINSTALL_HINT="$SCRIPT_DIR/uninstall.sh"
@@ -66,7 +66,7 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 # Run a step quietly; if it fails, die with $1 plus the end of what it printed.
 # A bare "installing ... failed" left nothing to act on when it happened on a
-# remote machine, since agents-control only ever sees this script's stderr.
+# remote machine, since agent-board only ever sees this script's stderr.
 quiet_or_die() {
   local what="$1" out
   shift

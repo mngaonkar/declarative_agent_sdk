@@ -5,6 +5,7 @@ import inspect
 from typing import Any, Dict, List, Callable, Optional
 from pathlib import Path
 from declarative_agent_sdk.core.agent_logging import get_logger
+from declarative_agent_sdk.core.board_env import board_env
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -166,8 +167,8 @@ class ToolRegistry:
 
     @classmethod
     def on_a_board(cls) -> bool:
-        """True when agents-control seeded this agent's .env with a board URL."""
-        return bool(os.environ.get("AGENTS_CONTROL_URL"))
+        """True when agent-board seeded this agent's .env with a board URL."""
+        return bool(board_env("URL"))
 
     @classmethod
     def core_tool_names(cls) -> List[str]:

@@ -1,11 +1,11 @@
-# agents-control UI — design spec
+# agent-board UI — design spec
 
 A single page, plain JavaScript, no build step. Served from
-`agents_control/static/` by the server (AC-SERVER-11).
+`agent_board/static/` by the server (AC-SERVER-11).
 
-Code: `agents_control/static/`.
+Code: `agent_board/static/`.
 
-## `agents_control/static/index.html`
+## `agent_board/static/index.html`
 
 **Does:** the page skeleton: the sidebar (views, channels, agents), one pane
 per view (Board, Agents, Machines, Logs, Settings), the modal, and form
@@ -21,7 +21,7 @@ templates.
   provider, model, approval, SDK source) and the relay and timing settings
   (AC-STORE-5).
 
-## `agents_control/static/app.js`
+## `agent_board/static/app.js`
 
 **Does:** all UI behaviour: loads `/api/state`, listens to `/api/events`
 (SSE), and renders each view.
@@ -84,13 +84,13 @@ templates.
   last 50 MB.
 - AC-UI-LOGS-4: An agent row's Logs button opens this tab on that agent.
 
-## `agents_control/static/app.css`
+## `agent_board/static/app.css`
 
 **Does:** the styles. Dark theme with colour tokens on `:root`; layout is a
 sidebar plus one pane. Agent colours use the `--agent-color` variable set per
 element (AC-UI-COLOR-1).
 
-## `agents_control/static/md.js`
+## `agent_board/static/md.js`
 
 **Does:** `AgentMarkdown.render(text, document, opts)`, a minimal Markdown →
 DOM renderer for messages: headings, fenced code, lists, quotes, tables,
@@ -103,6 +103,6 @@ emphasis, inline code, links and `@mentions`.
 - AC-UI-MD-2: `opts.onMention` and `opts.onLink` may return a node to draw a
   mention or link their own way (the colour tint, the file chip).
 
-## `agents_control/static/md.test.cjs`
+## `agent_board/static/md.test.cjs`
 
 **Does:** Node tests for `md.js` (`node --test`).

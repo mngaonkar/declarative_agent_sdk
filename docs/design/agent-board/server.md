@@ -1,8 +1,8 @@
-# agents-control server — design spec
+# agent-board server — design spec
 
-Code: `agents_control/server.py`.
+Code: `agent_board/server.py`.
 
-## `agents_control/server.py`
+## `agent_board/server.py`
 
 **Does:** `ControlPlane` wires the store, machine driver, router, metrics
 sampler and logbook into one Starlette app (`create_app`): a JSON API, an SSE
@@ -29,6 +29,9 @@ stream and the static UI.
   an IP or hostname, before anything runs on the machine.
 - AC-SERVER-5: An agent's tools default to none extra; core tools come from
   the runtime (TOOLS-REG-3).
+- AC-SERVER-12: The SDK source for a create or reinstall is the request's,
+  else the default setting. `local` on a control plane installed as a package
+  becomes `git`, with a warning in the log, instead of failing.
 - AC-SERVER-6: A bind address must belong to the machine. Wildcards
   (`0.0.0.0`, `::`), loopback and hostnames are allowed through; an IP the
   machine does not have is refused with the machine's real addresses. The
@@ -95,5 +98,5 @@ stream and the static UI.
 | POST | `/api/peer/log` | record an agent-to-agent exchange |
 | GET | `/api/events` | SSE stream of board events |
 
-**Tests:** `tests/test_agents_control.py`, `tests/test_control_logs.py`,
+**Tests:** `tests/test_agent_board.py`, `tests/test_board_logs.py`,
 `tests/test_bind_address.py`.

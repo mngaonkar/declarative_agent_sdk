@@ -1,9 +1,9 @@
-# agents-control support modules — design spec
+# agent-board support modules — design spec
 
-Code: `agents_control/config.py`, `agents_control/catalog.py`,
-`agents_control/metrics.py`, `agents_control/logbook.py`.
+Code: `agent_board/config.py`, `agent_board/catalog.py`,
+`agent_board/metrics.py`, `agent_board/logbook.py`.
 
-## `agents_control/config.py`
+## `agent_board/config.py`
 
 **Does:** reads, validates and rewrites an installed agent's `agent.yaml` for
 the Settings dialog.
@@ -27,9 +27,9 @@ the Settings dialog.
 - AC-CONFIG-4: `runtime_of` normalises framework names to lean / adk /
   deepagent.
 
-**Tests:** `tests/test_agents_control.py`.
+**Tests:** `tests/test_agent_board.py`.
 
-## `agents_control/catalog.py`
+## `agent_board/catalog.py`
 
 **Does:** what a provider offers, for the create-agent form.
 
@@ -42,7 +42,7 @@ the Settings dialog.
   (embeddings, audio, images) are filtered out; the list is sorted and
   de-duplicated.
 
-## `agents_control/metrics.py`
+## `agent_board/metrics.py`
 
 **Does:** reads what the model server behind each agent is doing, for the
 "Model servers" cards on the Agents tab.
@@ -60,7 +60,7 @@ the Settings dialog.
 - AC-METRICS-4: `contexts_for` asks every agent `GET /context` for its history
   size, in parallel.
 
-## `agents_control/logbook.py`
+## `agent_board/logbook.py`
 
 **Does:** the control plane's own log, kept where the UI can show it.
 
@@ -79,4 +79,4 @@ the Settings dialog.
   file handler per folder.
 - AC-LOG-5: `tail_lines(text, n)` bounds long command output in log lines.
 
-**Tests:** `tests/test_control_logs.py`.
+**Tests:** `tests/test_board_logs.py`.

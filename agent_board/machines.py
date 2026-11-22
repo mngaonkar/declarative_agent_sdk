@@ -32,7 +32,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from declarative_agent_sdk.core.agent_logging import get_logger
-from declarative_agent_sdk.agents_control.logbook import tail_lines
+from declarative_agent_sdk.core.board_env import board_env
+from declarative_agent_sdk.agent_board.logbook import tail_lines
 
 logger = get_logger(__name__)
 
@@ -43,7 +44,7 @@ logger = get_logger(__name__)
 # be handed a path beginning with a literal "~" and refuse to start. $HOME does
 # expand inside double quotes, which also keeps a home directory with a space
 # in it intact.
-REMOTE_HOME = "$HOME/.agents-control"
+REMOTE_HOME = "$HOME/.agent-board"
 REMOTE_BIN = f"{REMOTE_HOME}/bin"
 
 # Reads or rewrites the three places an installed agent's address lives: HOST
@@ -164,7 +165,7 @@ PROVIDER_KEY_NAMES = {
 
 # Marker between the two files read in one round trip. Long and unlikely enough
 # that a config or an instruction file will not contain it.
-_SPLIT = "---agents-control-split-8f3a9c---"
+_SPLIT = "---agent-board-split-8f3a9c---"
 _IFACE_MARK = "---interfaces---"
 
 # Every address a peer could dial, with the interface it belongs to. `ip` on
@@ -216,11 +217,11 @@ def installer_paths() -> Dict[str, Path]:
     """
     Locate install.sh / uninstall.sh.
 
-    ``AGENTS_CONTROL_DEPLOY_DIR`` wins, so a deployment can point at a patched
+    ``AGENT_BOARD_DEPLOY_DIR`` wins, so a deployment can point at a patched
     pair; otherwise they come from this package (the repo root doubles as the
     package root, see ``[tool.setuptools.package-dir]``).
     """
-    override = os.environ.get("AGENTS_CONTROL_DEPLOY_DIR")
+    override = board_env("DEPLOY_DIR")
     base = Path(override).expanduser() if override else (
         Path(__file__).resolve().parents[1] / "packaging" / "deploy"
     )
@@ -229,7 +230,7 @@ def installer_paths() -> Dict[str, Path]:
     if missing:
         raise MachineError(
             "deploy scripts not found: " + ", ".join(missing)
-            + " — set AGENTS_CONTROL_DEPLOY_DIR to the directory holding "
+            + " — set AGENT_BOARD_DEPLOY_DIR to the directory holding "
               "install.sh and uninstall.sh"
         )
     return paths
@@ -374,7 +375,7 @@ class MachineDriver:
         }
 
     def push_scripts(self, machine: Dict[str, Any], force: bool = False) -> None:
-        """Stage install.sh / uninstall.sh under ~/.agents-control/bin."""
+        """Stage install.sh / uninstall.sh under ~/.agent-board/bin."""
         key = str(machine.get("id") or machine.get("name"))
         if key in self._pushed and not force:
             return
@@ -410,7 +411,7 @@ class MachineDriver:
         restricts the agent name to [a-z0-9_-], so nothing else needs escaping.
         """
         if self._is_local(machine):
-            directory = Path(os.path.expanduser("~")) / ".agents-control"
+            directory = Path(os.path.expanduser("~")) / ".agent-board"
             return f'"{directory}"', f'"{directory / ("env." + name)}"'
         return f'"{REMOTE_HOME}"', f'"{REMOTE_HOME}/env.{name}"'
 
@@ -427,7 +428,13 @@ class MachineDriver:
         the board and the agents are being worked on together.
         """
         root = Path(__file__).resolve().parents[1]
-        out = Path(os.path.expanduser("~")) / ".agents-control" / "wheels"
+        if not (root / "pyproject.toml").is_file():
+            raise MachineError(
+                "this control plane was installed as a package, so there is no "
+                "working tree to build a wheel from — create the agent with SDK "
+                "source 'git' instead"
+            )
+        out = Path(os.path.expanduser("~")) / ".agent-board" / "wheels"
         out.mkdir(parents=True, exist_ok=True)
 
         if force:
@@ -972,7 +979,7 @@ class MachineDriver:
         path = self._log_path(prefix, name, stream)
         lines = max(1, min(int(lines or 200), 5000))
         quoted = shlex.quote(path)
-        marker = "__AGENTS_CONTROL_NO_LOG__"
+        marker = "__AGENT_BOARD_NO_LOG__"
         out = self.run(
             machine,
             f"if [ -f {quoted} ]; then tail -n {lines} {quoted}; else echo {marker}; fi",
@@ -1008,7 +1015,7 @@ class MachineDriver:
         path = self._log_path(prefix, name, stream)
         quoted = shlex.quote(path)
         cap = self.LOG_DOWNLOAD_BYTES
-        marker = "__AGENTS_CONTROL_NO_LOG__"
+        marker = "__AGENT_BOARD_NO_LOG__"
         out = self.run(
             machine,
             f"if [ -f {quoted} ]; then wc -c < {quoted}; tail -c {cap} {quoted}; "

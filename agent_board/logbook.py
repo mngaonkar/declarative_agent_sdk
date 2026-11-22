@@ -1,13 +1,13 @@
 """
 The control plane's own log, kept where the board can show it.
 
-agents-control usually runs in a terminal nobody is looking at, so an install
+agent-board usually runs in a terminal nobody is looking at, so an install
 that fails on a remote machine left its reason in scrollback the board could
 not reach. Every record from this process now also goes to:
 
 * a ring buffer in memory, which ``/api/logs`` pages through by sequence
   number so the Logs tab can poll for only what is new, and
-* a rotating file beside the database (``~/.agents-control/logs/control.log``)
+* a rotating file beside the database (``~/.agent-board/logs/control.log``)
   that survives a restart.
 
 Both hang off the root logger, so the SDK's own modules, uvicorn's errors and

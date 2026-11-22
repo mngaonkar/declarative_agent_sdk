@@ -181,8 +181,8 @@ def test_read_shared_falls_back_to_the_board_relay(monkeypatch):
         return Fake(200, "relayed body")
 
     monkeypatch.setattr(module.httpx, "stream", stream)
-    monkeypatch.setenv("AGENTS_CONTROL_URL", "http://100.100.133.22:8900")
-    monkeypatch.setenv("AGENTS_CONTROL_TOKEN", "board-token")
+    monkeypatch.setenv("AGENT_BOARD_URL", "http://100.100.133.22:8900")
+    monkeypatch.setenv("AGENT_BOARD_TOKEN", "board-token")
     text = module.read_shared(LINK)
     assert "relayed body" in text
     url, params, headers = calls[1]
@@ -198,6 +198,6 @@ def test_read_shared_without_a_board_explains(monkeypatch):
         raise httpx.ConnectError("no route to host")
 
     monkeypatch.setattr(module.httpx, "stream", stream)
-    monkeypatch.delenv("AGENTS_CONTROL_URL", raising=False)
+    monkeypatch.delenv("AGENT_BOARD_URL", raising=False)
     out = module.read_shared(LINK)
     assert out.startswith("Error") and "no board" in out

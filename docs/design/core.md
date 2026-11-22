@@ -112,6 +112,19 @@ or a dict, choosing the runtime from `agent_framework`.
 
 **Interface:** `setup_logging`, `get_logger`, `set_log_level`, `reset_logging`.
 
+## `core/board_env.py`
+
+**Does:** reads the agent-board environment variables.
+
+**Rules:**
+
+- CORE-BENV-1: `board_env(name)` returns `AGENT_BOARD_<name>`, else the legacy
+  `AGENTS_CONTROL_<name>` (agent-board was called agents-control), else the
+  default. Every reader of the board's URL, token, timeout or deploy dir goes
+  through it, so agents installed under the old name keep working.
+
+**Interface:** `board_env(name, default="")`.
+
 ## `core/agent_registry.py`
 
 **Does:** `AgentRegistry`: a process-wide name → agent map, with categories

@@ -1,4 +1,4 @@
-/* agents-control board. Vanilla JS: fetch for commands, SSE for everything live. */
+/* agent-board board. Vanilla JS: fetch for commands, SSE for everything live. */
 
 const state = {
   machines: [], agents: [], channels: [], settings: {}, defaults: {},
@@ -19,7 +19,7 @@ const el = (tag, cls, text) => {
 };
 /*
  * The server revision this board needs. Kept in step with API_REVISION in
- * agents_control/__init__.py.
+ * agent_board/__init__.py.
  *
  * These can drift: this file is read from disk on every request, so a browser
  * always gets the current board, while the Python routes were loaded when the
@@ -60,7 +60,7 @@ async function api(path, options = {}) {
       throw new Error(
         `This control plane has no ${options.method || 'GET'} ${path} — it is ` +
         'running older code than this page. Restart the service ' +
-        '(declarative-agent control) and reload.');
+        '(declarative-agent board) and reload.');
     }
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -82,7 +82,7 @@ async function checkServerVersion() {
   }
   const revision = Number(health.api_revision || 0);
   $('#side-foot').title =
-    `agents-control ${health.version || '?'} · api ${revision} · up since ${health.started || '?'}`;
+    `agent-board ${health.version || '?'} · api ${revision} · up since ${health.started || '?'}`;
 
   if (revision > EXPECTS_API) {
     // The other way round: the server moved on while this tab kept the
@@ -102,7 +102,7 @@ async function checkServerVersion() {
     `${revision ? `api ${revision}` : 'older than api 1'}` +
     `${health.started ? ` (started ${new Date(health.started).toLocaleString()})` : ''}. ` +
     'Some screens will fail with 404 until you restart it: ' +
-    'declarative-agent control');
+    'declarative-agent board');
 }
 
 function showStale(text) {

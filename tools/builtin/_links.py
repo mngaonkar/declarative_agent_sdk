@@ -13,6 +13,7 @@ workspace. web_request is the tool for the open web.
 from __future__ import annotations
 
 import os
+from declarative_agent_sdk.core.board_env import board_env
 import re
 from typing import Dict, Optional, Tuple
 
@@ -56,11 +57,11 @@ def download(url: str, max_bytes: int = MAX_BYTES) -> Tuple[bytes, str]:
     try:
         return _get(url, max_bytes)
     except httpx.TransportError as direct:
-        board = (os.environ.get("AGENTS_CONTROL_URL") or "").rstrip("/")
+        board = (board_env("URL") or "").rstrip("/")
         if not board:
             raise LinkError(f"could not reach the owner ({type(direct).__name__}), "
                             "and this agent has no board to relay through") from direct
-        token = os.environ.get("AGENTS_CONTROL_TOKEN") or ""
+        token = board_env("TOKEN") or ""
         try:
             return _get(f"{board}/api/files/relay", max_bytes, params={"url": url},
                         headers={"Authorization": f"Bearer {token}"} if token else {})

@@ -1,6 +1,6 @@
 /*
- * Tests for md.js. Run directly:  node agents_control/static/md.test.cjs
- * (pytest also runs this, via tests/test_agents_control.py, when node exists.)
+ * Tests for md.js. Run directly:  node agent_board/static/md.test.cjs
+ * (pytest also runs this, via tests/test_agent_board.py, when node exists.)
  *
  * A DOM shim stands in for the browser so the renderer can be checked without
  * one; it serialises what was built, which is also how the XSS cases are

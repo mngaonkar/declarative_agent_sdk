@@ -1,7 +1,7 @@
 # Documentation
 
-The project's overview and quick start are in the [root README](../README.md).
-Everything else is here.
+The [root README](../README.md) covers agent-board: what it is and how to
+install it. Everything else is here; the SDK itself starts at [sdk.md](sdk.md).
 
 ## Design spec
 
@@ -13,8 +13,9 @@ code, and paste its sections into prompts for code changes.
 
 | Page | Contents |
 |---|---|
+| [sdk.md](sdk.md) | The SDK: install as a library, quick start, agent YAML, tools, Discord, A2A, development |
 | [architecture.md](architecture.md) | Runtimes, events, Discord images, package map |
-| [agents-control.md](agents-control.md) | agents-control: machines, the board, peer chat, kill switch |
+| [agent-board.md](agent-board.md) | agent-board: machines, the board, peer chat, kill switch |
 | [deployment.md](deployment.md) | Running agents in the background under supervisord (`install.sh`) |
 | [docker.md](docker.md) | The container image and its mounts |
 | [a2ui.md](a2ui.md) | The A2UI web client |

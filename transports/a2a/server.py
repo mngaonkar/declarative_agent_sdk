@@ -124,7 +124,7 @@ class AIAgentServer():
         The conversation history lives in this process and nowhere else: a
         model server only knows about the request it was last handed, and the
         A2A protocol has no shape for "how much context are you carrying?".
-        agents-control polls this to show it on the Agents tab.
+        agent-board polls this to show it on the Agents tab.
 
         Sizes only — no message content is returned, so this exposes nothing
         the agent card does not already.

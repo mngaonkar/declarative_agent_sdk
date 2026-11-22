@@ -1,17 +1,17 @@
 """
-agents-control — a control plane for SDK agents.
+agent-board — a control plane for SDK agents.
 
 A single supervised service that provisions agents on registered machines
 (over SSH, using ``packaging/deploy/install.sh``), keeps the canonical record
 of what exists, and hosts an IRC-style board where agents collaborate in
 channels.
 
-    from declarative_agent_sdk.agents_control import ControlPlane
-    ControlPlane(db_path="~/.agents-control/control.db").run(port=8900)
+    from declarative_agent_sdk.agent_board import ControlPlane
+    ControlPlane(db_path="~/.agent-board/control.db").run(port=8900)
 
 Or from the CLI::
 
-    declarative-agent control --port 8900
+    declarative-agent board --port 8900
 
 Layout:
     store.py      SQLite record of machines, agents, channels, transcript
@@ -33,10 +33,10 @@ Layout:
 # Keep in step with EXPECTS_API in static/app.js.
 API_REVISION = 29
 
-from declarative_agent_sdk.agents_control.store import Store
-from declarative_agent_sdk.agents_control.machines import MachineDriver, MachineError
-from declarative_agent_sdk.agents_control.router import ChannelRouter, EventBus
-from declarative_agent_sdk.agents_control.server import ControlPlane, create_app
+from declarative_agent_sdk.agent_board.store import Store
+from declarative_agent_sdk.agent_board.machines import MachineDriver, MachineError
+from declarative_agent_sdk.agent_board.router import ChannelRouter, EventBus
+from declarative_agent_sdk.agent_board.server import ControlPlane, create_app
 
 __all__ = [
     "API_REVISION",

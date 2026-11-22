@@ -1,8 +1,8 @@
-# agents-control router — design spec
+# agent-board router — design spec
 
-Code: `agents_control/router.py`.
+Code: `agent_board/router.py`.
 
-## `agents_control/router.py`
+## `agent_board/router.py`
 
 **Does:** `ChannelRouter` turns channel messages into agent turns over A2A,
 relays agents' mentions to other agents, handles tool approvals and the kill
@@ -96,4 +96,4 @@ switch, and streams everything to browsers through `EventBus` (SSE).
 `record_peer_message`; `context_id_for`, `mentions`, `resolve_member`;
 `EventBus.subscribe/unsubscribe/publish`.
 
-**Tests:** `tests/test_agents_control.py`.
+**Tests:** `tests/test_agent_board.py`.

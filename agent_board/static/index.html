@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agents-control</title>
+<title>agent-board</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛠️</text></svg>">
 <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -18,7 +18,7 @@
   <aside class="sidebar">
     <div class="brand">
       <span class="dot" id="conn-dot" title="stream status"></span>
-      <strong>agents-control</strong>
+      <strong>agent-board</strong>
     </div>
 
     <nav class="views">
@@ -268,8 +268,8 @@
     <label>SSH user <input name="ssh_user" placeholder="ubuntu"></label>
     <label>SSH key <input name="ssh_key" placeholder="~/.ssh/id_ed25519"></label>
     <label>SSH port <input name="ssh_port" type="number" value="22"></label>
-    <p class="note">The host needs <code>uv</code> and key-based SSH. agents-control
-       stages <code>install.sh</code> under <code>~/.agents-control/bin</code> and runs it there.</p>
+    <p class="note">The host needs <code>uv</code> and key-based SSH. agent-board
+       stages <code>install.sh</code> under <code>~/.agent-board/bin</code> and runs it there.</p>
     <div class="form-actions"><button class="btn primary" type="submit">Register</button></div>
   </form>
 </template>
@@ -341,7 +341,7 @@
 
 <template id="tpl-token-form">
   <form class="form">
-    <p class="note">This control plane requires a token (<code>AGENTS_CONTROL_TOKEN</code>).</p>
+    <p class="note">This control plane requires a token (<code>AGENT_BOARD_TOKEN</code>).</p>
     <label>Token <input name="token" type="password" required></label>
     <div class="form-actions"><button class="btn primary" type="submit">Unlock</button></div>
   </form>

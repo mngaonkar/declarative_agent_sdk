@@ -59,8 +59,8 @@ agent's `.env`:
 | `anthropic` | `ANTHROPIC_API_KEY` |
 | `vllm` | none needed (lean sends a placeholder) |
 
-Agents installed by the board also get `AGENTS_CONTROL_URL`,
-`AGENTS_CONTROL_TOKEN` and `AGENT_QUALIFIED_NAME` in `.env`, which turn on the
+Agents installed by the board also get `AGENT_BOARD_URL`,
+`AGENT_BOARD_TOKEN` and `AGENT_QUALIFIED_NAME` in `.env`, which turn on the
 board tools.
 
 ## Editing from the board

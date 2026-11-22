@@ -5,9 +5,9 @@ import logging
 import pytest
 from starlette.testclient import TestClient
 
-from declarative_agent_sdk.agents_control import logbook
-from declarative_agent_sdk.agents_control.machines import MachineDriver, MachineError
-from declarative_agent_sdk.agents_control.server import ControlPlane
+from declarative_agent_sdk.agent_board import logbook
+from declarative_agent_sdk.agent_board.machines import MachineDriver, MachineError
+from declarative_agent_sdk.agent_board.server import ControlPlane
 
 AUTH = {"Authorization": "Bearer t0ken"}
 
@@ -23,7 +23,7 @@ def client(plane) -> TestClient:
     return TestClient(plane.app)
 
 
-def _log(level, text, name="declarative_agent_sdk.agents_control.test"):
+def _log(level, text, name="declarative_agent_sdk.agent_board.test"):
     logging.getLogger(name).log(level, text)
 
 
@@ -229,7 +229,7 @@ class TestDownloads:
         reply = client.get("/api/logs/download", headers=AUTH)
         assert reply.status_code == 200
         assert reply.headers["content-disposition"].startswith(
-            'attachment; filename="agents-control-')
+            'attachment; filename="agent-board-')
         assert "download-me" in reply.text
 
     def test_control_log_needs_the_token(self, client):

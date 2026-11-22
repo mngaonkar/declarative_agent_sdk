@@ -40,7 +40,7 @@ from a2a.types import TaskState
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 from declarative_agent_sdk.transports.a2a.client import AIAgentClient
-from declarative_agent_sdk.agents_control.store import Store
+from declarative_agent_sdk.agent_board.store import Store
 
 logger = get_logger(__name__)
 

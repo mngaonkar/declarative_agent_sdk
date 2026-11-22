@@ -1,6 +1,6 @@
-# agents-control — design spec
+# agent-board — design spec
 
-agents-control ("the board") is one service that:
+agent-board ("the board") is one service that:
 
 1. keeps the record of machines, agents and channels (SQLite);
 2. installs, configures, restarts and removes agents on machines, over SSH or
@@ -10,17 +10,17 @@ agents-control ("the board") is one service that:
 4. serves a browser UI for all of the above, plus logs and model-server
    metrics.
 
-User guide: [../../agents-control.md](../../agents-control.md).
+User guide: [../../agent-board.md](../../agent-board.md).
 
 | File | Spec |
 |---|---|
-| `agents_control/__init__.py` | this page |
-| `agents_control/store.py` | [store.md](store.md) |
-| `agents_control/machines.py` | [machines.md](machines.md) |
-| `agents_control/router.py` | [router.md](router.md) |
-| `agents_control/server.py` | [server.md](server.md) |
-| `agents_control/config.py`, `catalog.py`, `metrics.py`, `logbook.py` | [support.md](support.md) |
-| `agents_control/static/*` | [ui.md](ui.md) |
+| `agent_board/__init__.py` | this page |
+| `agent_board/store.py` | [store.md](store.md) |
+| `agent_board/machines.py` | [machines.md](machines.md) |
+| `agent_board/router.py` | [router.md](router.md) |
+| `agent_board/server.py` | [server.md](server.md) |
+| `agent_board/config.py`, `catalog.py`, `metrics.py`, `logbook.py` | [support.md](support.md) |
+| `agent_board/static/*` | [ui.md](ui.md) |
 
 ## How the parts fit
 
@@ -36,21 +36,24 @@ agent ──send_to_agent / list_agents──> server.py /api/board/say, /api/pe
 
 - AC-1: Security posture: the board can run shell commands on every registered
   machine. It binds `127.0.0.1` by default and refuses any other bind without
-  `AGENTS_CONTROL_TOKEN`.
+  `AGENT_BOARD_TOKEN`.
 - AC-2: An agent is addressed as `<agent>.<machine>` (its *qualified* name).
   Names are unique per machine, not globally. A bare name works when only one
   agent has it.
 - AC-3: Agents never call each other directly. Every agent-to-agent message
   goes through the board, so it is in the transcript, the Stop button stops
   it, and a hop limit can apply (ROUTER-RELAY-1).
-- AC-4: Agents installed by the board get `AGENTS_CONTROL_URL`,
-  `AGENTS_CONTROL_TOKEN`, `AGENT_NAME` and `AGENT_QUALIFIED_NAME` in their
-  `.env`, which turns on the board tools (TOOLS-REG-3).
+- AC-4: Agents installed by the board get `AGENT_BOARD_URL`,
+  `AGENT_BOARD_TOKEN`, `AGENT_NAME` and `AGENT_QUALIFIED_NAME` in their
+  `.env`, which turns on the board tools (TOOLS-REG-3). The same values go
+  in under the old names `AGENTS_CONTROL_URL` / `AGENTS_CONTROL_TOKEN` too,
+  for agents running an SDK from before the rename; readers take either
+  (CORE-BENV-1).
 - AC-5: API keys are written only into an agent's `.env` and are never read
   back: the board asks only which variable names are set.
 - AC-6: The board never echoes secrets into logs or the UI.
 
-## `agents_control/__init__.py`
+## `agent_board/__init__.py`
 
 **Does:** the package entry: re-exports `Store`, `MachineDriver`,
 `MachineError`, `ChannelRouter`, `EventBus`, `ControlPlane`, `create_app`, and
@@ -62,4 +65,4 @@ sets `API_REVISION`.
   `EXPECTS_API` (`static/app.js`) must equal it; bump both whenever a route or
   field changes. The UI warns when the server runs older code than the page.
 
-**Tests:** `tests/test_agents_control.py` (the revision check).
+**Tests:** `tests/test_agent_board.py` (the revision check).

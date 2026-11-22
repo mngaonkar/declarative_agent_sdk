@@ -1,5 +1,5 @@
 """
-SQLite record for agents-control.
+SQLite record for agent-board.
 
 This is the control plane's own durable state, deliberately *not* AgentRegistry:
 that one is an in-memory, per-process map keyed on a bare agent name, so it
@@ -27,7 +27,25 @@ from declarative_agent_sdk.core.agent_logging import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_DB_PATH = "~/.agents-control/control.db"
+HOME_DIR = "~/.agent-board"
+# agent-board was called agents-control; a board set up then keeps its data
+# here, and is used where it is until it is moved.
+LEGACY_HOME_DIR = "~/.agents-control"
+DEFAULT_DB_PATH = HOME_DIR + "/control.db"
+
+
+def board_home() -> Path:
+    """~/.agent-board, or the legacy ~/.agents-control when only that holds a board."""
+    home = Path(HOME_DIR).expanduser()
+    legacy = Path(LEGACY_HOME_DIR).expanduser()
+    if not home.exists() and (legacy / "control.db").is_file():
+        return legacy
+    return home
+
+
+def default_db_path() -> str:
+    """Where the board's database is when no path is given."""
+    return str(board_home() / "control.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS machines (
@@ -101,16 +119,26 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
+def running_from_checkout() -> bool:
+    """
+    True when this code runs from a source checkout (pyproject.toml beside
+    the package), False when it was installed as a package — e.g. by the
+    one-line installer, which leaves no working tree to build a wheel from.
+    """
+    return (Path(__file__).resolve().parents[1] / "pyproject.toml").is_file()
+
+
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "default_framework": "lean",
     "default_provider": "openai",
     "default_model": "gpt-4o-mini",
     "default_approval": True,
     # "local" builds a wheel from the working tree this control plane runs and
-    # sends it; "git" installs from the repository. Local is the default
-    # because an agent created from unpushed code would otherwise run whatever
-    # happens to be on the branch, silently.
-    "default_sdk_source": "local",
+    # sends it; "git" installs from the repository. Local is the default in a
+    # checkout, because an agent created from unpushed code would otherwise
+    # run whatever happens to be on the branch, silently. An installed control
+    # plane has no working tree, so there it is git.
+    "default_sdk_source": "local" if running_from_checkout() else "git",
     # How long the board follows a turn. Dispatch submits and polls, so this is
     # a budget on the agent's work, not a limit on silence — and waiting for a
     # human approval does not spend it.
@@ -187,8 +215,8 @@ def _now() -> str:
 class Store:
     """Thin synchronous SQLite wrapper. One connection, guarded by a lock."""
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH) -> None:
-        self.path = Path(db_path).expanduser()
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        self.path = Path(db_path or default_db_path()).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False: Starlette runs sync handlers in a threadpool.
         self._db = sqlite3.connect(str(self.path), check_same_thread=False)
@@ -201,7 +229,7 @@ class Store:
             self._db.commit()
         self._migrate()
         self._seed_settings()
-        logger.info(f"agents-control store at {self.path}")
+        logger.info(f"agent-board store at {self.path}")
 
     def _migrate(self) -> None:
         """Add columns introduced after a store was first created."""

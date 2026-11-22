@@ -1,5 +1,5 @@
 """
-send_to_agent — address another agent through the agents-control board.
+send_to_agent — address another agent through the agent-board board.
 
 The agent does **not** call its peer. It posts to the channel, and the board
 relays the message to whoever was named, exactly as if a human had typed it.
@@ -13,8 +13,8 @@ make the intent an explicit call than trust a mention to survive a rewrite.
 Routing through the board is what makes the transcript complete and the kill
 switch real: a halted channel simply does not relay.
 
-The agent learns where the board is from its own ``.env``, which agents-control
-seeds at install time (``AGENTS_CONTROL_URL``, ``AGENTS_CONTROL_TOKEN``,
+The agent learns where the board is from its own ``.env``, which agent-board
+seeds at install time (``AGENT_BOARD_URL``, ``AGENT_BOARD_TOKEN``,
 ``AGENT_NAME``, ``AGENT_QUALIFIED_NAME``).
 
 This is not a core tool. List it under ``tools:`` for agents that should be able
@@ -64,8 +64,8 @@ def send_to_agent(agent: str, message: str, channel: str = "") -> str:
     link = board()
     if not link.url:
         return (
-            "Error: this agent has no AGENTS_CONTROL_URL, so it has no board to "
-            "post to. It was not created by agents-control, or its .env was not "
+            "Error: this agent has no AGENT_BOARD_URL, so it has no board to "
+            "post to. It was not created by agent-board, or its .env was not "
             "seeded."
         )
 
