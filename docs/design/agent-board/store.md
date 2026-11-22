@@ -26,11 +26,13 @@ state.
 
 **Rules — behaviour:**
 
-- AC-STORE-11: With no path given the database is
-  `~/.agent-board/control.db`. When that folder does not exist and the old
-  `~/.agents-control/control.db` does (a board set up before the rename), the
-  old one is used where it is (`board_home`, `default_db_path`).
-
+- AC-STORE-11: With no path given, the database is `~/.agent-board/control.db`,
+  or `~/.agents-control/control.db` (a board set up before the rename) when
+  only that one exists (`board_home`, `default_db_path`). The choice is
+  made by where `control.db` is, never by which folder exists: the board
+  creates folders itself (wheels, staged `.env` files), which once switched a
+  board onto a new, empty database. The machine driver stages its files in
+  the same folder as the database (`board_home`).
 - AC-STORE-5: `settings()` returns the shipped defaults overlaid with stored
   values. `update_settings` ignores unknown keys. Defaults:
   `default_framework` lean, `default_provider` openai, `default_model`

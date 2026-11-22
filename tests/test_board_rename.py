@@ -58,12 +58,32 @@ class TestDataDir:
         (old / "control.db").write_text("")
         assert store_mod.default_db_path() == str(old / "control.db")
 
-    def test_the_new_dir_wins_once_it_exists(self, tmp_path, monkeypatch):
+    def test_the_new_dir_wins_once_it_holds_a_board(self, tmp_path, monkeypatch):
         new, old = self._homes(tmp_path, monkeypatch)
         old.mkdir()
         (old / "control.db").write_text("")
         new.mkdir()
+        (new / "control.db").write_text("")
         assert store_mod.board_home() == new
+
+    def test_a_new_dir_without_a_database_does_not_count(self, tmp_path, monkeypatch):
+        """The incident: the board built a wheel into ~/.agent-board/wheels, and the
+        next start opened a new, empty database there instead of the real one."""
+        new, old = self._homes(tmp_path, monkeypatch)
+        old.mkdir()
+        (old / "control.db").write_text("")
+        (new / "wheels").mkdir(parents=True)
+        assert store_mod.board_home() == old
+
+    def test_wheels_and_staged_env_go_beside_the_database(self, tmp_path, monkeypatch):
+        from declarative_agent_sdk.agent_board import machines
+        new, old = self._homes(tmp_path, monkeypatch)
+        old.mkdir()
+        (old / "control.db").write_text("")
+        directory, _ = machines.MachineDriver()._staged_env_path(
+            {"is_local": 1, "host": "localhost"}, "coder")
+        assert directory == f'"{old}"'
+        assert not new.exists()
 
 
 class TestCommand:

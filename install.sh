@@ -41,7 +41,8 @@ main() {
   local LEGACY_LABEL="com.declarative-agent.control"
   local LEGACY_UNIT="agents-control"
   # A board set up under the old name keeps using its data where it is.
-  if [ ! -e "$DATA_DIR" ] && [ -f "$HOME/.agents-control/control.db" ]; then
+  # Decided by the database, not the folder: the board creates folders.
+  if [ ! -f "$DATA_DIR/control.db" ] && [ -f "$HOME/.agents-control/control.db" ]; then
     DATA_DIR="$HOME/.agents-control"
   fi
 

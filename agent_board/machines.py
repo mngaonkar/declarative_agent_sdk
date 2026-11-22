@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 from declarative_agent_sdk.core.agent_logging import get_logger
 from declarative_agent_sdk.core.board_env import board_env
 from declarative_agent_sdk.agent_board.logbook import tail_lines
+from declarative_agent_sdk.agent_board.store import board_home
 
 logger = get_logger(__name__)
 
@@ -415,7 +416,7 @@ class MachineDriver:
         restricts the agent name to [a-z0-9_-], so nothing else needs escaping.
         """
         if self._is_local(machine):
-            directory = Path(os.path.expanduser("~")) / ".agent-board"
+            directory = board_home()
             return f'"{directory}"', f'"{directory / ("env." + name)}"'
         return f'"{REMOTE_HOME}"', f'"{REMOTE_HOME}/env.{name}"'
 
@@ -438,7 +439,7 @@ class MachineDriver:
                 "working tree to build a wheel from — create the agent with SDK "
                 "source 'git' instead"
             )
-        out = Path(os.path.expanduser("~")) / ".agent-board" / "wheels"
+        out = board_home() / "wheels"
         out.mkdir(parents=True, exist_ok=True)
 
         if force:

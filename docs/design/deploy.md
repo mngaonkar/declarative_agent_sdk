@@ -37,7 +37,8 @@ confused with `packaging/deploy/install.sh`, which installs one agent.
 - DEPLOY-CTL-9: The service runs `declarative-agent board`. A service left
   under the old names (`com.declarative-agent.control`, `agents-control`) is
   removed on install and on uninstall, since it would hold the same port. A
-  board whose data is only in `~/.agents-control` keeps using it.
+  board whose database is only in `~/.agents-control` keeps using it — decided
+  by where `control.db` is, not by which folder exists (AC-STORE-11).
 - DEPLOY-CTL-7: `--uninstall` removes the service and the uv tool and keeps
   `~/.agent-board` (the board's data).
 - DEPLOY-CTL-8: `--dry-run` prints every step and changes nothing, not even
