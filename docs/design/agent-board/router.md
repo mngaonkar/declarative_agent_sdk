@@ -45,7 +45,10 @@ switch, and streams everything to browsers through `EventBus` (SSE).
   (core tools plus its extra `tools:`), says its tools act on that machine,
   says that hostnames and `user@host` are not agents, and gives the link form
   for its files (`<agent url>files/<path>` with an example). It says to read
-  another agent's link with `read_shared` and to keep one with `write_link`.
+  another agent's link with `read_shared` and to keep one with `write_link`,
+  and that to show a file it should save it under `workspace/` and link it:
+  the board previews links, `attachments/` is not served, and `[[attach:…]]`
+  works only on Discord.
 - ROUTER-PROMPT-3: The agent is told to mention someone only when it needs
   them, since every mention costs a model call.
 
