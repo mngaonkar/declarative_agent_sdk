@@ -4,7 +4,7 @@ const state = {
   machines: [], agents: [], channels: [], settings: {}, defaults: {},
   channelId: null, messages: [], members: [], halted: false, autoApprove: '',
   typing: new Set(), approvals: new Map(), lastId: 0, needsAuth: false,
-  contexts: {}, providers: { endpoints: {}, listable: [] },
+  contexts: {}, mcp: {}, providers: { endpoints: {}, listable: [] },
   // Agent (qualified name) → channel ids it is taking a turn in, across all
   // channels — the sidebar shows activity everywhere, not just the open one.
   working: new Map(),
@@ -864,9 +864,9 @@ function renderAgents() {
   const table = $('#agents-table');
   table.innerHTML = '';
   table.append(headRow(
-    ['Agent (name.machine)', 'Machine', 'Runtime', 'Context', 'URL', 'State', '']));
+    ['Agent (name.machine)', 'Machine', 'Runtime', 'Context', 'MCP', 'URL', 'State', '']));
   if (!state.agents.length) {
-    table.append(emptyRow(7, 'No agents. Register a machine, then create one.'));
+    table.append(emptyRow(8, 'No agents. Register a machine, then create one.'));
     return;
   }
   state.agents.forEach((agent) => {
@@ -874,6 +874,7 @@ function renderAgents() {
     row.append(tint(cell(fqn(agent), 'mono agent-name'), agent), cell(agent.machine_name));
     row.append(cell(`${agent.framework} · ${agent.provider} · ${agent.model || '—'}`));
     row.append(contextCell(state.contexts[String(agent.id)]));
+    row.append(mcpCell(state.mcp[String(agent.id)]));
     const url = el('td', 'mono');
     if (agent.url) {
       const link = el('a', '', agent.url);
@@ -960,6 +961,32 @@ const compact = (value) => {
  * the agent is carrying right now, which is knowable between requests, while
  * the card shows what one server was last handed.
  */
+/**
+ * An agent's MCP servers: one line each, connected with its tool count, or
+ * not with why. From the agent's /mcp route, read with the metrics poll.
+ */
+function mcpCell(report) {
+  const td = el('td');
+  const servers = report?.servers || [];
+  if (!servers.length) {
+    td.append(el('span', 'dim', '—'));
+    td.title = report?.error || "No MCP servers in this agent's agent.yaml.";
+    return td;
+  }
+  servers.forEach((server) => {
+    const line = el('div', 'mcp-server');
+    const ok = Boolean(server.connected);
+    line.append(el('span', `tag ${ok ? 'ok' : 'bad'}`, server.name));
+    const tools = server.tools || [];
+    line.append(el('span', 'note', ok ? ` ${tools.length} tool${tools.length === 1 ? '' : 's'}`
+                                      : ' not connected'));
+    line.title = [server.where, ok ? tools.join(', ') : server.error,
+                  `approval: ${server.approval}`].filter(Boolean).join('\n');
+    td.append(line);
+  });
+  return td;
+}
+
 function contextCell(report) {
   const td = el('td');
   if (!report || report.supported === false) {
@@ -1131,6 +1158,7 @@ async function pollServers() {
     const data = await api('/api/agents/metrics');
     serverFailures = 0;
     state.contexts = data.contexts || {};
+    state.mcp = data.mcp || {};
     renderServers(data.servers || []);
     renderAgents();            // the Context and Status columns come from this poll
     renderSidebar();           // and so do the sidebar's liveness pins
@@ -1560,9 +1588,9 @@ function openReinstall(agent) {
 function renderMachines() {
   const table = $('#machines-table');
   table.innerHTML = '';
-  table.append(headRow(['Machine', 'Target', 'OS', 'Addresses', 'Status', '']));
+  table.append(headRow(['Machine', 'Target', 'OS', 'Addresses', 'MCP runners', 'Status', '']));
   if (!state.machines.length) {
-    table.append(emptyRow(6, 'No machines. Register this one, or an SSH host.'));
+    table.append(emptyRow(7, 'No machines. Register this one, or an SSH host.'));
     return;
   }
   state.machines.forEach((machine) => {
@@ -1583,6 +1611,14 @@ function renderMachines() {
       });
     }
     row.append(addresses);
+
+    // What stdio MCP servers usually run through; a probe finds them.
+    const runners = el('td', 'mono');
+    const found = new Set(machine.runners || []);
+    ['npx', 'uvx'].forEach((name) => runners.append(
+      el('div', found.has(name) ? '' : 'dim', `${found.has(name) ? '✓' : '✗'} ${name}`)));
+    runners.title = 'npx and uvx run most stdio MCP servers. Test the machine to re-check.';
+    row.append(runners);
 
     const status = el('td');
     const kind = machine.status === 'ready' ? 'ok' : machine.status === 'unknown' ? '' : 'warn';

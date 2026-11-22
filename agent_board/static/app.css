@@ -491,3 +491,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 /* On the accent-filled selection, a light hue would vanish; keep it dark. */
 .mention-pop li.sel .name.tinted { color: #06121f; opacity: 1; }
 td.agent-name.tinted { font-weight: 600; }
+
+/* An agent's MCP servers on the Agents tab. */
+.mcp-server { white-space: nowrap; }
+.mcp-server + .mcp-server { margin-top: 2px; }

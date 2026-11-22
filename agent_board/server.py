@@ -376,7 +376,8 @@ def create_app(cp: "ControlPlane") -> Starlette:
         await in_thread(
             store.set_machine_status, int(machine["id"]),
             "ready" if probe.get("uv") else "no-uv",
-            probe.get("error", ""), probe.get("os", ""), probe.get("interfaces"))
+            probe.get("error", ""), probe.get("os", ""), probe.get("interfaces"),
+            probe.get("runners"))
         return [str(i.get("address") or "") for i in probe.get("interfaces") or []]
 
     async def bind_problem(machine: Dict[str, Any], host: str) -> Optional[str]:
@@ -515,6 +516,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
             store.set_machine_status, int(machine["id"]),
             "ready" if probe["ok"] and probe["uv"] else ("unreachable" if not probe["ok"] else "no-uv"),
             probe.get("error", ""), probe.get("os", ""), probe.get("interfaces"),
+            probe.get("runners"),
         )
         if probe["ok"]:
             try:
@@ -535,6 +537,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
             store.set_machine_status, int(machine["id"]),
             "ready" if probe["ok"] and probe["uv"] else ("unreachable" if not probe["ok"] else "no-uv"),
             probe.get("error", ""), probe.get("os", ""), probe.get("interfaces"),
+            probe.get("runners"),
         )
         bus.publish({"type": "machines"})
         return JSONResponse({"probe": probe, "machine": store.machine(int(machine["id"]))})
@@ -557,6 +560,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
                 store.set_machine_status, int(machine["id"]),
                 "ready" if probe["uv"] else "no-uv",
                 probe.get("error", ""), probe.get("os", ""), probe.get("interfaces"),
+            probe.get("runners"),
             )
             bus.publish({"type": "machines"})
         return JSONResponse({
@@ -963,7 +967,10 @@ def create_app(cp: "ControlPlane") -> Starlette:
         # Two different questions, so two different sources: the agent knows
         # how much history it prefixes to a request, the server knows what it
         # did with the one it received.
-        contexts = await model_metrics.contexts_for(agents)
+        contexts, mcps = await asyncio.gather(
+            model_metrics.contexts_for(agents), model_metrics.mcps_for(agents))
+        # The router reads this for prompts and the 'safe' level (MCP-BOARD-2/3).
+        router.remember_mcp(mcps)
         groups: Dict[str, Any] = {}
         for agent in agents:
             endpoint = str(agent.get("endpoint") or "")
@@ -998,6 +1005,8 @@ def create_app(cp: "ControlPlane") -> Starlette:
             # Flat, keyed by agent id, so the agents table can show a context
             # column without walking the grouping.
             "contexts": {str(k): v for k, v in contexts.items()},
+            # Each agent's MCP servers, keyed by agent id (MCP-BOARD-1).
+            "mcp": {str(k): v for k, v in mcps.items()},
         })
 
     @guard

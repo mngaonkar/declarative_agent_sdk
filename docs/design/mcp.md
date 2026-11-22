@@ -1,8 +1,7 @@
 # MCP tools — design spec
 
-**Status:** phases 1 and 2 built — the hub, config, results and all three
-runtimes (see Phases). The board parts are still planned: those rules are
-marked *(planned)*. A file not written yet stays under a `###`
+**Status:** phases 1–3 built — the hub, config, results, all three runtimes
+and the board (see Phases). What is left is marked *(later)*. A file not written yet stays under a `###`
 heading; once written, its heading becomes `` ## `path` `` so
 `tests/test_design_spec.py` checks it.
 
@@ -139,8 +138,10 @@ them down. Owns the background event loop.
   error naming the timeout.
 - MCP-LIFE-4: The hub closes every session and stops every stdio process when
   the agent shuts down, and on interpreter exit.
-- MCP-LIFE-5: `status()` reports each server: connected or not, tool count,
-  last error, when it connected. The A2A server serves it (MCP-BOARD-1).
+- MCP-LIFE-5: `status()` reports each server: connected or not, its tools,
+  last error, when it connected, its approval setting, and `tool_hints`
+  (per exposed name: `read_only`, `destructive`, `needs_approval`). The A2A
+  server serves it as `GET /mcp` (MCP-BOARD-1).
 - MCP-LIFE-6: A closed connection (the client's `CONNECTION_CLOSED` error)
   counts as the link failing (MCP-LIFE-2); any other `MCPError` is the
   server's answer to the call and is returned as the tool's error.
@@ -228,17 +229,28 @@ taken) -> (tools, auto-approve names)`.
 - `packaging/deploy/install.sh`: installs the SDK with the `mcp` extra, so a
   board-made agent can use servers without a reinstall.
 
-## agent-board *(planned, phase 3)*
+## agent-board
 
-- MCP-BOARD-1: The Agents tab shows each agent's MCP servers from its `/mcp`
-  route: connected or the last error, and the tool count.
-- MCP-BOARD-2: The prompt's tool list (`_self_block`, ROUTER-PROMPT-2)
-  includes MCP tools, grouped by server, so agents know what peers can do.
-- MCP-BOARD-3: The channel's `safe` auto-approve level approves MCP tools
-  marked `readOnlyHint`, and never approves ones marked `destructiveHint`.
-- MCP-BOARD-4: Probing a machine reports whether `npx` and `uvx` are on it,
-  since most stdio servers run through one of them.
-- MCP-BOARD-5 (later): an "Add MCP server" form in the agent's Settings, with
+- MCP-BOARD-1: The board's agent poll (`/api/agents/metrics`, while the page
+  is open) also reads each agent's `/mcp` (AC-METRICS-5) and returns it as
+  `mcp` keyed by agent id. The Agents tab's MCP column shows each server:
+  connected with its tool count, or not connected, with the address, the
+  tools or the error, and the approval setting on hover.
+- MCP-BOARD-2: The router keeps the last `/mcp` reading per agent (an agent
+  that could not be read keeps its last one). An agent's own prompt names its
+  connected MCP servers and their tools, at most 12 per server then "+N
+  more" (ROUTER-PROMPT-2); the roster shows `· MCP: <servers>` after each
+  peer that has any (ROUTER-PROMPT-1). An agent the poll has not read yet has
+  no MCP lines.
+- MCP-BOARD-3: The channel's `safe` level (ROUTER-APPR-2), for an MCP tool of
+  that agent's: one marked destructive and not read-only goes to a person
+  (never auto-approved, never auto-denied); a read-only one, or one with no
+  hints, is approved like any other non-shell tool. `all` approves
+  everything. The hints come from `/mcp` (`tool_hints`, MCP-LIFE-5).
+- MCP-BOARD-4: Probing a machine also looks for `npx` and `uvx`, which run
+  most stdio servers, and stores what it found (`runners`, AC-STORE-1). The
+  Machines tab shows each with ✓ or ✗.
+- MCP-BOARD-5 *(later)*: an "Add MCP server" form in the agent's Settings, with
   presets, writing `mcp_servers` into `agent.yaml` and any token into `.env`
   by name (AC-5: values are never read back).
 
@@ -258,6 +270,8 @@ the token in the agent's `.env`.
 
 ## Tests
 
+- `tests/test_board_mcp.py`: reading `/mcp`, the metrics poll, prompts and
+  roster, the `safe` level with hints, and `npx` / `uvx` probing and storage.
 - `tests/mcp_server_fixture.py`: a tiny MCP server (echo, add, an image, a
   destructive tool, a slow one, one that fails, one that kills the process)
   run over stdio, or streamable HTTP behind a token, so tests need no
@@ -275,7 +289,7 @@ the token in the agent's `.env`.
    and the tests above. The default runtime and the board are then usable.
    *Built.*
 2. **ADK and deepagent adapters** (MCP-RT-2, MCP-RT-3). *Built.*
-3. **Board:** MCP-BOARD-1..4.
+3. **Board:** MCP-BOARD-1..4. *Built.*
 4. **Later:** MCP resources (read like `read_shared`), MCP prompts (offered
    like skills), OAuth for remote servers, tool search for servers with very
    many tools, the Settings form (MCP-BOARD-5).

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS machines (
     agents_root TEXT NOT NULL DEFAULT '',
     os_kind     TEXT NOT NULL DEFAULT '',
     interfaces  TEXT NOT NULL DEFAULT '[]',
+    runners     TEXT NOT NULL DEFAULT '[]',
     status      TEXT NOT NULL DEFAULT 'unknown',
     last_error  TEXT NOT NULL DEFAULT '',
     created     TEXT NOT NULL
@@ -165,13 +166,14 @@ QUALIFIED = "a.name || '.' || m.name AS qualified"
 
 
 def _decode_interfaces(row: Dict[str, Any]) -> Dict[str, Any]:
-    """interfaces is stored as JSON text; callers want the list."""
-    raw = row.get("interfaces")
-    if isinstance(raw, str):
-        try:
-            row["interfaces"] = json.loads(raw or "[]")
-        except json.JSONDecodeError:
-            row["interfaces"] = []
+    """interfaces and runners are stored as JSON text; callers want the lists."""
+    for column in ("interfaces", "runners"):
+        raw = row.get(column)
+        if isinstance(raw, str):
+            try:
+                row[column] = json.loads(raw or "[]")
+            except json.JSONDecodeError:
+                row[column] = []
     return row
 
 
@@ -250,7 +252,9 @@ class Store:
                 logger.info(f"store: added channels.{column}")
 
         machine_columns = {row["name"] for row in self._rows("PRAGMA table_info(machines)")}
-        for column, ddl in (("interfaces", "TEXT NOT NULL DEFAULT '[]'"),):
+        for column, ddl in (("interfaces", "TEXT NOT NULL DEFAULT '[]'"),
+                            # npx / uvx found by the last probe (MCP-BOARD-4).
+                            ("runners", "TEXT NOT NULL DEFAULT '[]'")):
             if column not in machine_columns:
                 self._write(f"ALTER TABLE machines ADD COLUMN {column} {ddl}")
                 logger.info(f"store: added machines.{column}")
@@ -345,16 +349,17 @@ class Store:
         error: str = "",
         os_kind: str = "",
         interfaces: Optional[List[Dict[str, str]]] = None,
+        runners: Optional[List[str]] = None,
     ) -> None:
+        listed = None if interfaces is None else json.dumps(interfaces)
+        found = None if runners is None else json.dumps(runners)
         self._write(
             "UPDATE machines SET status = ?, last_error = ?, "
             "os_kind = CASE WHEN ? = '' THEN os_kind ELSE ? END, "
-            "interfaces = CASE WHEN ? IS NULL THEN interfaces ELSE ? END "
+            "interfaces = CASE WHEN ? IS NULL THEN interfaces ELSE ? END, "
+            "runners = CASE WHEN ? IS NULL THEN runners ELSE ? END "
             "WHERE id = ?",
-            (status, error, os_kind, os_kind,
-             None if interfaces is None else json.dumps(interfaces),
-             None if interfaces is None else json.dumps(interfaces),
-             machine_id),
+            (status, error, os_kind, os_kind, listed, listed, found, found, machine_id),
         )
 
     def delete_machine(self, machine_id: int) -> None:

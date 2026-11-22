@@ -89,7 +89,7 @@ stream and the static UI.
 | GET | `/api/agents/{id}/models` | models the agent's endpoint serves |
 | POST | `/api/agents/{id}/action` | `start` / `stop` / `restart` / `status` |
 | POST | `/api/agents/{id}/clear-context` | ROUTER-CTX-2 |
-| GET | `/api/agents/metrics` | model-server metrics and agent context sizes |
+| GET | `/api/agents/metrics` | model-server metrics, agent context sizes and MCP servers |
 | GET | `/api/agents/{id}/logs`, `/logs/download` | AC-SERVER-10 |
 | POST | `/api/models` | list a provider's models for the create form |
 | GET | `/api/files/relay` | AC-SERVER-8 |

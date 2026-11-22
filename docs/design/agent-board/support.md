@@ -59,6 +59,9 @@ the Settings dialog.
   last measured rate is shown, marked as held.
 - AC-METRICS-4: `contexts_for` asks every agent `GET /context` for its history
   size, in parallel.
+- AC-METRICS-5: `mcps_for` asks every agent `GET /mcp` for its MCP servers, in
+  parallel with AC-METRICS-4. A stopped agent, or one installed before MCP
+  (no route), is `supported: false` with no servers and the reason.
 
 ## `agent_board/logbook.py`
 

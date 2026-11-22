@@ -369,6 +369,49 @@ async def agent_context(
     return data
 
 
+async def agent_mcp(
+    client: httpx.AsyncClient, url: str, timeout: float = DEFAULT_TIMEOUT
+) -> Dict[str, Any]:
+    """
+    One agent's MCP servers, from its ``/mcp`` route (MCP-LIFE-5).
+
+    An agent installed before MCP support has no route; that is reported as
+    such, with no servers, rather than as a failure.
+    """
+    root = (url or "").strip().rstrip("/")
+    if not root:
+        return {"supported": False, "servers": [], "error": "no address for this agent"}
+    try:
+        response = await client.get(f"{root}/mcp", timeout=timeout)
+    except Exception as exc:      # noqa: BLE001 — a stopped agent is a result
+        return {"supported": False, "servers": [], "error": f"{type(exc).__name__}: {exc}"}
+    if response.status_code == 404:
+        return {"supported": False, "servers": [],
+                "error": "no /mcp route — reinstall this agent for MCP support"}
+    try:
+        data = response.json()
+    except Exception:             # noqa: BLE001
+        return {"supported": False, "servers": [],
+                "error": f"unreadable reply ({response.status_code})"}
+    servers = data.get("servers") if isinstance(data, dict) else None
+    return {"supported": True, "servers": servers if isinstance(servers, list) else []}
+
+
+async def mcps_for(
+    agents: List[Dict[str, Any]], timeout: float = DEFAULT_TIMEOUT
+) -> Dict[int, Dict[str, Any]]:
+    """Read every agent's MCP servers at once, keyed by agent id."""
+    import asyncio
+
+    if not agents:
+        return {}
+    async with httpx.AsyncClient() as client:
+        reports = await asyncio.gather(*(
+            agent_mcp(client, str(agent.get("url") or ""), timeout) for agent in agents
+        ))
+    return {int(agent["id"]): report for agent, report in zip(agents, reports)}
+
+
 async def contexts_for(
     agents: List[Dict[str, Any]], timeout: float = DEFAULT_TIMEOUT
 ) -> Dict[int, Dict[str, Any]]:

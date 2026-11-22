@@ -25,7 +25,8 @@ supervisord. A thin wrapper over [install.sh](../deploy.md).
 
 - AC-MACH-4: `probe` checks reachability, `uv`, the OS, and lists the
   machine's addresses (interfaces), which the create form offers and the bind
-  check uses (AC-SERVER-6).
+  check uses (AC-SERVER-6). It also reports which of `npx` and `uvx` are on
+  the machine (`runners`, MCP-BOARD-4).
 
 **Rules — installing:**
 

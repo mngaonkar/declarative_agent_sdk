@@ -11,8 +11,9 @@ state.
 **Rules — tables:**
 
 - AC-STORE-1: `machines`: name (unique), host, SSH user/key/port, `is_local`,
-  agents root, OS, status, last error, and `interfaces` (JSON list of
-  `{name, address, family, note}`, returned decoded).
+  agents root, OS, status, last error, `interfaces` (JSON list of
+  `{name, address, family, note}`, returned decoded) and `runners` (JSON list
+  of the MCP runners found, `npx` / `uvx`, returned decoded).
 - AC-STORE-2: `agents`: machine, name (unique per machine), URL, agent card,
   port, framework, provider, model, tools, description, `ready`, problems,
   install `prefix`, model `endpoint`, `context_epoch`.
@@ -45,7 +46,8 @@ state.
 - AC-STORE-7: `agent_by_qualified` matches `<agent>.<machine>`
   case-insensitively.
 - AC-STORE-8: Auto-approve levels per channel: `''` ask every time, `safe`
-  approve everything except shell tools, `all` approve everything.
+  approve everything except shell tools and destructive MCP tools
+  (ROUTER-APPR-2), `all` approve everything.
 - AC-STORE-9: `bump_channel_context` / `bump_agent_context` add 1 to a
   counter that is part of the conversation id (ROUTER-CTX-1), which is how
   "clear" starts a fresh conversation.

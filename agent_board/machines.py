@@ -340,17 +340,20 @@ class MachineDriver:
                 # uses ~/.local/bin, which an SSH command's PATH usually lacks.
                 'PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin"; '
                 "uname -s; command -v uv >/dev/null 2>&1 && echo uv-ok || echo uv-missing; "
+                # What most stdio MCP servers run through (MCP-BOARD-4).
+                "for r in npx uvx; do command -v $r >/dev/null 2>&1 && echo runner-$r; done; "
                 f"echo {_IFACE_MARK}; {_LIST_INTERFACES}",
                 timeout=30,
             )
         except MachineError as exc:
-            return {"ok": False, "os": "", "uv": False, "interfaces": [],
+            return {"ok": False, "os": "", "uv": False, "interfaces": [], "runners": None,
                     "error": exc.detail()}
 
         head, _, iface_block = out.partition(_IFACE_MARK)
         lines = [line.strip() for line in head.splitlines() if line.strip()]
         os_kind = lines[0] if lines else ""
         has_uv = "uv-ok" in lines
+        runners = [line[len("runner-"):] for line in lines if line.startswith("runner-")]
         interfaces = _parse_interfaces(iface_block)
 
         # If the listing came back empty or missed it, the address this driver
@@ -368,6 +371,7 @@ class MachineDriver:
             "os": os_kind,
             "uv": has_uv,
             "interfaces": interfaces,
+            "runners": runners,
             "error": "" if has_uv else (
                 "uv is not installed on this machine — install.sh requires it "
                 "(https://astral.sh/uv); pip cannot resolve the SDK's dependencies"

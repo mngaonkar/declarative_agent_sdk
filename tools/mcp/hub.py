@@ -192,6 +192,9 @@ class McpHub:
             "where": s.config.describe(),
             "connected": s.session is not None,
             "tools": [t.remote_name for t in s.tools],
+            # Per exposed name, what the board's 'safe' level needs (MCP-BOARD-3).
+            "tool_hints": {t.name: {"read_only": t.read_only, "destructive": t.destructive,
+                                    "needs_approval": t.needs_approval} for t in s.tools},
             "error": s.error,
             "connected_at": s.connected_at,
             "approval": s.config.approval,

@@ -198,6 +198,31 @@ class ChannelRouter:
         # first one ending must not show the agent idle.
         self._turns: Dict[Tuple[str, int], int] = {}
         self._failure_hint = ""
+        # agent id → its MCP servers, as last read from its /mcp route by the
+        # board's agent poll (MCP-BOARD-2/3). An agent not read yet has none.
+        self.mcp: Dict[int, List[Dict[str, Any]]] = {}
+
+    # ------------------------------------------------------------------ mcp
+
+    def remember_mcp(self, reports: Dict[int, Dict[str, Any]]) -> None:
+        """Keep what each agent's /mcp said; an unreachable agent keeps its last."""
+        for agent_id, report in reports.items():
+            if report.get("supported"):
+                self.mcp[int(agent_id)] = list(report.get("servers") or [])
+
+    def _mcp_servers(self, agent: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not agent.get("id"):
+            return []
+        return [s for s in self.mcp.get(int(agent["id"]), []) if s.get("connected")]
+
+    def _mcp_hints(self, agent_name: str, tool: str) -> Optional[Dict[str, Any]]:
+        """read_only / destructive for one of an agent's MCP tools, when known."""
+        agent = self.store.agent_by_qualified(agent_name) or {}
+        for server in self._mcp_servers(agent):
+            hints = (server.get("tool_hints") or {}).get(tool)
+            if hints is not None:
+                return hints
+        return None
 
     # ------------------------------------------------------------ messaging
 
@@ -382,6 +407,19 @@ class ChannelRouter:
             "@mentions are only for the agents listed above — a hostname or "
             "user@host is not an agent, and the board will not deliver to it."
         )
+        servers = self._mcp_servers(agent)
+        if servers:
+            # The tools above are only the board's view; MCP tools come from
+            # the agent's own servers, so name them too (MCP-BOARD-2).
+            listed = []
+            for server in servers:
+                names = [str(t) for t in server.get("tools") or []]
+                shown = ", ".join(names[:12]) + (f", +{len(names) - 12} more"
+                                                 if len(names) > 12 else "")
+                listed.append(f"{server.get('name')} ({shown})" if names
+                              else str(server.get("name")))
+            text += (" You also have MCP tools, named <server>__<tool>: "
+                     + "; ".join(listed) + ".")
         # Other agents cannot open your workspace, but they can fetch from it
         # by link. Say what this agent's links look like, so it can write one
         # instead of pasting a file.
@@ -411,6 +449,9 @@ class ChannelRouter:
             detail = member.get("description") or ""
             model = member.get("model") or member.get("framework") or ""
             suffix = f" — {detail}" if detail else (f" ({model})" if model else "")
+            servers = self._mcp_servers(member)
+            if servers:
+                suffix += " · MCP: " + ", ".join(str(s.get("name")) for s in servers)
             if not member.get("ready"):
                 suffix += " [not ready]"
             lines.append(f"  @{qualified}{suffix}")
@@ -792,7 +833,15 @@ class ChannelRouter:
         if level == "all":
             return True
         if level == "safe":
-            return approval.tool not in SHELL_TOOLS
+            if approval.tool in SHELL_TOOLS:
+                return False
+            # An MCP tool's own hints (MCP-BOARD-3): a destructive one always
+            # goes to a person; a read-only one, or one with no hints, is
+            # approved like any other non-shell tool.
+            hints = self._mcp_hints(approval.agent, approval.tool)
+            if hints and hints.get("destructive") and not hints.get("read_only"):
+                return None
+            return True
         return None
 
     async def _await_decision(

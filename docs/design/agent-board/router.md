@@ -70,8 +70,12 @@ switch, and streams everything to browsers through `EventBus` (SSE).
   a `PendingApproval` shown in the channel with the tool and its arguments.
   The answer is sent back to the same task and the turn continues.
 - ROUTER-APPR-2: Channel auto-approve: `safe` approves everything except shell
-  tools (`exec_command`, `exec_async`, `check_exec_async`, `run_script`);
-  `all` approves everything. Auto-approvals are posted in the channel.
+  tools (`exec_command`, `exec_async`, `check_exec_async`, `run_script`),
+  which it denies, and destructive MCP tools, which it leaves to a person
+  (MCP-BOARD-3); `all` approves everything. Auto-approvals are posted in the
+  channel.
+- ROUTER-MCP-1: `remember_mcp` keeps each agent's last `/mcp` reading, used
+  for prompts and the `safe` level (MCP-BOARD-2, MCP-BOARD-3).
 - ROUTER-APPR-3: No answer within `approval_timeout_seconds` (default 300)
   denies the call, and the channel is told.
 

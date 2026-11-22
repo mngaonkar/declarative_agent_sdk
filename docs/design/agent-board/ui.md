@@ -82,6 +82,10 @@ templates.
   polled only while the tab is open.
 - AC-UI-AGENTS-2: Reinstall reports when the address was repaired
   (AC-SERVER-7).
+- AC-UI-AGENTS-3: An MCP column shows each agent's MCP servers (MCP-BOARD-1);
+  `—` when it has none or could not be read, with the reason on hover.
+- AC-UI-MACH-1: The Machines tab shows, per machine, whether `npx` and `uvx`
+  were found by the last probe (MCP-BOARD-4).
 
 **Rules — Logs:**
 

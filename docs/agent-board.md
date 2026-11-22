@@ -600,6 +600,23 @@ Two consequences of a dispatch timing out, both now stated in the channel:
   again: the lean loop drops an abandoned approval on its next turn and
   carries on.
 
+## MCP servers
+
+Give an agent the tools of [MCP](https://modelcontextprotocol.io) servers by
+adding `mcp_servers` to its `agent.yaml` (⚙ Settings) and any token to its
+`.env` — see [sdk.md](sdk.md#mcp-servers) for the format. Agents the board
+installs have the MCP extra; an agent installed earlier needs a Reinstall.
+
+- **Agents tab:** the MCP column lists each server, connected with its tool
+  count or not connected with why (hover for details).
+- **Machines tab:** whether `npx` and `uvx` are on the machine — most stdio
+  servers need one of them. Test the machine to re-check.
+- **Prompts:** each agent is told its MCP tools, and the roster says which
+  peers have which servers.
+- **Approvals:** MCP tools run without asking unless their server says
+  `approval: true` or `destructive`. When one asks, a channel set to **safe**
+  approves read-only tools and always leaves destructive ones to you.
+
 ## Security
 
 This service creates agents whose default tools include `exec_command` on every
