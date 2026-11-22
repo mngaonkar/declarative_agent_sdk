@@ -13,7 +13,8 @@ stream and the static UI.
 - AC-SERVER-1: Binding anything but loopback without a token is refused at
   start (AC-1). With a token, every route needs `Authorization: Bearer
   <token>` (or `?token=`), except `/`, `/index.html`, `/healthz` and
-  `/static/…`.
+  `/static/…`. The one other way in: a file ticket (AC-SERVER-13) opens
+  `GET /api/files/relay` for the single link it was made for.
 - AC-SERVER-2: Every handler goes through `guard`: auth, then errors mapped
   to answers — `MachineError` → 502 with the command's stderr as `detail`,
   `LookupError` → 404, `ValueError` → 400, anything else → 500 with the error
@@ -48,7 +49,15 @@ stream and the static UI.
   through for readers that cannot reach it (the UI, agents on other
   networks). The link must be `/files/<path>` with no `..`, empty or hidden
   parts, on a registered agent's address; the request goes to that agent's
-  recorded URL, never to the host the link names. Nothing is stored.
+  recorded URL, never to the host the link names. Nothing is stored. The
+  `Range` / `If-Range` headers go to the owner and `206`, `Content-Range` and
+  `Accept-Ranges` come back, so a media element can stream and seek.
+- AC-SERVER-13: `POST /api/files/ticket {url}` (needs the token) checks the
+  link as the relay would and returns a relay URL carrying a ticket instead
+  of the token: `<expiry>.<HMAC-SHA256(expiry, link)>`, valid for exactly
+  that link for an hour. The key is random per process, so a restart ends
+  every ticket. A `<video>` cannot send the Authorization header, and the
+  board token never goes in a URL.
 
 **Rules — logs:**
 
@@ -84,6 +93,7 @@ stream and the static UI.
 | GET | `/api/agents/{id}/logs`, `/logs/download` | AC-SERVER-10 |
 | POST | `/api/models` | list a provider's models for the create form |
 | GET | `/api/files/relay` | AC-SERVER-8 |
+| POST | `/api/files/ticket` | AC-SERVER-13 |
 | POST | `/api/channels` | create a channel |
 | DELETE | `/api/channels/{id}` | delete a channel |
 | POST | `/api/channels/{id}/clear` | ROUTER-CTX-2 |
@@ -99,4 +109,4 @@ stream and the static UI.
 | GET | `/api/events` | SSE stream of board events |
 
 **Tests:** `tests/test_agent_board.py`, `tests/test_board_logs.py`,
-`tests/test_bind_address.py`.
+`tests/test_bind_address.py`, `tests/test_file_tickets.py`.

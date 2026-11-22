@@ -26,7 +26,7 @@ const el = (tag, cls, text) => {
  * process started. Edit the tree without restarting and the new board asks the
  * old server for routes it does not have — which it answers with a bare 404.
  */
-const EXPECTS_API = 29;
+const EXPECTS_API = 30;
 
 /** An agent's address on the board. The bare name is unique only per machine. */
 const fqn = (agent) => agent.qualified || `${agent.name}.${agent.machine_name}`;
@@ -532,7 +532,160 @@ function sharedFileChip(href) {
   chip.append(el('span', 'meta', `@${fqn(owner)}`));
   chip.title = href;
   chip.onclick = () => previewShared(href);
-  return chip;
+  const wrap = el('span', 'file-link');
+  const box = el('span', 'file-thumb');
+  if (IMAGE_PATH.test(name)) {
+    // An image gets a thumbnail under the chip, fetched once it scrolls into view.
+    box.append(el('span', 'note', 'loading preview…'));
+    whenVisible(box, () => showThumb(box, href));
+  } else if (VIDEO_PATH.test(name)) {
+    // A video can be large, so it loads only when asked to.
+    const play = el('button', 'btn small play', '▶ Play video');
+    play.type = 'button';
+    play.onclick = () => showVideo(box, href);
+    box.append(play);
+  } else {
+    return chip;
+  }
+  wrap.append(chip, box);
+  return wrap;
+}
+
+// Raster images only: an SVG is a document, and nothing here needs one.
+const IMAGE_PATH = /\.(png|jpe?g|gif|webp|bmp|avif)$/i;
+const VIDEO_PATH = /\.(mp4|m4v|webm|ogv|mov)$/i;
+const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+// href → Promise<{url, size} | {skip: reason}>. Messages are re-rendered when
+// the board reloads a channel; a file is fetched once per page.
+const media = new Map();
+
+function relayFetch(href, signal) {
+  const headers = token.get() ? { Authorization: `Bearer ${token.get()}` } : {};
+  return fetch(`/api/files/relay?url=${encodeURIComponent(href)}`, { headers, signal });
+}
+
+const isImage = (kind) => /^image\//i.test(kind) && !/svg/i.test(kind);
+
+/**
+ * Fetch a file through the relay as a blob URL, when it is the expected kind
+ * (`accept(contentType)`) and no larger than `maxBytes`.
+ */
+function loadMedia(href, accept, maxBytes) {
+  if (media.has(href)) return media.get(href);
+  const job = (async () => {
+    const stop = new AbortController();
+    const response = await relayFetch(href, stop.signal);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      media.delete(href);              // the agent may be back later
+      return { skip: body.error || `${response.status} ${response.statusText}` };
+    }
+    const kind = (response.headers.get('content-type') || '').split(';')[0];
+    const length = Number(response.headers.get('content-length') || 0);
+    if (!accept(kind)) {
+      stop.abort();
+      return { skip: `cannot show ${kind || 'an unknown type'} here` };
+    }
+    if (length > maxBytes) {
+      stop.abort();
+      return { skip: `${compact(length)} bytes — use the chip to download it` };
+    }
+    const blob = await response.blob();
+    if (blob.size > maxBytes) return { skip: `${compact(blob.size)} bytes — use the chip to download it` };
+    return { url: URL.createObjectURL(blob), size: blob.size };
+  })().catch((error) => {
+    media.delete(href);
+    return { skip: `could not load: ${error.message}` };
+  });
+  media.set(href, job);
+  return job;
+}
+
+async function showThumb(box, href) {
+  const result = await loadMedia(href, isImage, IMAGE_MAX_BYTES);
+  box.replaceChildren();
+  if (result.skip) {
+    box.append(el('span', 'note', `no preview: ${result.skip}`));
+    return;
+  }
+  const img = el('img');
+  img.src = result.url;
+  img.alt = decodeURIComponent(href.split('/files/')[1] || 'image');
+  img.loading = 'lazy';
+  img.title = `${compact(result.size)} bytes — click to enlarge`;
+  img.onclick = () => previewShared(href);
+  box.append(img);
+}
+
+/*
+ * A <video> fetches its own URL and cannot send the Authorization header, so
+ * the board hands out a ticket for this one link and the player streams the
+ * relay with it — byte ranges, so it starts at once and can seek. The ticket
+ * opens this file for an hour and nothing else; the board token never goes
+ * in a URL.
+ */
+async function streamSrc(href) {
+  const answer = await api('/api/files/ticket', {
+    method: 'POST', body: JSON.stringify({ url: href }),
+  });
+  return answer.src;
+}
+
+async function showVideo(box, href) {
+  box.replaceChildren(el('span', 'note', 'starting video…'));
+  let src;
+  try {
+    src = await streamSrc(href);
+  } catch (error) {
+    box.replaceChildren(el('span', 'note', `no preview: ${error.message}`));
+    return;
+  }
+  const video = videoPlayer(src);
+  video.autoplay = true;
+  box.replaceChildren(video);
+}
+
+function videoPlayer(url) {
+  const video = el('video', 'file-video');
+  video.src = url;
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = 'metadata';
+  // A .mov in Chrome, say: the file arrived, the browser cannot decode it.
+  video.onerror = () => video.replaceWith(
+    el('span', 'note', 'this browser cannot play this video format — download it from the chip'));
+  return video;
+}
+
+async function previewVideo(href, path) {
+  let src;
+  try {
+    src = await streamSrc(href);
+  } catch (error) {
+    toast(`Video: ${error.message}`, true);
+    return;
+  }
+  const name = path.split('/').pop();
+  const wrap = el('div', 'file-preview');
+  const head = el('div', 'file-head');
+  head.append(el('span', 'note', `${name} · streamed through the board`));
+  const save = el('a', 'btn small', 'Download');
+  save.href = src;                     // the ticket covers a download too
+  save.download = name;
+  head.append(save);
+  wrap.append(head, videoPlayer(src));
+  openModal(`📎 ${name}`, wrap);
+}
+
+function whenVisible(node, run) {
+  if (!('IntersectionObserver' in window)) { run(); return; }
+  const watch = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) {
+      watch.disconnect();
+      run();
+    }
+  }, { rootMargin: '200px' });
+  watch.observe(node);
 }
 
 /*
@@ -541,6 +694,13 @@ function sharedFileChip(href) {
  * to the whole board for whoever it is passed to.
  */
 async function previewShared(href) {
+  let path = href.split('/files/')[1] || '';
+  try { path = decodeURIComponent(path); } catch { /* keep it encoded */ }
+  if (VIDEO_PATH.test(path)) {
+    // Streamed, not downloaded first: a video can be gigabytes.
+    previewVideo(href, path);
+    return;
+  }
   const headers = token.get() ? { Authorization: `Bearer ${token.get()}` } : {};
   let response;
   try {
@@ -572,7 +732,13 @@ async function previewShared(href) {
   wrap.append(head);
 
   const textual = /^(text\/|application\/(json|xml|yaml|x-yaml|javascript|toml))/i.test(kind);
-  if (!textual) {
+  const image = isImage(kind);
+  if (image) {
+    const img = el('img', 'file-image');
+    img.src = save.href;
+    img.alt = decodeURIComponent(name);
+    wrap.append(img);
+  } else if (!textual) {
     wrap.append(el('p', 'note', 'Not a text file — download it to open.'));
   } else if (blob.size > 2 * 1024 * 1024) {
     wrap.append(el('p', 'note', 'Too large to preview here — download it instead.'));

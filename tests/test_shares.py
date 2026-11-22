@@ -101,6 +101,14 @@ class TestRoute:
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["content-disposition"].startswith("inline")
 
+    def test_answers_byte_ranges(self, served):
+        """A video streams by ranges, which the board's relay passes through."""
+        response = served.get("/files/report.md", headers={"Range": "bytes=2-9"})
+        assert response.status_code == 206
+        assert response.text == "findings"
+        assert response.headers["content-range"] == "bytes 2-9/20"
+        assert response.headers["accept-ranges"] == "bytes"
+
     def test_serves_nested_and_encoded_paths(self, served):
         assert served.get("/files/notes/day%201.md").text == "first day\n"
 
