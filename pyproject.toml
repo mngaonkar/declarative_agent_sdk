@@ -61,6 +61,7 @@ dependencies = [
     "fastapi>=0.135.0",
     "starlette>=0.52.0",
     "sse-starlette>=3.0.0",
+    "uvicorn>=0.34",
     # Utilities
     "jsonschema>=4.25.0",
     "rich>=14.0.0",
@@ -134,14 +135,14 @@ packages = [
     "declarative_agent_sdk.transports.a2a",
     "declarative_agent_sdk.transports.a2a.formatters",
     "declarative_agent_sdk.workflows",
-    "declarative_agent_sdk.agents_control",
+    "declarative_agent_sdk.agent_board",
 ]
 
 [tool.setuptools.package-data]
 # The board is served from disk at runtime, and the machine driver pushes the
 # deploy scripts to a target over SSH, so both ship inside the wheel.
 declarative_agent_sdk = ["packaging/deploy/*.sh"]
-"declarative_agent_sdk.agents_control" = ["static/*.html", "static/*.css", "static/*.js"]
+"declarative_agent_sdk.agent_board" = ["static/*.html", "static/*.css", "static/*.js"]
 
 [tool.setuptools.package-dir]
 declarative_agent_sdk = "."

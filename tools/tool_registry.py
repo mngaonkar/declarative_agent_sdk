@@ -5,6 +5,7 @@ import inspect
 from typing import Any, Dict, List, Callable, Optional
 from pathlib import Path
 from declarative_agent_sdk.core.agent_logging import get_logger
+from declarative_agent_sdk.core.board_env import board_env
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,17 +17,23 @@ class ToolRegistry:
     _tools: Dict[str, Any] = {}
     _builtins_registered: bool = False
 
-    # Tools every agent gets whether or not the YAML declares a `tools:` list.
-    # The lean runtime has its own (sandboxed) core set in LeanToolRegistry;
-    # these are the equivalents for the adk / deepagent runtimes.
-    CORE_TOOL_NAMES: tuple = ('read_file', 'write_file')
+    # Tools every agent gets whether or not the YAML declares a `tools:` list;
+    # `tools:` only ever gates non-core tools. The lean runtime has its own
+    # sandboxed read_file / write_file and bridges the rest of these in
+    # (LeanToolRegistry._register_shared_core); adk / deepagent take them all.
+    CORE_TOOL_NAMES: tuple = (
+        'read_file',
+        'write_file',
+        'web_request',
+        'exec_command',
+        'send_to_agent',
+        'read_shared',
+        'write_link',
+    )
 
-    # Talking to the board an agent belongs to. Core when there is a board —
-    # an agent that can be addressed with @name should be able to answer in
-    # kind without anyone listing a tool for it — and absent when there is
-    # not, because off a board these two can only report that there is no
-    # board, and every tool offered costs tokens on every request.
-    BOARD_TOOL_NAMES: tuple = ('send_to_agent', 'list_agents')
+    # Core only when on a board: off a board it can only report that there is
+    # no board, and every tool offered costs tokens on every request.
+    BOARD_TOOL_NAMES: tuple = ('list_agents',)
     
     @classmethod
     def register(cls, name: str, tool: Any) -> None:
@@ -160,8 +167,8 @@ class ToolRegistry:
 
     @classmethod
     def on_a_board(cls) -> bool:
-        """True when agents-control seeded this agent's .env with a board URL."""
-        return bool(os.environ.get("AGENTS_CONTROL_URL"))
+        """True when agent-board seeded this agent's .env with a board URL."""
+        return bool(board_env("URL"))
 
     @classmethod
     def core_tool_names(cls) -> List[str]:

@@ -423,6 +423,7 @@ class LangChainAIAgent(BaseAgent):
             create_kwargs["interrupt_on"] = resolved_interrupt_on
         self._graph = create_deep_agent(**create_kwargs)
 
+        self.workspace_directory = workspace_directory
         if workspace_directory and not os.path.exists(workspace_directory):
             try:
                 os.makedirs(workspace_directory)

@@ -120,6 +120,8 @@ class LeanAIAgent(BaseAgent):
 
         Path(workspace_directory).mkdir(parents=True, exist_ok=True)
         Path(skills_directory).mkdir(parents=True, exist_ok=True)
+        # Read by the A2A server: the files it serves at /files/<path>.
+        self.workspace_directory = workspace_directory
 
         self._skills = SkillRegistry(root=skills_directory)
         self._tools = LeanToolRegistry(
@@ -192,6 +194,33 @@ class LeanAIAgent(BaseAgent):
         sid = session_id or str(uuid.uuid4())
         async for ev in _drain(self._loop.run(query, sid)):
             yield _loop_event_to_agent_event(ev)
+
+    def context_report(self) -> Dict[str, Any]:
+        """
+        How big the prompt this agent prefixes to every request has grown.
+
+        Read over HTTP by agent-board, which cannot see it any other way:
+        the history lives in this process, and a model server only knows about
+        whichever request it was last handed.
+        """
+        report = self._loop.context_report()
+        report["agent"] = self.name
+        report["model"] = getattr(self._client, "model", "")
+        return report
+
+    def reset_context(self, session_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Forget a conversation, or all of them.
+
+        Called by agent-board's "clear conversation" / "clear context". The
+        board also starts a new session id, so this is about freeing what the
+        old one held rather than about the next turn starting clean.
+        """
+        if session_id:
+            known = session_id in self._loop._history or session_id in self._loop._pending
+            self._loop.reset(session_id)
+            return {"cleared": 1 if known else 0, "session": session_id}
+        return {"cleared": self._loop.reset_all(), "session": ""}
 
     async def tool_confirmation(
         self,

@@ -901,3 +901,166 @@ class TestMalformedToolCall:
             "workspace_directory": str(tmp_path / "w"),
         })
         assert agent._client.retry_malformed_tool_calls == 1
+
+
+class TestContextReport:
+    """
+    The size of what the agent prefixes to every request.
+
+    A model server can only report the request it was handed; the history that
+    makes that request big lives in this process, which is why the agent has to
+    answer for it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _workspace(self, tmp_path):
+        self.tmp_path = tmp_path
+
+    def _loop(self, **kwargs):
+        skills = SkillRegistry(root=str(self.tmp_path / "skills"))
+        (self.tmp_path / "skills").mkdir(exist_ok=True)
+        tools = LeanToolRegistry(skills, workspace=str(self.tmp_path / "ws"))
+        return LeanLoop(client=MagicMock(), tools=tools, skills=skills,
+                        instruction="be brief", **kwargs)
+
+    def test_a_fresh_agent_reports_its_system_prompt_only(self):
+        report = self._loop().context_report()
+        assert report["sessions"] == []
+        assert report["system_prompt_chars"] > 0
+
+    def test_history_is_measured_per_session(self):
+        loop = self._loop()
+        loop._history["a"] = [{"role": "user", "content": "x" * 400}]
+        loop._history["b"] = [{"role": "user", "content": "y" * 4000}]
+        report = loop.context_report()
+        # largest first, because that is the one a row should show
+        assert [s["session"] for s in report["sessions"]] == ["b", "a"]
+        assert report["sessions"][0]["chars"] == 4000
+        assert report["sessions"][0]["messages"] == 1
+
+    def test_tool_call_arguments_count_toward_the_prompt(self):
+        """
+        A write_file call carries the whole file in its arguments. Counting
+        only `content` would miss exactly the thing that makes history big.
+        """
+        loop = self._loop()
+        loop._history["s"] = [{
+            "role": "assistant", "content": "",
+            "tool_calls": [{"function": {"name": "write_file",
+                                         "arguments": "{\"content\": \"" + "z" * 5000 + "\"}"}}],
+        }]
+        assert loop.context_report()["sessions"][0]["chars"] > 5000
+
+    def test_the_prompt_includes_the_system_preamble(self):
+        loop = self._loop()
+        loop._history["s"] = [{"role": "user", "content": "x" * 100}]
+        session = loop.context_report()["sessions"][0]
+        assert session["prompt_chars"] == session["chars"] + loop.context_report()[
+            "system_prompt_chars"]
+
+    def test_elided_messages_are_counted(self):
+        """So a shrinking history is visibly the trimming, not lost work."""
+        from declarative_agent_sdk.agents.lean.runtime.loop import _elide_mark
+        loop = self._loop()
+        loop._history["s"] = [
+            {"role": "tool", "content": f"head {_elide_mark(9000)}"},
+            {"role": "tool", "content": "small"},
+        ]
+        assert loop.context_report()["sessions"][0]["elided_messages"] == 1
+
+    def test_the_limits_are_reported_with_the_sizes(self):
+        """A number without its limit does not say whether it is a problem."""
+        report = self._loop(history_limit=12, tool_payload_keep=2,
+                            tool_payload_max_chars=500).context_report()
+        assert report["history_limit"] == 12
+        assert report["tool_payload_keep"] == 2
+        assert report["tool_payload_max_chars"] == 500
+
+    def test_no_message_content_is_returned(self):
+        """Sizes are diagnostics; transcripts are not."""
+        loop = self._loop()
+        loop._history["s"] = [{"role": "user", "content": "the secret is swordfish"}]
+        import json as _json
+        assert "swordfish" not in _json.dumps(loop.context_report())
+
+
+class TestSilentFinish:
+    """
+    A turn that ends with only `[[decision:done]]` used to surface as the
+    literal string "(done)", which is indistinguishable from a crash, an empty
+    reply, and work that failed without saying so.
+    """
+
+    def _loop(self, tmp_path, client):
+        skills = SkillRegistry(root=str(tmp_path / "skills"))
+        (tmp_path / "skills").mkdir(exist_ok=True)
+        tools = LeanToolRegistry(skills, workspace=str(tmp_path / "ws"))
+        return LeanLoop(client=client, tools=tools, skills=skills,
+                        tools_approval_required=False)
+
+    def test_it_asks_once_for_the_answer(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.side_effect = [
+            {"role": "assistant", "content": "[[decision:done]]"},
+            {"role": "assistant",
+             "content": "The PDF is at workspace/paper.pdf. [[decision:done]]"},
+        ]
+        events = list(self._loop(tmp_path, client).run("make a pdf", "s"))
+        final = [e for e in events if e.kind == "final"]
+        assert len(final) == 1
+        assert "workspace/paper.pdf" in final[0].text
+        assert client.chat.call_count == 2
+
+    def test_the_nudge_explains_that_the_user_saw_nothing(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.side_effect = [
+            {"role": "assistant", "content": "[[decision:done]]"},
+            {"role": "assistant", "content": "Here it is. [[decision:done]]"},
+        ]
+        list(self._loop(tmp_path, client).run("go", "s"))
+        sent = client.chat.call_args_list[1].args[0]
+        assert any("user saw" in str(m.get("content", "")) for m in sent)
+
+    def test_a_second_empty_answer_names_what_ran(self, tmp_path: Path):
+        """So the user knows where to look instead of reading '(done)'."""
+        client = MagicMock()
+        client.chat.side_effect = [
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "1", "type": "function",
+                             "function": {"name": "list_dir",
+                                          "arguments": '{"path": "."}'}}]},
+            {"role": "assistant", "content": "[[decision:done]]"},
+            {"role": "assistant", "content": "[[decision:done]]"},
+        ]
+        events = list(self._loop(tmp_path, client).run("go", "s"))
+        final = [e for e in events if e.kind == "final"][-1]
+        assert "(done)" not in final.text
+        assert "list_dir" in final.text
+        assert "no final answer" in final.text
+
+    def test_with_no_tools_either_it_says_that(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.side_effect = [
+            {"role": "assistant", "content": "[[decision:done]]"},
+            {"role": "assistant", "content": "[[decision:done]]"},
+        ]
+        events = list(self._loop(tmp_path, client).run("go", "s"))
+        final = [e for e in events if e.kind == "final"][-1]
+        assert "without running any tools" in final.text
+
+    def test_an_ask_decision_is_left_alone(self, tmp_path: Path):
+        """'[[decision:ask]]' with no text already had a sensible answer."""
+        client = MagicMock()
+        client.chat.return_value = {"role": "assistant", "content": "[[decision:ask]]"}
+        events = list(self._loop(tmp_path, client).run("go", "s"))
+        final = [e for e in events if e.kind == "final"][-1]
+        assert final.text == "I need your help to proceed."
+        assert client.chat.call_count == 1
+
+    def test_a_normal_answer_is_untouched(self, tmp_path: Path):
+        client = MagicMock()
+        client.chat.return_value = {
+            "role": "assistant", "content": "All set. [[decision:done]]"}
+        events = list(self._loop(tmp_path, client).run("go", "s"))
+        assert [e for e in events if e.kind == "final"][-1].text.startswith("All set")
+        assert client.chat.call_count == 1

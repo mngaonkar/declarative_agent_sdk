@@ -30,7 +30,11 @@
 set -euo pipefail
 
 PYTHON_VERSION="3.14"          # pinned: several dependencies have no 3.15 wheels
-SERVICE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# A supervised agent gets this PATH and nothing else — a login shell's PATH is
+# not inherited. /Library/TeX/texbin is here because an agent asked to turn
+# Markdown into a PDF finds pandoc on the Homebrew prefix and then fails on a
+# missing pdflatex, which reads as "no toolchain installed".
+SERVICE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Library/TeX/texbin:/snap/bin:$HOME/.local/bin"
 
 REPO_URL="https://github.com/mngaonkar/declarative_agent_sdk"
 GIT_URL="git+${REPO_URL}.git"
@@ -46,7 +50,7 @@ BOOT_LABEL="com.declarative-agent.supervisor"
 BOOT_UNIT="declarative-agent-supervisor"
 
 # :-$0 keeps `set -u` happy when the script is piped (ssh ... 'bash -s' < install.sh),
-# which is how agents-control provisions a remote machine.
+# which is how agent-board provisions a remote machine.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo .)"
 if [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
   UNINSTALL_HINT="$SCRIPT_DIR/uninstall.sh"
@@ -60,33 +64,52 @@ info() { printf '%s\n' "$*" >&2; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Run a step quietly; if it fails, die with $1 plus the end of what it printed.
+# A bare "installing ... failed" left nothing to act on when it happened on a
+# remote machine, since agent-board only ever sees this script's stderr.
+quiet_or_die() {
+  local what="$1" out
+  shift
+  if ! out="$("$@" 2>&1)"; then
+    die "$what
+$(printf '%s\n' "$out" | tail -n 20 | sed 's/^/    /')"
+  fi
+}
+
 # --- platform --------------------------------------------------------------
 
 OS="$(uname -s)"
 IS_ROOT=0
 [ "$(id -u)" -eq 0 ] && IS_ROOT=1
 
+# One layout everywhere: /opt/declarative-agent as root, ~/.declarative-agent
+# otherwise, on Linux and macOS alike. Not ~/Library/Application Support (a
+# space in the path would need escaping in the plist, the unit and every
+# command that follows), and no longer $XDG_DATA_HOME on Linux, so a path seen
+# on one machine means the same thing on the next.
+#
+# Linux agents installed before that change live in
+# ${XDG_DATA_HOME:-~/.local/share}/declarative-agent. While that root exists
+# and the new one does not, keep using it: switching underneath it would hide
+# those agents from --list, from port allocation and from uninstall.sh, and
+# start a second supervisord beside the first. To move: uninstall those
+# agents, stop that supervisord, remove the old root, then reinstall.
+
 case "$OS" in
-  Linux)
-    if [ "$IS_ROOT" -eq 1 ]; then
-      AGENTS_ROOT="/opt/declarative-agent"
-    else
-      AGENTS_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/declarative-agent"
-    fi
-    ;;
-  Darwin)
-    if [ "$IS_ROOT" -eq 1 ]; then
-      AGENTS_ROOT="/opt/declarative-agent"
-    else
-      # Not ~/Library/Application Support: a space in the path would need
-      # escaping in the plist, the unit and every command that follows.
-      AGENTS_ROOT="$HOME/.declarative-agent"
-    fi
-    ;;
-  *)
-    die "unsupported platform: $OS (Linux and macOS only)"
-    ;;
+  Linux|Darwin) ;;
+  *) die "unsupported platform: $OS (Linux and macOS only)" ;;
 esac
+
+if [ "$IS_ROOT" -eq 1 ]; then
+  AGENTS_ROOT="/opt/declarative-agent"
+else
+  AGENTS_ROOT="$HOME/.declarative-agent"
+  LEGACY_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/declarative-agent"
+  if [ "$OS" = "Linux" ] && [ ! -d "$AGENTS_ROOT" ] && [ -d "$LEGACY_ROOT" ]; then
+    AGENTS_ROOT="$LEGACY_ROOT"
+    printf 'warning: %s\n' "using legacy agents root $LEGACY_ROOT (new installs use ~/.declarative-agent; to move, uninstall these agents, stop their supervisord, remove $LEGACY_ROOT and reinstall)" >&2
+  fi
+fi
 
 SUPERVISOR_HOME="$AGENTS_ROOT/$SUPERVISOR_DIRNAME"
 SUPERVISOR_VENV="$SUPERVISOR_HOME/.venv"
@@ -342,10 +365,10 @@ ensure_supervisor_installed() {
 
   if [ ! -x "$SUPERVISOR_VENV/bin/supervisord" ]; then
     info "  installing supervisord"
-    uv venv --python "$PYTHON_VERSION" "$SUPERVISOR_VENV" >/dev/null 2>&1 \
-      || die "could not create the supervisord venv at $SUPERVISOR_VENV"
-    uv pip install --python "$SUPERVISOR_VENV/bin/python" supervisor >/dev/null 2>&1 \
-      || die "could not install supervisor into $SUPERVISOR_VENV"
+    quiet_or_die "could not create the supervisord venv at $SUPERVISOR_VENV" \
+      uv venv --python "$PYTHON_VERSION" "$SUPERVISOR_VENV"
+    quiet_or_die "could not install supervisor into $SUPERVISOR_VENV" \
+      uv pip install --python "$SUPERVISOR_VENV/bin/python" supervisor
   fi
 
   [ -f "$SUPERVISOR_CONF" ] || { write_supervisor_conf; info "  wrote $SUPERVISOR_CONF"; }
@@ -361,40 +384,104 @@ wait_for_supervisor() {
   return 1
 }
 
+# systemd-logind with KillUserProcesses=yes (Manjaro, Fedora and others ship
+# it on) kills everything a session started when the session ends. This script
+# usually runs over SSH, so a supervisord daemonised from here would die,
+# agents and all, seconds after the install reports success. Asked of logind
+# itself, so a drop-in or a distro default is seen the same way as the file.
+session_reaps_processes() {
+  [ "$OS" = "Linux" ] && [ "$IS_ROOT" -eq 0 ] || return 1
+  command -v busctl >/dev/null 2>&1 || return 1
+  [ "$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+        org.freedesktop.login1.Manager KillUserProcesses 2>/dev/null)" = "b true" ]
+}
+
+linger_on() {
+  [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = "yes" ]
+}
+
+# Set when supervisord cannot be made to outlive this session; reported as a
+# problem so the board shows the agent as not ready instead of it vanishing.
+SUPERVISOR_PROBLEM=""
+
 ensure_supervisor() {
   ensure_supervisor_installed
+  supervisor_running && return 0
 
-  if ! supervisor_running; then
-    "$SUPERVISOR_VENV/bin/supervisord" -c "$SUPERVISOR_CONF" \
-      || die "supervisord failed to start; see $SUPERVISOR_HOME/supervisord.log"
-    wait_for_supervisor || die "supervisord started but its socket never appeared"
-    info "  started supervisord"
+  if session_reaps_processes; then
+    # Lingering keeps the user's systemd running with no session open, and a
+    # unit under it is outside the session, so the logout leaves it alone.
+    # Many polkit setups let a user enable their own; try before asking.
+    linger_on || loginctl --no-ask-password enable-linger "$(id -un)" >/dev/null 2>&1 || true
+    if linger_on && systemctl --user show-environment >/dev/null 2>&1; then
+      if systemctl --user cat "$BOOT_UNIT" >/dev/null 2>&1; then
+        systemctl --user start "$BOOT_UNIT" \
+          || die "could not start $BOOT_UNIT; see systemctl --user status $BOOT_UNIT"
+      else
+        # Transient: running now without opting into start-at-boot, which
+        # stays --enable-at-boot's decision.
+        systemd-run --user --unit "$BOOT_UNIT-run" --collect --quiet \
+          -p Restart=on-failure --setenv=PATH="$SERVICE_PATH" \
+          "$SUPERVISOR_VENV/bin/supervisord" -c "$SUPERVISOR_CONF" -n \
+          || die "systemd-run could not start supervisord"
+      fi
+      wait_for_supervisor || die "supervisord started but its socket never appeared"
+      info "  started supervisord as a systemd user unit (logind would kill it at logout otherwise)"
+      return 0
+    fi
+    SUPERVISOR_PROBLEM="supervisord will be killed when this SSH session ends (systemd-logind KillUserProcesses=yes, lingering off). Run once: sudo loginctl enable-linger $(id -un) — then install again."
+    warn "$SUPERVISOR_PROBLEM"
   fi
+
+  "$SUPERVISOR_VENV/bin/supervisord" -c "$SUPERVISOR_CONF" \
+    || die "supervisord failed to start; see $SUPERVISOR_HOME/supervisord.log"
+  wait_for_supervisor || die "supervisord started but its socket never appeared"
+  info "  started supervisord"
+}
+
+# Write $2 to file $1 unless it already holds exactly that. Returns 0 when the
+# file was (re)written, 1 when it was already current, so a repeat install can
+# tell "nothing changed" from "the service definition moved".
+write_if_changed() {
+  if [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]; then
+    return 1
+  fi
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' "$2" > "$1"
+  return 0
+}
+
+# Only one supervisord can hold the socket. Shut down one this script (or an
+# earlier install) started, so the boot service can own it instead of
+# crash-looping on "address already in use" behind KeepAlive/Restart=always.
+# Agents stop with it and come back when the service starts them.
+handover_supervisor() {
+  supervisor_running || return 0
+  info "  handing the running supervisord over to the boot service"
+  sctl shutdown >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    supervisor_running || break
+    sleep 0.5
+  done
 }
 
 # The single place a platform service is still involved: keeping supervisord
 # itself alive across reboots. One entry for the whole machine.
+#
+# Safe to run on every install: when supervisord already runs under an
+# unchanged boot service nothing is restarted, and when the boot service
+# cannot bring supervisord up it is started the ordinary way, so an agent is
+# never left down by trying to make it survive a reboot.
 enable_at_boot() {
   ensure_supervisor_installed
   local cmd="$SUPERVISOR_VENV/bin/supervisord -c $SUPERVISOR_CONF -n"
 
-  # Only one supervisord can hold the socket. If this script already started
-  # one, shut it down first and let the boot service own it, or the service
-  # crash-loops on "address already in use" behind KeepAlive/Restart=always.
-  # Agents stop with it and come back when the service starts them.
-  if supervisor_running; then
-    info "handing the running supervisord over to the boot service"
-    sctl shutdown >/dev/null 2>&1 || true
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      supervisor_running || break
-      sleep 0.5
-    done
-  fi
   if [ "$OS" = "Linux" ]; then
+    local sc unit content
     if [ "$IS_ROOT" -eq 1 ]; then
-      local unit="/etc/systemd/system/$BOOT_UNIT.service"
-      cat > "$unit" <<BOOTEOF
-[Unit]
+      sc="systemctl"
+      unit="/etc/systemd/system/$BOOT_UNIT.service"
+      content="[Unit]
 Description=supervisord for declarative-agent sub-agents
 After=network-online.target
 Wants=network-online.target
@@ -402,53 +489,66 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$SERVICE_USER
+Environment=PATH=$SERVICE_PATH
 ExecStart=$cmd
 Restart=always
 RestartSec=5s
 
 [Install]
-WantedBy=multi-user.target
-BOOTEOF
-      systemctl daemon-reload
-      systemctl enable "$BOOT_UNIT" >/dev/null
-      info "enabled $unit (system-wide)"
+WantedBy=multi-user.target"
     else
-      # A --user unit needs no root; lingering is what makes it start at boot
-      # rather than at login.
-      local dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-      mkdir -p "$dir"
-      cat > "$dir/$BOOT_UNIT.service" <<BOOTEOF
-[Unit]
+      # A user unit only starts at boot, and only outlives a logout, with
+      # lingering on; without it the unit would stop when the SSH session
+      # that installed it ends, taking the agents with it. Many polkit setups
+      # let a user enable their own lingering, so try before giving up.
+      linger_on || loginctl --no-ask-password enable-linger "$(id -un)" >/dev/null 2>&1 || true
+      if ! linger_on || ! systemctl --user show-environment >/dev/null 2>&1; then
+        warn "supervisord will not start at boot: lingering is off for $(id -un). Run once:
+         sudo loginctl enable-linger $(id -un)
+       then install again."
+        ensure_supervisor
+        return 0
+      fi
+      sc="systemctl --user"
+      unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$BOOT_UNIT.service"
+      content="[Unit]
 Description=supervisord for declarative-agent sub-agents
 
 [Service]
 Type=simple
+Environment=PATH=$SERVICE_PATH
 ExecStart=$cmd
 Restart=always
 RestartSec=5s
 
 [Install]
-WantedBy=default.target
-BOOTEOF
-      systemctl --user daemon-reload 2>/dev/null || true
-      systemctl --user enable "$BOOT_UNIT" >/dev/null 2>&1 || true
-      info "enabled $dir/$BOOT_UNIT.service (user scope)"
-      if command -v loginctl >/dev/null && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != "yes" ]; then
-        warn "user services only start at login until lingering is on:
-         sudo loginctl enable-linger $(id -un)"
-      fi
+WantedBy=default.target"
     fi
+
+    if write_if_changed "$unit" "$content"; then
+      $sc daemon-reload 2>/dev/null || true
+      info "  wrote $unit"
+    elif $sc is-active --quiet "$BOOT_UNIT" 2>/dev/null && supervisor_running; then
+      $sc enable "$BOOT_UNIT" >/dev/null 2>&1 || true
+      info "  supervisord already runs under $BOOT_UNIT (starts at boot)"
+      return 0
+    fi
+    $sc enable "$BOOT_UNIT" >/dev/null 2>&1 || warn "could not enable $BOOT_UNIT"
+    # Not active means whatever supervisord is running (a transient
+    # systemd-run unit, a plain daemon) is not the boot service's.
+    $sc is-active --quiet "$BOOT_UNIT" 2>/dev/null || handover_supervisor
+    $sc restart "$BOOT_UNIT" 2>/dev/null || warn "could not start $BOOT_UNIT"
   else
-    local plist
+    local plist domain content
     if [ "$IS_ROOT" -eq 1 ]; then
       plist="/Library/LaunchDaemons/$BOOT_LABEL.plist"
+      domain="system"
     else
       plist="$HOME/Library/LaunchAgents/$BOOT_LABEL.plist"
+      domain="gui/$(id -u)"
     fi
-    mkdir -p "$(dirname "$plist")"
-    cat > "$plist" <<BOOTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0">
+    content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<plist version=\"1.0\">
 <dict>
     <key>Label</key><string>$BOOT_LABEL</string>
     <key>ProgramArguments</key>
@@ -463,26 +563,28 @@ BOOTEOF
     <key>EnvironmentVariables</key>
     <dict><key>PATH</key><string>$SERVICE_PATH</string></dict>
 </dict>
-</plist>
-BOOTEOF
+</plist>"
+    if ! write_if_changed "$plist" "$content" \
+       && launchctl print "$domain/$BOOT_LABEL" >/dev/null 2>&1 && supervisor_running; then
+      info "  supervisord already runs under $BOOT_LABEL (starts at boot)"
+      return 0
+    fi
     chmod 644 "$plist"
     plutil -lint "$plist" >/dev/null || die "generated plist is not valid: $plist"
-    if [ "$IS_ROOT" -eq 1 ]; then
-      chown root:wheel "$plist"
-      launchctl bootout "system/$BOOT_LABEL" 2>/dev/null || true
-      launchctl bootstrap system "$plist" 2>/dev/null || true
-    else
-      launchctl bootout "gui/$(id -u)/$BOOT_LABEL" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || true
-      warn "a LaunchAgent stops at logout; run this as root for a LaunchDaemon that survives it"
-    fi
-    info "enabled $plist"
+    [ "$IS_ROOT" -eq 1 ] && chown root:wheel "$plist"
+    launchctl bootout "$domain/$BOOT_LABEL" 2>/dev/null || true
+    handover_supervisor
+    launchctl bootstrap "$domain" "$plist" 2>/dev/null || true
+    [ "$IS_ROOT" -eq 1 ] \
+      || warn "a LaunchAgent stops at logout; run this as root for a LaunchDaemon that survives it"
+    info "  enabled $plist"
   fi
 
   if wait_for_supervisor; then
-    info "supervisord is running under the boot service"
+    info "  supervisord is running under the boot service"
   else
-    warn "the boot service did not bring supervisord up; check $SUPERVISOR_HOME/supervisord.log"
+    warn "the boot service did not bring supervisord up (see $SUPERVISOR_HOME/supervisord.log); starting it directly"
+    ensure_supervisor
   fi
 }
 
@@ -548,6 +650,13 @@ fi
 if [ -n "$ENV_FILE" ]; then
   [ -f "$ENV_FILE" ] || die "--env-file not found: $ENV_FILE"
 fi
+
+# uv's own installer puts it in ~/.local/bin (older ones, ~/.cargo/bin), which
+# a non-interactive SSH command does not have on PATH: Ubuntu's ~/.bashrc
+# returns before adding it, and ~/.profile is read by login shells only. Look
+# there too, appended so a system uv still wins.
+PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin"
+export PATH
 
 command -v uv >/dev/null || die "uv is required but not on PATH.
   Arch: sudo pacman -S uv | Debian: sudo apt install uv | macOS: brew install uv
@@ -817,22 +926,59 @@ fi
 VENV="$PREFIX/.venv"
 if [ ! -x "$VENV/bin/python" ]; then
   # uv downloads the interpreter if the host has no 3.14.
-  uv venv --python "$PYTHON_VERSION" "$VENV" >/dev/null 2>&1 \
-    || die "could not create a python $PYTHON_VERSION venv at $VENV"
+  quiet_or_die "could not create a python $PYTHON_VERSION venv at $VENV" \
+    uv venv --python "$PYTHON_VERSION" "$VENV"
   info "  created venv on python $PYTHON_VERSION"
 fi
 
 PIP_FLAGS="--upgrade"
 [ "${FORCE_REINSTALL:-0}" -eq 1 ] && PIP_FLAGS="--upgrade --reinstall"
 # shellcheck disable=SC2086
-uv pip install --python "$VENV/bin/python" $PIP_FLAGS "$WHEEL_SPEC" >/dev/null 2>&1 \
-  || die "installing '$WHEEL_SPEC' failed"
+quiet_or_die "installing '$WHEEL_SPEC' failed" \
+  uv pip install --python "$VENV/bin/python" $PIP_FLAGS "$WHEEL_SPEC"
 SDK_VERSION="$("$VENV/bin/declarative-agent" version 2>/dev/null | awk '{print $2}')"
 info "  installed SDK ${SDK_VERSION:-unknown}"
 
 if [ "$IS_ROOT" -eq 1 ]; then
   chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PREFIX"
 fi
+
+# --- bind address ----------------------------------------------------------
+#
+# A server can only listen on an address this machine has. Given another
+# machine's, the agent starts, fails to bind and exits, and supervisord
+# retries it into BACKOFF: installed, "running" as far as the install could
+# tell, and never reachable. So try the bind here, where the reason can still
+# be reported. Port 0, so it does not matter what holds the agent's own port.
+
+case "$BIND_HOST" in
+  0.0.0.0|::|"") ;;
+  *)
+    if ! BIND_ERR="$("$VENV/bin/python" -c '
+import socket, sys
+host = sys.argv[1]
+try:
+    infos = socket.getaddrinfo(host, 0, type=socket.SOCK_STREAM)
+except socket.gaierror as exc:
+    sys.exit("cannot resolve %s: %s" % (host, exc))
+family, _, _, _, address = infos[0]
+s = socket.socket(family, socket.SOCK_STREAM)
+try:
+    s.bind(address)
+except OSError as exc:
+    sys.exit(exc.strerror or str(exc))
+finally:
+    s.close()
+' "$BIND_HOST" 2>&1)"; then
+      if [ "$OS" = "Linux" ]; then
+        HAVE="$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')"
+      else
+        HAVE="$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | tr '\n' ' ')"
+      fi
+      die "cannot bind --host $BIND_HOST on this machine ($BIND_ERR). Its addresses: ${HAVE:-unknown}. Use one of them, or 0.0.0.0 for all."
+    fi
+    ;;
+esac
 
 # --- advertised address ----------------------------------------------------
 #
@@ -968,7 +1114,19 @@ SERVICE_STATE="not-registered"
 PROGRAM_CONF="$SUPERVISOR_CONFD/$NAME.conf"
 
 if [ "$SERVICE_KIND" = "supervisor" ]; then
-  ensure_supervisor
+  # With --enable-at-boot supervisord is started by the boot service from the
+  # outset, rather than started here and then handed over (which would
+  # restart every agent on the machine on every install).
+  if [ "$ENABLE_AT_BOOT" -eq 1 ]; then
+    enable_at_boot
+  else
+    ensure_supervisor
+  fi
+  if [ -n "$SUPERVISOR_PROBLEM" ]; then
+    PROBLEMS="${PROBLEMS:+$PROBLEMS
+}$SUPERVISOR_PROBLEM"
+    READY=false
+  fi
 
   # `user=` only means anything when supervisord itself runs as root; setting
   # it otherwise makes supervisor refuse to start the program.
@@ -1021,11 +1179,25 @@ PROGEOF
     # program needs an explicit restart to pick up a rebuilt venv.
     sctl update >/dev/null 2>&1 || true
     sctl restart "$NAME" >/dev/null 2>&1 || sctl start "$NAME" >/dev/null 2>&1 || true
-    SERVICE_STATE="$(sctl status "$NAME" 2>/dev/null | awk '{print tolower($2)}')"
+    # STARTING lasts until startsecs pass; wait it out (bounded) so the state
+    # reported is the one the program settles in, not the first glimpse.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      SERVICE_STATE="$(sctl status "$NAME" 2>/dev/null | awk '{print tolower($2)}')"
+      [ "$SERVICE_STATE" = "starting" ] || break
+      sleep 1
+    done
     [ -n "$SERVICE_STATE" ] || SERVICE_STATE="unknown"
     if [ "$SERVICE_STATE" = "running" ]; then
       info "  program running"
     else
+      # Installed but not up is not ready: say so, with the program's own
+      # last word, instead of reporting success for an agent that is
+      # crash-looping.
+      LAST_ERR="$(tail -n 40 "$PREFIX/logs/$NAME.err.log" 2>/dev/null \
+        | grep -Ev '^(INFO|DEBUG)|^[0-9-]+ [0-9:,]+ - .* - (INFO|DEBUG) - ' | tail -n 1 || true)"
+      PROBLEMS="${PROBLEMS:+$PROBLEMS
+}the agent did not stay up (supervisord state: $SERVICE_STATE)${LAST_ERR:+: $LAST_ERR}"
+      READY=false
       warn "program state is $SERVICE_STATE — $SUPERVISOR_VENV/bin/supervisorctl -c $SUPERVISOR_CONF tail -100 $NAME stderr"
     fi
   else
@@ -1036,7 +1208,7 @@ PROGEOF
   fi
 fi
 
-if [ "$ENABLE_AT_BOOT" -eq 1 ]; then
+if [ "$ENABLE_AT_BOOT" -eq 1 ] && [ "$SERVICE_KIND" != "supervisor" ]; then
   enable_at_boot
 fi
 

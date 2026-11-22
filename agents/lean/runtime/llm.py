@@ -18,6 +18,20 @@ class LLMError(Exception):
     pass
 
 
+class MalformedToolCall(LLMError):
+    """
+    The model's tool call could not be parsed back by the server.
+
+    Its own type so the loop can recover — nothing ran and nothing was added
+    to the conversation, so the model can simply be asked to redo it in
+    smaller pieces. ``chars`` is roughly where the JSON broke, when known.
+    """
+
+    def __init__(self, message: str, chars: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.chars = chars
+
+
 # One model call, not one turn: a turn may make several. 120s was too short for
 # a local server asked for anything long — a 27B model writing a document hits
 # it every time, and the loop surfaces that as "the agent could not complete
@@ -40,21 +54,24 @@ def _is_malformed_tool_call(detail: str) -> bool:
     return all(marker in lowered for marker in _MALFORMED_TOOL_CALL)
 
 
+def _malformed_tool_call_chars(detail: str) -> Optional[int]:
+    column = re.search(r"column (\d+)", detail or "")
+    return int(column.group(1)) if column else None
+
+
 def _malformed_tool_call_message(detail: str) -> str:
     """Say what broke and what to do, rather than forwarding server JSON."""
-    column = re.search(r"column (\d+)", detail or "")
-    where = (
-        f"after about {int(column.group(1)):,} characters"
-        if column else "part-way through"
-    )
+    chars = _malformed_tool_call_chars(detail)
+    where = f"after about {chars:,} characters" if chars else "part-way through"
     return (
         f"the model's tool call was malformed: it broke the JSON string {where}, "
         f"so the server could not read the call back. A quantized model asked "
         f"for a whole document in one tool call commonly loses track of the "
         f"escaping — have the agent write smaller sections (a few KB per "
-        f"write_file call) rather than one large one. Set "
-        f"retry_malformed_tool_calls to try again on this error, bearing in "
-        f"mind a retry costs another full generation."
+        f"write_file call, the rest with append=true), revise files with "
+        f"edit_file, and save shared files with write_link rather than "
+        f"retyping them. Set retry_malformed_tool_calls to try again on this "
+        f"error, bearing in mind a retry costs another full generation."
     )
 
 
@@ -147,7 +164,10 @@ class LeanLLMClient:
                             f"({tool_call_retries} left after this)"
                         )
                         continue
-                    raise LLMError(_malformed_tool_call_message(detail)) from exc
+                    raise MalformedToolCall(
+                        _malformed_tool_call_message(detail),
+                        chars=_malformed_tool_call_chars(detail),
+                    ) from exc
                 raise LLMError(f"HTTP {exc.code} from API: {detail}") from exc
             except TimeoutError as exc:
                 # Deliberately not retried: a timeout has already cost the full

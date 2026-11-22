@@ -6,7 +6,7 @@
 #   python run_wiki.py ask "what actually improves their sleep?"
 #   python run_wiki.py lint
 #
-# See README.md for the Anthropic / local-model options.
+# See docs/examples/llm_wiki.md for the Anthropic / local-model options.
 
 name: wiki_maintainer
 description: Compiles sources into a persistent, interlinked personal wiki

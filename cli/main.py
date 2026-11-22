@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 DEFAULT_CONFIG_NAME = "agent.yaml"
-DEFAULT_CONTROL_DB = "~/.agents-control/control.db"
 
 # Which environment variable each provider needs for its API key.
 _PROVIDER_KEYS = {
@@ -378,8 +377,8 @@ def cmd_version(_args: argparse.Namespace) -> int:
 
 
 def cmd_control(args: argparse.Namespace) -> int:
-    """Run the agents-control service."""
-    from declarative_agent_sdk.agents_control import ControlPlane
+    """Run the agent-board service."""
+    from declarative_agent_sdk.agent_board import ControlPlane
 
     if args.log_level:
         os.environ["SDK_LOG_LEVEL"] = args.log_level
@@ -389,7 +388,7 @@ def cmd_control(args: argparse.Namespace) -> int:
         token=args.token if args.token is not None else None,
         public_url=args.public_url or "",
     )
-    print(f"agents-control → http://{args.host}:{args.port}")
+    print(f"agent-board → http://{args.host}:{args.port}")
     print(f"  store:   {plane.store.path}")
     print(f"  agents:  {len(plane.store.agents())} on {len(plane.store.machines())} machine(s)")
     if not plane.token:
@@ -439,15 +438,17 @@ def build_parser() -> argparse.ArgumentParser:
     discord_cmd.set_defaults(func=cmd_discord)
 
     control_cmd = sub.add_parser(
-        "control", help="Run the agents-control service (board + machine provisioning)")
+        "board", aliases=["control"],
+        help="Run the agent-board service (board + machine provisioning)")
     control_cmd.add_argument("--host", default="127.0.0.1",
                              help="Bind address (default: 127.0.0.1). A non-loopback bind "
-                                  "requires AGENTS_CONTROL_TOKEN.")
+                                  "requires AGENT_BOARD_TOKEN.")
     control_cmd.add_argument("--port", type=int, default=8900, help="Port (default: 8900)")
-    control_cmd.add_argument("--db", default=DEFAULT_CONTROL_DB,
-                             help=f"SQLite store (default: {DEFAULT_CONTROL_DB})")
+    control_cmd.add_argument("--db", default=None,
+                             help="SQLite store (default: ~/.agent-board/control.db, or "
+                                  "~/.agents-control/control.db when only that exists)")
     control_cmd.add_argument("--token", default=None,
-                             help="API token; defaults to $AGENTS_CONTROL_TOKEN")
+                             help="API token; defaults to $AGENT_BOARD_TOKEN")
     control_cmd.add_argument("--public-url", default=None,
                              help="URL agents should call back on, if it is not "
                                   "http://<host>:<port> (NAT, proxy, container)")

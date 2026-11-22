@@ -20,7 +20,7 @@ workspace_directory: workspace
 provider: vllm
 model: ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF:IQ3_S 
 endpoint:
-  url: https://10.0.0.147:30081/v1
+  url: http://10.0.0.147:30081/v1
 
 # Optional — needs keys in the environment for search.
 tools:

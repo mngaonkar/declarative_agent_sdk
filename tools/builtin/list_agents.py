@@ -1,5 +1,5 @@
 """
-list_agents — who else is on the agents-control board.
+list_agents — who else is on the agent-board board.
 
 Discovery has two layers, and this is the second one. The roster of the current
 channel is already pushed into every dispatch, so an agent normally knows who it
@@ -42,8 +42,8 @@ def list_agents(channel: str = "", include_all: bool = False) -> str:
     link = board()
     if not link.url:
         return (
-            "Error: this agent has no AGENTS_CONTROL_URL, so it is not on a board. "
-            "It was not created by agents-control, or its .env was not seeded."
+            "Error: this agent has no AGENT_BOARD_URL, so it is not on a board. "
+            "It was not created by agent-board, or its .env was not seeded."
         )
 
     try:

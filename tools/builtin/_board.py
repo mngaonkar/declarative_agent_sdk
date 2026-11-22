@@ -1,11 +1,11 @@
 """
-Shared client for the agents-control board.
+Shared client for the agent-board board.
 
 Private (leading underscore), so the tool registry's auto-discovery does not
 turn these helpers into tools of their own. ``send_to_agent`` and
 ``list_agents`` are the tools; this is the plumbing under both.
 
-An agent reaches its board over plain HTTP using the handshake agents-control
+An agent reaches its board over plain HTTP using the handshake agent-board
 seeded into its ``.env`` at install time.
 """
 
@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from declarative_agent_sdk.core.agent_logging import get_logger
+from declarative_agent_sdk.core.board_env import board_env
 
 logger = get_logger(__name__)
 
@@ -31,8 +32,8 @@ class Board:
     """Where the board is, and who this agent is on it."""
 
     def __init__(self) -> None:
-        self.url = (os.environ.get("AGENTS_CONTROL_URL") or "").rstrip("/")
-        self.token = os.environ.get("AGENTS_CONTROL_TOKEN") or ""
+        self.url = (board_env("URL") or "").rstrip("/")
+        self.token = board_env("TOKEN") or ""
         # The qualified name is this agent's address; fall back to the bare one
         # for an agent installed before machines were named.
         self.name = (
@@ -40,7 +41,7 @@ class Board:
             or os.environ.get("AGENT_NAME")
             or ""
         )
-        self.timeout = int(os.environ.get("AGENTS_CONTROL_TIMEOUT") or DEFAULT_TIMEOUT)
+        self.timeout = int(board_env("TIMEOUT") or DEFAULT_TIMEOUT)
 
     @property
     def headers(self) -> Dict[str, str]:

@@ -5,6 +5,7 @@ This tool allows agents to execute system commands and processes.
 Use with caution as it provides shell access.
 """
 
+import re
 import subprocess
 import shlex
 from typing import Dict, Optional, List, Union
@@ -12,10 +13,44 @@ from declarative_agent_sdk.core.agent_logging import get_logger
 
 logger = get_logger(__name__)
 
+# Syntax that only a shell can carry out. Splitting a command containing any of
+# these into argv does not fail — it runs something *else*, usually the first
+# word with the rest as nonsense arguments, and reports the exit code of that.
+# A model that writes `pwd && ls workspace` and is told `usage: pwd` concludes
+# the directory is missing, and goes looking for a problem that is not there.
+_SHELL_SYNTAX = re.compile(r'(\|\||&&|[|;<>]|\$\(|`|\*|\?|\$\{|\$[A-Za-z_])')
+
+# Builtins that are not programs; execvp cannot find them at all.
+_SHELL_BUILTINS = frozenset({
+    "command", "cd", "export", "source", ".", "alias", "set", "unset",
+    "eval", "exec", "type", "ulimit", "umask", "shopt", "local", "read",
+})
+
+
+def _needs_a_shell(command: str) -> str:
+    """
+    Why this command cannot run as plain argv, or '' when it can.
+
+    Returned as a reason rather than a bool so the caller can say what it
+    found: the point is to never silently run a different command.
+    """
+    if not isinstance(command, str):
+        return ""
+    found = _SHELL_SYNTAX.search(command)
+    if found:
+        return f"shell syntax {found.group(0)!r}"
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return "unbalanced quotes"
+    if words and words[0] in _SHELL_BUILTINS:
+        return f"shell builtin {words[0]!r}"
+    return ""
+
 
 def exec_command(
     command: str,
-    shell: bool = False,
+    shell: Optional[bool] = None,
     timeout: Optional[int] = 30,
     cwd: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
@@ -27,10 +62,12 @@ def exec_command(
     Execute a shell command or process.
     
     Args:
-        command: Command to execute. If shell=False, can be a string or list of arguments.
-                If shell=True, should be a complete shell command string.
-        shell: If True, execute command through the shell (enables pipes, redirection, etc.)
-               If False (default), execute directly (safer, no shell injection risk)
+        command: Command to execute. A string, or a list of arguments.
+        shell: Leave unset (the default) and the shell is used only when the
+               command needs it — pipes, redirection, `&&`, `;`, globs,
+               substitutions or a shell builtin. Pass True to force the shell,
+               or False to refuse anything that needs one instead of running a
+               mangled version of it.
         timeout: Maximum time in seconds to wait for command to complete (default: 30)
                 Set to None for no timeout
         cwd: Working directory for the command (default: current directory)
@@ -47,6 +84,9 @@ def exec_command(
             - stderr: str - Standard error (if capture_output=True)
             - timed_out: bool - Whether command exceeded timeout
             - error: str - Error message if execution failed
+            - shell: bool - Whether a shell carried the command out
+            - note: str - Present when the result needs reading with care, e.g.
+                   a non-zero exit that still produced output
             
     Example:
         # Simple command (safe, no shell)
@@ -80,14 +120,39 @@ def exec_command(
         'stdout': '',
         'stderr': '',
         'timed_out': False,
-        'error': None
+        'error': None,
+        'shell': False,
     }
 
     # LLM tool args often arrive as strings — coerce common types.
     if isinstance(shell, str):
-        shell = shell.strip().lower() in ("1", "true", "yes", "y")
-    else:
+        text = shell.strip().lower()
+        shell = None if text in ("", "none", "null", "auto") else (
+            text in ("1", "true", "yes", "y"))
+    elif shell is not None:
         shell = bool(shell)
+
+    # Unset means "use a shell if the command needs one". Models write shell
+    # syntax because that is how commands are written; honouring it is what
+    # they meant, and the approval prompt shows the whole command string
+    # either way, so this moves no security boundary.
+    needed = _needs_a_shell(command) if isinstance(command, str) else ""
+    if shell is None:
+        shell = bool(needed)
+        if shell:
+            logger.debug(f"Using a shell for {command!r} ({needed})")
+    elif shell is False and needed:
+        return {
+            **result,
+            'shell': False,
+            'error': (
+                f"This command needs a shell ({needed}) but shell=false was "
+                f"requested. Run it with shell=true, or split it into separate "
+                f"commands. It was not run, because running it as plain "
+                f"arguments would have executed something other than what was "
+                f"asked for."
+            ),
+        }
     if isinstance(capture_output, str):
         capture_output = capture_output.strip().lower() in ("1", "true", "yes", "y")
     else:
@@ -144,10 +209,24 @@ def exec_command(
         # Populate result
         result['exit_code'] = proc.returncode
         result['success'] = (proc.returncode == 0)
+        result['shell'] = bool(shell)
         
         if capture_output:
             result['stdout'] = proc.stdout or ''
             result['stderr'] = proc.stderr or ''
+
+        # A non-zero exit with output on stdout is the shape of a partial
+        # answer, and `success: false` on its own reads as "nothing to see".
+        # `which pandoc wkhtmltopdf` exits 1 because one name is missing while
+        # printing the path of the one that exists — a model that reads only
+        # the flag concludes nothing is installed and stops.
+        if not result['success'] and result['stdout'].strip():
+            result['note'] = (
+                "exit code is non-zero but stdout is not empty — this may be a "
+                "partial success. Read stdout before concluding the command "
+                "failed (`which a b` exits 1 if any one name is missing, while "
+                "still printing the ones it found)."
+            )
         
         if result['success']:
             logger.info(f"Command executed successfully: {command}")
