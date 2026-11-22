@@ -495,3 +495,12 @@ td.agent-name.tinted { font-weight: 600; }
 /* An agent's MCP servers on the Agents tab. */
 .mcp-server { white-space: nowrap; }
 .mcp-server + .mcp-server { margin-top: 2px; }
+
+/* MCP catalog: the editor, and an agent's MCP tab. */
+.mcp-form .row-2, .mcp-attach .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mcp-form textarea { font: 12px var(--mono); }
+.mcp-attach { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px;
+  margin: 8px 0; display: flex; flex-direction: column; gap: 8px; }
+.mcp-attach-head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.mcp-attach .btns { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+#mcp-table td .btn + .btn { margin-left: 4px; }

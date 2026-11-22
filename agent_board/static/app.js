@@ -4,7 +4,7 @@ const state = {
   machines: [], agents: [], channels: [], settings: {}, defaults: {},
   channelId: null, messages: [], members: [], halted: false, autoApprove: '',
   typing: new Set(), approvals: new Map(), lastId: 0, needsAuth: false,
-  contexts: {}, mcp: {}, providers: { endpoints: {}, listable: [] },
+  contexts: {}, mcp: {}, mcpCatalog: [], mcpPresets: [], providers: { endpoints: {}, listable: [] },
   // Agent (qualified name) → channel ids it is taking a turn in, across all
   // channels — the sidebar shows activity everywhere, not just the open one.
   working: new Map(),
@@ -26,7 +26,7 @@ const el = (tag, cls, text) => {
  * process started. Edit the tree without restarting and the new board asks the
  * old server for routes it does not have — which it answers with a bare 404.
  */
-const EXPECTS_API = 30;
+const EXPECTS_API = 31;
 
 /** An agent's address on the board. The bare name is unique only per machine. */
 const fqn = (agent) => agent.qualified || `${agent.name}.${agent.machine_name}`;
@@ -163,6 +163,9 @@ function connect() {
 
 function handleEvent(event) {
   switch (event.type) {
+    case 'mcp':
+      if (!$('#view-mcp').classList.contains('hidden')) loadMcp();
+      break;
     case 'cleared':
       // Emptied here rather than refetched: the board's "Conversation cleared"
       // line follows as an ordinary message event and lands in the empty view.
@@ -1161,6 +1164,7 @@ async function pollServers() {
     state.mcp = data.mcp || {};
     renderServers(data.servers || []);
     renderAgents();            // the Context and Status columns come from this poll
+    if (!$('#view-mcp').classList.contains('hidden')) renderMcp();   // its status chips too
     renderSidebar();           // and so do the sidebar's liveness pins
   } catch (error) {
     serverFailures += 1;
@@ -1243,13 +1247,14 @@ async function openAgentConfig(agent) {
   const tabs = el('div', 'tabs');
   const bodies = el('div', 'tab-body');
   const panes = {};
-  ['Properties', 'Raw YAML', 'Instructions'].forEach((label, i) => {
+  ['Properties', 'Raw YAML', 'Instructions', 'MCP'].forEach((label, i) => {
     const tab = el('button', i === 0 ? 'active' : '', label);
     const pane = el('div', i === 0 ? 'active' : '');
     panes[label] = pane;
     tab.onclick = () => {
       [...tabs.children].forEach((t) => t.classList.toggle('active', t === tab));
       [...bodies.children].forEach((b) => b.classList.toggle('active', b === pane));
+      if (label === 'MCP') renderAgentMcp(agent, pane);
     };
     tabs.append(tab);
     bodies.append(pane);
@@ -1752,12 +1757,307 @@ function fmtArgs(args) {
   return text.length > 120 ? text.slice(0, 119) + '…' : text;
 }
 
+/* ── MCP view ───────────────────────────────────────────────────────── */
+
+/*
+ * The board's MCP catalog (docs/design/mcp.md, MCP-CAT-*): definitions here,
+ * attached to agents in their Settings. Secret values are typed once and sent
+ * to the agents' .env files; the board never shows or keeps them.
+ */
+async function loadMcp() {
+  try {
+    const data = await api('/api/mcp');
+    state.mcpCatalog = data.servers || [];
+    state.mcpPresets = data.presets || [];
+    renderMcp();
+  } catch (error) { toast(`MCP catalog: ${error.message}`, true); }
+}
+
+function mcpRuns(spec) {
+  if (spec.transport === 'stdio') return [spec.command, ...(spec.args || [])].join(' ');
+  return `${spec.transport}: ${spec.url || ''}`;
+}
+
+function renderMcp() {
+  const table = $('#mcp-table');
+  table.innerHTML = '';
+  table.append(headRow(['Server', 'Runs', 'Approval', 'Secrets', 'Attached to', '']));
+  if (!state.mcpCatalog.length) {
+    table.append(emptyRow(6, 'No MCP servers yet. Add one — start from a preset such as ' +
+                             'fetch — then attach it to agents in their ⚙ Settings.'));
+    return;
+  }
+  state.mcpCatalog.forEach((server) => {
+    const row = el('tr');
+    row.append(cell(server.name, 'mono'));
+    const runs = cell(mcpRuns(server.spec), 'mono');
+    if (server.runner) runs.append(el('div', 'note', `needs ${server.runner} on each machine`));
+    row.append(runs);
+    row.append(cell({ false: 'no', true: 'always', destructive: 'destructive only' }[
+      String(server.spec.approval ?? 'false')] || String(server.spec.approval)));
+
+    const secrets = el('td');
+    if (!server.vars.length) secrets.append(el('span', 'dim', '—'));
+    server.vars.forEach((name) => {
+      const button = el('button', 'btn small', `Set ${name}…`);
+      button.title = server.agents.length
+        ? `Write ${name} into the .env of the ${server.agents.length} attached agent(s)`
+        : 'Attach the server to an agent first';
+      button.disabled = !server.agents.length;
+      button.onclick = () => setMcpSecret(server, name);
+      secrets.append(button);
+    });
+    row.append(secrets);
+
+    const attached = el('td');
+    if (!server.agents.length) attached.append(el('span', 'dim', 'no agents'));
+    server.agents.forEach((link) => {
+      const agent = state.agents.find((a) => a.id === link.agent_id);
+      if (!agent) return;
+      const live = (state.mcp[String(agent.id)]?.servers || []).find((s) => s.name === server.name);
+      const chip = el('div', 'mcp-server');
+      chip.append(tint(el('span', 'mono agent-name', fqn(agent)), agent));
+      const label = !live ? ' · not reported yet' : live.connected
+        ? ` · ✓ ${(live.tools || []).length} tools` : ' · ✗ not connected';
+      chip.append(el('span', live && !live.connected ? 'note warn-text' : 'note', label));
+      chip.title = live ? (live.connected ? (live.tools || []).join(', ') : live.error || '')
+        : 'The agent has not reported this server — it may still be starting, ' +
+          'or need a Reinstall for MCP support.';
+      attached.append(chip);
+    });
+    row.append(attached);
+
+    const actions = el('td');
+    const editBtn = el('button', 'btn small', 'Edit');
+    editBtn.onclick = () => openMcpEditor(server);
+    const remove = el('button', 'btn small danger', 'Delete');
+    remove.onclick = async () => {
+      const names = server.agents
+        .map((l) => state.agents.find((a) => a.id === l.agent_id)).filter(Boolean).map(fqn);
+      const note = names.length ? `\n\nIt is detached from ${names.join(', ')}, which restart.` : '';
+      if (!confirm(`Delete the MCP server '${server.name}'?${note}`)) return;
+      try {
+        await api(`/api/mcp/${server.id}`, { method: 'DELETE' });
+        toast(`Deleted ${server.name}`);
+        loadMcp();
+      } catch (error) { toast(error.message, true); }
+    };
+    actions.append(editBtn, remove);
+    row.append(actions);
+    table.append(row);
+  });
+}
+
+function setMcpSecret(server, name) {
+  const form = el('form', 'form');
+  const label = el('label', '', `${name} `);
+  const input = el('input');
+  input.type = 'password';
+  input.autocomplete = 'off';
+  input.required = true;
+  label.append(input);
+  form.append(label, el('p', 'note',
+    `Written into the .env of the agents ${server.name} is attached to, which then ` +
+    'restart. The board does not keep it and cannot show it again.'));
+  const actions = el('div', 'form-actions');
+  const save = el('button', 'btn primary', 'Set');
+  save.type = 'submit';
+  actions.append(save);
+  form.append(actions);
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      const result = await api(`/api/mcp/${server.id}/secret`, {
+        method: 'POST', body: JSON.stringify({ name, value: input.value }),
+      });
+      input.value = '';
+      const failed = result.agents.filter((a) => !a.ok);
+      toast(failed.length
+        ? `${name} not set on: ${failed.map((a) => `${a.agent} (${a.error})`).join('; ')}`
+        : `${name} set on ${result.agents.length} agent(s)`, failed.length > 0);
+      closeModal();
+    } catch (error) { toast(error.message, true); save.disabled = false; }
+  };
+  openModal(`${server.name} · set ${name}`, form);
+}
+
+const lines = (text) => String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+function pairs(text, separator) {
+  const out = {};
+  lines(text).forEach((line) => {
+    const at = line.indexOf(separator);
+    if (at > 0) out[line.slice(0, at).trim()] = line.slice(at + separator.length).trim();
+  });
+  return out;
+}
+
+function fillMcpForm(form, name, spec) {
+  const set = (key, value) => { if (form.elements[key]) form.elements[key].value = value ?? ''; };
+  set('name', name);
+  set('transport', spec.transport || 'stdio');
+  set('command', spec.command);
+  set('args', (spec.args || []).join('\n'));
+  set('env', Object.entries(spec.env || {}).map(([k, v]) => `${k}=${v}`).join('\n'));
+  set('cwd', spec.cwd);
+  set('url', spec.url);
+  set('headers', Object.entries(spec.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'));
+  set('tools', (spec.tools || []).join(', '));
+  set('approval', String(spec.approval ?? 'false'));
+  set('timeout', spec.timeout);
+  set('startup_timeout', spec.startup_timeout);
+}
+
+function mcpSpecFrom(form) {
+  const v = values(form);
+  const spec = { transport: v.transport, approval: v.approval };
+  if (v.transport === 'stdio') {
+    Object.assign(spec, { command: v.command.trim(), args: lines(v.args),
+                          env: pairs(v.env, '='), cwd: v.cwd.trim() });
+  } else {
+    Object.assign(spec, { url: v.url.trim(), headers: pairs(v.headers, ':') });
+  }
+  const tools = v.tools.split(',').map((t) => t.trim()).filter(Boolean);
+  if (tools.length) spec.tools = tools;
+  if (v.timeout) spec.timeout = Number(v.timeout);
+  if (v.startup_timeout) spec.startup_timeout = Number(v.startup_timeout);
+  return { name: v.name.trim(), spec };
+}
+
+function openMcpEditor(server) {
+  const form = formFrom('tpl-mcp-form');
+  const preset = form.elements.preset;
+  if (server) {
+    form.querySelector('.preset-row').remove();
+  } else {
+    state.mcpPresets.forEach((p) => preset.append(new Option(`${p.name} — ${p.label}`, p.name)));
+    preset.onchange = () => {
+      const chosen = state.mcpPresets.find((p) => p.name === preset.value);
+      if (chosen) { fillMcpForm(form, chosen.name, chosen.spec); showTransport(); }
+    };
+  }
+  const showTransport = () => {
+    const stdio = form.elements.transport.value === 'stdio';
+    form.querySelector('.when-stdio').classList.toggle('hidden', !stdio);
+    form.querySelector('.when-remote').classList.toggle('hidden', stdio);
+  };
+  form.elements.transport.onchange = showTransport;
+  fillMcpForm(form, server?.name || '', server?.spec || { transport: 'stdio' });
+  showTransport();
+
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const payload = mcpSpecFrom(form);
+    try {
+      if (server) {
+        const count = server.agents.length;
+        payload.sync = count > 0 && confirm(
+          `Update the ${count} agent(s) '${server.name}' is attached to now?\n\n` +
+          'They restart with the new settings. Cancel saves the catalog only; agents ' +
+          'pick it up the next time they are attached or edited.');
+        const result = await api(`/api/mcp/${server.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+        const failed = (result.synced || []).filter((s) => !s.ok);
+        toast(failed.length
+          ? `Saved, but not applied on: ${failed.map((s) => `${s.agent} (${s.error})`).join('; ')}`
+          : `Saved ${payload.name}${payload.sync ? ` and updated ${result.synced.length} agent(s)` : ''}`,
+          failed.length > 0);
+      } else {
+        await api('/api/mcp', { method: 'POST', body: JSON.stringify(payload) });
+        toast(`Added ${payload.name} — attach it to agents in their ⚙ Settings`);
+      }
+      closeModal();
+      loadMcp();
+    } catch (error) { toast(error.message, true); }
+  };
+  openModal(server ? `MCP server · ${server.name}` : 'Add MCP server', form);
+}
+
+$('#new-mcp').onclick = () => openMcpEditor(null);
+
+/** The MCP tab of an agent's Settings: attach, detach, override (MCP-CAT-12). */
+async function renderAgentMcp(agent, pane) {
+  pane.innerHTML = '';
+  pane.append(el('p', 'note', 'Loading the MCP catalog…'));
+  let data;
+  try { data = await api(`/api/agents/${agent.id}/mcp`); }
+  catch (error) { pane.innerHTML = ''; pane.append(el('p', 'warn-box', error.message)); return; }
+  pane.innerHTML = '';
+  pane.append(el('p', 'note', 'Changes here apply at once: the board writes them into this ' +
+    "agent's agent.yaml (board_mcp_servers) and restarts it. Servers written into " +
+    'agent.yaml by hand (mcp_servers) are not shown here and are left alone.'));
+  if (!data.catalog.length) {
+    pane.append(el('p', 'note', 'The catalog is empty — add servers on the MCP tab.'));
+    return;
+  }
+  const attached = new Map(data.attached.map((a) => [a.server_id, a]));
+  data.catalog.forEach((server) => {
+    const link = attached.get(server.id);
+    const box = el('div', 'mcp-attach');
+    const head = el('div', 'mcp-attach-head');
+    head.append(el('strong', 'mono', server.name), el('span', 'note', ` ${mcpRuns(server.spec)}`));
+    box.append(head);
+
+    const approval = el('select');
+    [['', `default (${server.spec.approval ?? 'false'})`], ['false', 'no'],
+     ['destructive', 'destructive only'], ['true', 'always']]
+      .forEach(([value, label]) => approval.append(new Option(label, value)));
+    approval.value = link?.overrides?.approval || '';
+    const tools = el('input');
+    tools.placeholder = server.spec.tools ? server.spec.tools.join(', ') : 'all tools';
+    tools.value = (link?.overrides?.tools || []).join(', ');
+    const options = el('div', 'row-2');
+    const l1 = el('label', '', 'Approval '); l1.append(approval);
+    const l2 = el('label', '', 'Tools '); l2.append(tools);
+    options.append(l1, l2);
+    box.append(options);
+
+    const actions = el('div', 'btns');
+    const apply = el('button', link ? 'btn small' : 'btn small primary', link ? 'Update' : 'Attach');
+    apply.onclick = async () => {
+      apply.disabled = true;
+      try {
+        const result = await api(`/api/agents/${agent.id}/mcp`, {
+          method: 'POST',
+          body: JSON.stringify({ server_id: server.id,
+                                 overrides: { approval: approval.value, tools: tools.value } }),
+        });
+        const problems = [...(result.warnings || []),
+                          ...(result.synced?.ok ? [] : [result.synced?.error || 'not applied'])];
+        toast(problems.length ? `${server.name}: ${problems.join(' · ')}`
+          : `${server.name} attached — ${agent.name} is restarting`, problems.length > 0);
+        renderAgentMcp(agent, pane);
+      } catch (error) { toast(error.message, true); apply.disabled = false; }
+    };
+    actions.append(apply);
+    if (link) {
+      const detach = el('button', 'btn small danger', 'Detach');
+      detach.onclick = async () => {
+        detach.disabled = true;
+        try {
+          await api(`/api/agents/${agent.id}/mcp/${server.id}`, { method: 'DELETE' });
+          toast(`${server.name} detached — ${agent.name} is restarting`);
+          renderAgentMcp(agent, pane);
+        } catch (error) { toast(error.message, true); detach.disabled = false; }
+      };
+      actions.append(detach);
+      if (server.vars.length) {
+        actions.append(el('span', 'note',
+          ` uses ${server.vars.map((v) => '${' + v + '}').join(', ')} — set on the MCP tab`));
+      }
+    }
+    box.append(actions);
+    pane.append(box);
+  });
+}
+
 function showView(name) {
   document.querySelectorAll('.view-tab').forEach((t) =>
     t.classList.toggle('active', t.dataset.view === name));
-  ['board', 'agents', 'machines', 'logs', 'settings'].forEach((view) =>
+  ['board', 'agents', 'machines', 'mcp', 'logs', 'settings'].forEach((view) =>
     $(`#view-${view}`).classList.toggle('hidden', view !== name));
-  if (name === 'agents') startServerPolling(); else stopServerPolling();
+  // The MCP tab shows each attached agent's connection state from the same poll.
+  if (name === 'agents' || name === 'mcp') startServerPolling(); else stopServerPolling();
+  if (name === 'mcp') loadMcp();
   if (name === 'logs') logsView.start(); else logsView.stop();
 }
 

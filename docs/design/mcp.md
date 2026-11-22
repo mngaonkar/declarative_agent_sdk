@@ -250,12 +250,88 @@ taken) -> (tools, auto-approve names)`.
 - MCP-BOARD-4: Probing a machine also looks for `npx` and `uvx`, which run
   most stdio servers, and stores what it found (`runners`, AC-STORE-1). The
   Machines tab shows each with ✓ or ✗.
-- MCP-BOARD-5 *(later)*: an "Add MCP server" form in the agent's Settings, with
-  presets, writing `mcp_servers` into `agent.yaml` and any token into `.env`
-  by name (AC-5: values are never read back).
+- MCP-BOARD-5: MCP servers are defined once, in the board's MCP catalog, and
+  attached to agents (the next section). Servers can still be written into an
+  agent's `agent.yaml` by hand.
 
-Until MCP-BOARD-5, servers are added by editing `agent.yaml` in Settings and
-the token in the agent's `.env`.
+## The MCP catalog (agent-board)
+
+Instead of editing every agent's YAML, the board keeps a catalog of MCP
+server definitions on its **MCP** tab; an agent's Settings attaches entries
+to it. Each agent still runs its own copy of each server (a stdio server has
+to run on the agent's machine, to reach that machine), so the catalog holds
+definitions, not running servers.
+
+**Rules — catalog:**
+
+- MCP-CAT-1: A catalog entry is a name (MCP-CFG-1) and the same settings as an
+  `mcp_servers` entry (MCP-CFG-2..7), checked by the same parser before it is
+  saved. Names are unique on the board.
+- MCP-CAT-2: Secrets are never in the catalog. An entry refers to them as
+  `${NAME}`; their values live only in each agent's `.env` (AC-5).
+- MCP-CAT-3: Setting a value ("Set…" on the MCP tab) writes it into the `.env`
+  of every agent the entry is attached to, then restarts them. The value is
+  sent once, never stored on the board and never returned. Only names the
+  entry refers to can be set.
+- MCP-CAT-4: Presets (fetch, time, git, filesystem, GitHub, browser) fill in a
+  new entry; they are a starting point, not separate kinds.
+
+**Rules — attaching:**
+
+- MCP-CAT-5: Attaching an entry to an agent stores the link, with optional
+  per-agent overrides of `tools` (allowlist) and `approval`. Detaching
+  removes it. Deleting an agent removes its links.
+- MCP-CAT-6: The board writes an agent's attached entries into its
+  `agent.yaml` under its own key, `board_mcp_servers`, and restarts the
+  agent. The board owns that key entirely and never touches `mcp_servers`,
+  so servers written by hand are left alone. An agent with nothing attached
+  has no `board_mcp_servers` key. The rest of the file is kept as the
+  Settings form keeps it (AC-CONFIG: leading comments kept, keys re-emitted).
+- MCP-CAT-7: The agent reads `board_mcp_servers` and `mcp_servers` together.
+  On a name in both, the hand-written `mcp_servers` entry wins, with a
+  warning.
+- MCP-CAT-8: Attaching warns (it does not refuse) when the agent's machine
+  lacks the runner the command needs (`npx` / `uvx`, MCP-BOARD-4), when a
+  `${NAME}` the entry uses is not set in the agent's `.env`, and when a
+  hand-written server already has the name.
+- MCP-CAT-9: Editing an entry with agents attached asks whether to update
+  them now; yes rewrites each one's `board_mcp_servers` and restarts it.
+  Deleting an entry detaches it from every agent first, the same way.
+- MCP-CAT-10: An agent whose `board_mcp_servers` already matches is not
+  rewritten or restarted.
+
+**Rules — MCP tab:**
+
+- MCP-CAT-11: One row per entry: name, what it runs (command or URL),
+  approval, the `${NAME}`s it uses with Set…, and each attached agent with
+  its connection state from the agent poll (MCP-BOARD-1). Edit and Delete.
+- MCP-CAT-12: An agent's Settings has an MCP tab listing the catalog: attach
+  or detach each entry, with the per-agent overrides.
+
+## `agent_board/mcp_catalog.py`
+
+**Does:** the catalog's logic, apart from storage and routes: checking an
+entry, presets, the `${NAME}`s an entry uses, and writing an agent's
+`board_mcp_servers`.
+
+**Rules:**
+
+- MCP-CATF-1: `check(name, spec)` runs the entry through the agent's own MCP
+  parser (`parse_mcp_servers`), with each `${NAME}` filled by a placeholder
+  for the check only (MCP-CAT-1, MCP-CAT-2).
+- MCP-CATF-2: `clean_spec` keeps only the known settings and drops empty
+  ones; `render(spec, overrides)` applies the per-agent `tools` and
+  `approval`, leaving the catalog entry unchanged.
+- MCP-CATF-3: `apply(yaml, servers)` sets or removes `board_mcp_servers` and
+  re-emits the file as the Settings form does (leading comments kept). It
+  never reads or changes `mcp_servers` (MCP-CAT-6).
+- MCP-CATF-4: `runner_for` is `npx` / `uvx` when the stdio command is one of
+  them; `hand_written` lists the agent's own `mcp_servers` names (MCP-CAT-8).
+
+**Interface:** `PRESETS`, `BOARD_KEY`, `check`, `clean_spec`, `referenced_vars`,
+`runner_for`, `render`, `board_servers`, `apply`, `current`, `hand_written`.
+
+**Tests:** `tests/test_mcp_catalog.py`.
 
 ## Security
 
@@ -270,6 +346,10 @@ the token in the agent's `.env`.
 
 ## Tests
 
+- `tests/test_mcp_catalog.py`: the catalog — checking entries, attaching and
+  detaching (agent.yaml written, hand-written servers and comments kept, the
+  agent's own entry winning), warnings, edit with and without sync, delete,
+  secrets reaching only the agents' `.env`, overrides.
 - `tests/test_board_mcp.py`: reading `/mcp`, the metrics poll, prompts and
   roster, the `safe` level with hints, and `npx` / `uvx` probing and storage.
 - `tests/mcp_server_fixture.py`: a tiny MCP server (echo, add, an image, a
@@ -290,9 +370,10 @@ the token in the agent's `.env`.
    *Built.*
 2. **ADK and deepagent adapters** (MCP-RT-2, MCP-RT-3). *Built.*
 3. **Board:** MCP-BOARD-1..4. *Built.*
-4. **Later:** MCP resources (read like `read_shared`), MCP prompts (offered
+4. **MCP catalog** on the board (MCP-CAT-1..12). *Built.*
+5. **Later:** MCP resources (read like `read_shared`), MCP prompts (offered
    like skills), OAuth for remote servers, tool search for servers with very
-   many tools, the Settings form (MCP-BOARD-5).
+   many tools.
 
 ## Open questions
 

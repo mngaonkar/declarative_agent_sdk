@@ -40,6 +40,7 @@ from declarative_agent_sdk.agent_board import config as agent_config
 from declarative_agent_sdk.agent_board import catalog as model_catalog
 from declarative_agent_sdk.agent_board import metrics as model_metrics
 from declarative_agent_sdk.agent_board import logbook
+from declarative_agent_sdk.agent_board import mcp_catalog
 from declarative_agent_sdk.agent_board.machines import (
     MachineDriver, MachineError, key_name_for,
 )
@@ -1251,6 +1252,218 @@ def create_app(cp: "ControlPlane") -> Starlette:
 
     # -- settings ---------------------------------------------------------
 
+    # ------------------------------------------------------------ MCP catalog
+    # docs/design/mcp.md, MCP-CAT-*. Definitions live here; an agent's attached
+    # entries are written into its agent.yaml (board_mcp_servers) and it is
+    # restarted. Secret values pass through to agents' .env files only.
+
+    def _mcp_view(server: Dict[str, Any]) -> Dict[str, Any]:
+        links = store.mcp_links(server_id=int(server["id"]))
+        return {
+            **server,
+            "vars": mcp_catalog.referenced_vars(server["spec"]),
+            "runner": mcp_catalog.runner_for(server["spec"]),
+            "agents": [{"agent_id": l["agent_id"], "overrides": l["overrides"]} for l in links],
+        }
+
+    def _mcp_entry(payload: Dict[str, Any]) -> "tuple[str, Dict[str, Any]]":
+        name = str(payload.get("name") or "").strip()
+        spec = mcp_catalog.check(name, mcp_catalog.clean_spec(payload.get("spec") or {}))
+        return name, spec
+
+    def _overrides(raw: Any) -> Dict[str, Any]:
+        raw = raw if isinstance(raw, dict) else {}
+        overrides: Dict[str, Any] = {}
+        tools = raw.get("tools")
+        if isinstance(tools, str):
+            tools = [t.strip() for t in tools.split(",") if t.strip()]
+        if tools:
+            if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+                raise ValueError("tools must be a list of tool names")
+            overrides["tools"] = tools
+        approval = str(raw.get("approval") or "").strip().lower()
+        if approval:
+            if approval not in ("false", "true", "destructive"):
+                raise ValueError("approval must be false, true or destructive")
+            overrides["approval"] = approval
+        return overrides
+
+    async def sync_agent_mcp(agent_id: int) -> Dict[str, Any]:
+        """
+        Write an agent's attached entries into its agent.yaml and restart it
+        (MCP-CAT-6). An agent already up to date is left alone (MCP-CAT-10).
+        """
+        agent, machine = _agent_and_machine(agent_id)
+        result: Dict[str, Any] = {"agent_id": agent_id,
+                                  "agent": agent.get("qualified") or agent["name"],
+                                  "ok": False, "changed": False}
+        try:
+            prefix = str(agent["prefix"] or "")
+            files = await in_thread(driver.read_agent_files, machine, prefix)
+            wanted = mcp_catalog.board_servers(await in_thread(store.mcp_links, agent_id))
+            if mcp_catalog.current(files["yaml"]) == wanted:
+                result["ok"] = True
+                return result
+            text = mcp_catalog.apply(files["yaml"], wanted)
+            await in_thread(driver.write_agent_files, machine, prefix, text, None)
+            result["changed"] = True
+            outcome = await in_thread(
+                driver.supervisor_action, machine, prefix, agent["name"], "restart")
+            result["ok"] = bool(outcome.get("ok"))
+            if not outcome.get("ok"):
+                result["error"] = ("agent.yaml saved, but the restart failed: "
+                                   f"{str(outcome.get('output', ''))[:300]}")
+        except MachineError as exc:
+            result["error"] = exc.detail()
+        except (agent_config.ConfigError, LookupError, ValueError) as exc:
+            result["error"] = str(exc)
+        logger.info(f"mcp: synced {result['agent']}: "
+                    f"{'changed' if result['changed'] else 'unchanged'}"
+                    f"{', ' + result['error'] if result.get('error') else ''}")
+        return result
+
+    async def _sync_attached(server_id: int) -> List[Dict[str, Any]]:
+        agent_ids = sorted({int(l["agent_id"]) for l in store.mcp_links(server_id=server_id)})
+        return list(await asyncio.gather(*(sync_agent_mcp(a) for a in agent_ids)))
+
+    async def _attach_warnings(agent: Dict[str, Any], machine: Dict[str, Any],
+                               server: Dict[str, Any]) -> List[str]:
+        """What may stop this server working on this agent (MCP-CAT-8)."""
+        warnings: List[str] = []
+        runner = mcp_catalog.runner_for(server["spec"])
+        found = machine.get("runners")
+        if runner and isinstance(found, list) and found and runner not in found:
+            warnings.append(f"{runner} was not found on {machine['name']} when it was last "
+                            f"tested — install it there, or this server will not start")
+        prefix = str(agent["prefix"] or "")
+        try:
+            names = set(await in_thread(driver.env_names, machine, prefix))
+            missing = [v for v in mcp_catalog.referenced_vars(server["spec"]) if v not in names]
+            if missing:
+                warnings.append(f"{', '.join(missing)} not set in this agent's .env — use "
+                                "Set… on the MCP tab")
+            files = await in_thread(driver.read_agent_files, machine, prefix)
+            if server["name"] in mcp_catalog.hand_written(files["yaml"]):
+                warnings.append(f"agent.yaml already has a hand-written '{server['name']}' "
+                                "server, which is used instead of this one")
+        except MachineError as exc:
+            warnings.append(f"could not check the agent's files: {exc}")
+        return warnings
+
+    @guard
+    async def list_mcp(request: Request) -> Response:
+        servers = await in_thread(store.mcp_servers)
+        return JSONResponse({"servers": [_mcp_view(s) for s in servers],
+                             "presets": mcp_catalog.PRESETS})
+
+    @guard
+    async def create_mcp(request: Request) -> Response:
+        name, spec = _mcp_entry(await body(request))
+        server = await in_thread(store.add_mcp_server, name, spec)
+        bus.publish({"type": "mcp"})
+        return JSONResponse({"server": _mcp_view(server)})
+
+    @guard
+    async def update_mcp(request: Request) -> Response:
+        """Change an entry; with ``sync``, rewrite and restart attached agents (MCP-CAT-9)."""
+        server_id = int(request.path_params["server_id"])
+        if store.mcp_server(server_id) is None:
+            raise LookupError("no such MCP server")
+        payload = await body(request)
+        name, spec = _mcp_entry(payload)
+        server = await in_thread(store.update_mcp_server, server_id, name, spec)
+        synced = await _sync_attached(server_id) if payload.get("sync") else []
+        bus.publish({"type": "mcp"})
+        return JSONResponse({"server": _mcp_view(server), "synced": synced})
+
+    @guard
+    async def delete_mcp(request: Request) -> Response:
+        """Detach from every agent (rewriting each), then forget the entry (MCP-CAT-9)."""
+        server_id = int(request.path_params["server_id"])
+        if store.mcp_server(server_id) is None:
+            raise LookupError("no such MCP server")
+        agent_ids = sorted({int(l["agent_id"]) for l in store.mcp_links(server_id=server_id)})
+        for agent_id in agent_ids:
+            await in_thread(store.detach_mcp, agent_id, server_id)
+        synced = list(await asyncio.gather(*(sync_agent_mcp(a) for a in agent_ids)))
+        await in_thread(store.delete_mcp_server, server_id)
+        bus.publish({"type": "mcp"})
+        return JSONResponse({"deleted": server_id, "synced": synced})
+
+    @guard
+    async def set_mcp_secret(request: Request) -> Response:
+        """
+        Put one ${NAME}'s value into every attached agent's .env and restart
+        them (MCP-CAT-3). The value is never stored here and never returned.
+        """
+        server_id = int(request.path_params["server_id"])
+        server = store.mcp_server(server_id)
+        if server is None:
+            raise LookupError("no such MCP server")
+        payload = await body(request)
+        name = str(payload.get("name") or "")
+        value = str(payload.get("value") or "")
+        if name not in mcp_catalog.referenced_vars(server["spec"]):
+            raise ValueError(f"'{name}' is not a ${{NAME}} this server uses")
+        if not value:
+            raise ValueError("a value is needed")
+        results = []
+        for link in store.mcp_links(server_id=server_id):
+            agent, machine = _agent_and_machine(int(link["agent_id"]))
+            entry: Dict[str, Any] = {"agent_id": agent["id"],
+                                     "agent": agent.get("qualified") or agent["name"]}
+            try:
+                prefix = str(agent["prefix"] or "")
+                await in_thread(driver.set_env_var, machine, prefix, name, value)
+                outcome = await in_thread(
+                    driver.supervisor_action, machine, prefix, agent["name"], "restart")
+                entry["ok"] = bool(outcome.get("ok"))
+                if not outcome.get("ok"):
+                    entry["error"] = "set, but the restart failed"
+            except MachineError as exc:
+                entry.update(ok=False, error=str(exc))
+            results.append(entry)
+        logger.info(f"mcp: set {name} for {server['name']} on {len(results)} agent(s)")
+        return JSONResponse({"name": name, "agents": results})
+
+    @guard
+    async def get_agent_mcp(request: Request) -> Response:
+        """An agent's attached entries, with the catalog to choose from (MCP-CAT-12)."""
+        agent_id = int(request.path_params["agent_id"])
+        _agent_and_machine(agent_id)
+        links = await in_thread(store.mcp_links, agent_id)
+        servers = await in_thread(store.mcp_servers)
+        return JSONResponse({
+            "attached": [{"server_id": l["server_id"], "name": l["name"],
+                          "overrides": l["overrides"]} for l in links],
+            "catalog": [_mcp_view(s) for s in servers],
+        })
+
+    @guard
+    async def attach_agent_mcp(request: Request) -> Response:
+        """Attach an entry (or change its overrides), then sync the agent (MCP-CAT-5)."""
+        agent_id = int(request.path_params["agent_id"])
+        agent, machine = _agent_and_machine(agent_id)
+        payload = await body(request)
+        server = store.mcp_server(int(payload.get("server_id") or 0))
+        if server is None:
+            raise LookupError("no such MCP server")
+        overrides = _overrides(payload.get("overrides"))
+        await in_thread(store.attach_mcp, agent_id, int(server["id"]), overrides)
+        warnings = await _attach_warnings(agent, machine, server)
+        synced = await sync_agent_mcp(agent_id)
+        bus.publish({"type": "mcp"})
+        return JSONResponse({"synced": synced, "warnings": warnings})
+
+    @guard
+    async def detach_agent_mcp(request: Request) -> Response:
+        agent_id = int(request.path_params["agent_id"])
+        _agent_and_machine(agent_id)
+        await in_thread(store.detach_mcp, agent_id, int(request.path_params["server_id"]))
+        synced = await sync_agent_mcp(agent_id)
+        bus.publish({"type": "mcp"})
+        return JSONResponse({"synced": synced})
+
     @guard
     async def get_settings(request: Request) -> Response:
         """
@@ -1536,6 +1749,15 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/channels/{channel_id:int}/auto-approve",
               set_auto_approve, methods=["POST"]),
         Route("/api/approvals/{approval_id}", resolve_approval, methods=["POST"]),
+        Route("/api/mcp", list_mcp),
+        Route("/api/mcp", create_mcp, methods=["POST"]),
+        Route("/api/mcp/{server_id:int}", update_mcp, methods=["PUT"]),
+        Route("/api/mcp/{server_id:int}", delete_mcp, methods=["DELETE"]),
+        Route("/api/mcp/{server_id:int}/secret", set_mcp_secret, methods=["POST"]),
+        Route("/api/agents/{agent_id:int}/mcp", get_agent_mcp),
+        Route("/api/agents/{agent_id:int}/mcp", attach_agent_mcp, methods=["POST"]),
+        Route("/api/agents/{agent_id:int}/mcp/{server_id:int}", detach_agent_mcp,
+              methods=["DELETE"]),
         Route("/api/settings", get_settings),
         Route("/api/settings", put_settings, methods=["PUT"]),
         Route("/api/board/say", board_say, methods=["POST"]),

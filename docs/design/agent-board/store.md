@@ -21,6 +21,11 @@ state.
   `context_epoch`), `channel_members`, `messages` (channel, sender kind
   `human`/`agent`/`system`, sender, target, text, time), `settings`
   (key → JSON value).
+- AC-STORE-13: `mcp_servers` (name, unique; `spec`, the entry's settings as
+  JSON, holding `${NAME}` references and never secret values) and
+  `agent_mcp` (agent, server, per-agent `overrides` as JSON), both removed
+  with their agent or entry. `mcp_links` returns links with the entry's name
+  and spec (MCP-CAT-1, MCP-CAT-5).
 - AC-STORE-4: Columns added in later versions are added on open, so an old
   database keeps working.
 

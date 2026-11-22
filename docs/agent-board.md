@@ -602,13 +602,27 @@ Two consequences of a dispatch timing out, both now stated in the channel:
 
 ## MCP servers
 
-Give an agent the tools of [MCP](https://modelcontextprotocol.io) servers by
-adding `mcp_servers` to its `agent.yaml` (⚙ Settings) and any token to its
-`.env` — see [sdk.md](sdk.md#mcp-servers) for the format. Agents the board
-installs have the MCP extra; an agent installed earlier needs a Reinstall.
+Define [MCP](https://modelcontextprotocol.io) servers once on the **MCP**
+tab, then attach them to agents. Each agent runs its own copy of each server
+it has.
 
-- **Agents tab:** the MCP column lists each server, connected with its tool
-  count or not connected with why (hover for details).
+1. **MCP tab → Add server.** Start from a preset (fetch, time, git,
+   filesystem, GitHub, browser) or fill in the command or URL. Write secrets as
+   `${NAME}` — for example `Authorization: Bearer ${GITHUB_TOKEN}` — never the
+   value.
+2. **Agent → ⚙ Settings → MCP → Attach.** Optionally narrow its tools or change
+   its approval for this agent. The board writes it into the agent's
+   `agent.yaml` (under `board_mcp_servers`) and restarts the agent. It warns if
+   the machine lacks `npx` / `uvx`, or a `${NAME}` is not set yet.
+3. **MCP tab → Set NAME…** for each secret. The value goes into the `.env` of
+   every agent the server is attached to; the board does not keep it.
+
+The MCP tab shows each attached agent's state (✓ with its tool count, or ✗
+with why). Editing a server asks whether to update the agents it is attached
+to now; deleting one detaches it everywhere. Agents installed before MCP
+support need a Reinstall.
+
+- **Agents tab:** the MCP column lists each agent's servers.
 - **Machines tab:** whether `npx` and `uvx` are on the machine — most stdio
   servers need one of them. Test the machine to re-check.
 - **Prompts:** each agent is told its MCP tools, and the roster says which
@@ -616,6 +630,10 @@ installs have the MCP extra; an agent installed earlier needs a Reinstall.
 - **Approvals:** MCP tools run without asking unless their server says
   `approval: true` or `destructive`. When one asks, a channel set to **safe**
   approves read-only tools and always leaves destructive ones to you.
+
+Servers can still be written into an agent's `agent.yaml` by hand under
+`mcp_servers` ([sdk.md](sdk.md#mcp-servers)); the board leaves those alone, and
+one with the same name as an attached catalog server wins.
 
 ## Security
 

@@ -10,11 +10,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from declarative_agent_sdk.core.agent_logging import get_logger
+
 from declarative_agent_sdk.core.constants import (
     DEFAULT_MODEL,
     SKILLS_DIRECTORY,
     WORKSPACE_DIRECTORY,
 )
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -65,6 +69,27 @@ class CommonAgentConfig:
     framework: str = "lean"
 
 
+def _mcp_servers(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    The agent's MCP servers: the board's (``board_mcp_servers``, written by
+    agent-board's MCP catalog) and the hand-written ones (``mcp_servers``).
+    On a name in both, the hand-written one wins (MCP-CAT-7).
+    """
+    board = config.get("board_mcp_servers") or {}
+    own = config.get("mcp_servers") or {}
+    # Not a mapping: passed on as it is, for the MCP parser to refuse with
+    # its own message (MCP-CFG-1).
+    if not isinstance(own, dict):
+        return own
+    if not isinstance(board, dict):
+        return board
+    clash = sorted(set(board) & set(own), key=str)
+    if clash:
+        logger.warning(f"MCP server(s) {clash} are in both mcp_servers and "
+                       "board_mcp_servers; using the mcp_servers entries")
+    return {**board, **own}
+
+
 def parse_common_config(
     config: Dict[str, Any],
     *,
@@ -104,7 +129,7 @@ def parse_common_config(
         retry_malformed_tool_calls=config.get("retry_malformed_tool_calls"),
         tools=list(config.get("tools") or []),
         tools_approval_required=config.get("tools_approval_required", True),
-        mcp_servers=dict(config.get("mcp_servers") or {}),
+        mcp_servers=_mcp_servers(config),
         config_dir=config.get("_config_dir"),
         skills=config.get("skills"),
         skills_directory=config.get("skills_directory", SKILLS_DIRECTORY),

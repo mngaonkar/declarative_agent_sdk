@@ -124,6 +124,26 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- The MCP catalog (docs/design/mcp.md, MCP-CAT-*): server definitions, and
+-- which agents have which. spec is the mcp_servers settings as JSON; it holds
+-- ${NAME} references, never secret values (MCP-CAT-2).
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name    TEXT NOT NULL UNIQUE,
+    spec    TEXT NOT NULL DEFAULT '{}',
+    created TEXT NOT NULL,
+    updated TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_mcp (
+    agent_id  INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    -- per-agent overrides: {"tools": [...], "approval": "..."}
+    overrides TEXT NOT NULL DEFAULT '{}',
+    attached  TEXT NOT NULL,
+    PRIMARY KEY (agent_id, server_id)
+);
 """
 
 def running_from_checkout() -> bool:
@@ -490,6 +510,75 @@ class Store:
         return len(gone)
 
     # -------------------------------------------------------------- channels
+
+    # ------------------------------------------------------------ MCP catalog
+
+    @staticmethod
+    def _decode_mcp(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if row is None:
+            return None
+        for column in ("spec", "overrides"):
+            if isinstance(row.get(column), str):
+                try:
+                    row[column] = json.loads(row[column] or "{}")
+                except json.JSONDecodeError:
+                    row[column] = {}
+        return row
+
+    def mcp_servers(self) -> List[Dict[str, Any]]:
+        return [self._decode_mcp(r) for r in self._rows(
+            "SELECT * FROM mcp_servers ORDER BY name")]
+
+    def mcp_server(self, server_id: int) -> Optional[Dict[str, Any]]:
+        return self._decode_mcp(self._row("SELECT * FROM mcp_servers WHERE id = ?",
+                                          (server_id,)))
+
+    def add_mcp_server(self, name: str, spec: Dict[str, Any]) -> Dict[str, Any]:
+        if self._row("SELECT id FROM mcp_servers WHERE name = ?", (name,)):
+            raise ValueError(f"an MCP server named '{name}' is already in the catalog")
+        server_id = self._write(
+            "INSERT INTO mcp_servers (name, spec, created, updated) VALUES (?, ?, ?, ?)",
+            (name, json.dumps(spec), _now(), _now()))
+        return self.mcp_server(server_id) or {}
+
+    def update_mcp_server(self, server_id: int, name: str, spec: Dict[str, Any]) -> Dict[str, Any]:
+        clash = self._row("SELECT id FROM mcp_servers WHERE name = ? AND id != ?",
+                          (name, server_id))
+        if clash:
+            raise ValueError(f"an MCP server named '{name}' is already in the catalog")
+        self._write("UPDATE mcp_servers SET name = ?, spec = ?, updated = ? WHERE id = ?",
+                    (name, json.dumps(spec), _now(), server_id))
+        return self.mcp_server(server_id) or {}
+
+    def delete_mcp_server(self, server_id: int) -> None:
+        self._write("DELETE FROM mcp_servers WHERE id = ?", (server_id,))
+
+    def attach_mcp(self, agent_id: int, server_id: int,
+                   overrides: Optional[Dict[str, Any]] = None) -> None:
+        """Attach, or replace the overrides of an existing link (MCP-CAT-5)."""
+        self._write(
+            "INSERT INTO agent_mcp (agent_id, server_id, overrides, attached) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT (agent_id, server_id) "
+            "DO UPDATE SET overrides = excluded.overrides",
+            (agent_id, server_id, json.dumps(overrides or {}), _now()))
+
+    def detach_mcp(self, agent_id: int, server_id: int) -> None:
+        self._write("DELETE FROM agent_mcp WHERE agent_id = ? AND server_id = ?",
+                    (agent_id, server_id))
+
+    def mcp_links(self, agent_id: Optional[int] = None,
+                  server_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Links with the server's name and spec, optionally for one agent or server."""
+        sql = ("SELECT l.agent_id, l.server_id, l.overrides, l.attached, s.name, s.spec "
+               "FROM agent_mcp l JOIN mcp_servers s ON s.id = l.server_id WHERE 1 = 1")
+        args: tuple = ()
+        if agent_id is not None:
+            sql += " AND l.agent_id = ?"
+            args += (agent_id,)
+        if server_id is not None:
+            sql += " AND l.server_id = ?"
+            args += (server_id,)
+        return [self._decode_mcp(r) for r in self._rows(sql + " ORDER BY s.name", args)]
 
     def add_channel(self, name: str, topic: str = "") -> Dict[str, Any]:
         channel_id = self._write(

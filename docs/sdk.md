@@ -401,6 +401,10 @@ mcp_servers:
   `startup_timeout` (default 30 s), `enabled: false`. Quote a server named
   `on`, `off`, `yes` or `no` — YAML reads those as true/false.
 
+On an agent-board, servers are usually defined once on its MCP tab and
+attached to agents; the board writes them under `board_mcp_servers`, which the
+agent reads alongside `mcp_servers` (yours wins on a shared name).
+
 Works the same in all three runtimes (`lean`, `adk`, `deepagent`). Design:
 [design/mcp.md](design/mcp.md).
 

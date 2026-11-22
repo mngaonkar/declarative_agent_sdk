@@ -84,6 +84,13 @@ templates.
   (AC-SERVER-7).
 - AC-UI-AGENTS-3: An MCP column shows each agent's MCP servers (MCP-BOARD-1);
   `—` when it has none or could not be read, with the reason on hover.
+- AC-UI-MCP-1: An MCP tab between Machines and Logs: the catalog (MCP-CAT-11),
+  an editor with presets (MCP-CAT-4), Set… for each `${NAME}` (a password
+  field, cleared after sending), and each attached agent's state from the
+  agent poll, which runs while this tab or Agents is open.
+- AC-UI-MCP-2: An agent's Settings has an MCP tab (MCP-CAT-12). Its changes
+  apply at once and say the agent restarts; warnings from attaching
+  (MCP-CAT-8) are shown.
 - AC-UI-MACH-1: The Machines tab shows, per machine, whether `npx` and `uvx`
   were found by the last probe (MCP-BOARD-4).
 

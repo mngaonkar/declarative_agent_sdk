@@ -23,6 +23,7 @@ files that read them.
 | `tools` | `[]` | Extra tools by name. Core tools are added anyway (TOOLS-REG-3). |
 | `tools_approval_required` | `true` | Ask a human before running a tool. |
 | `mcp_servers` | none | MCP servers whose tools the agent gets ([mcp.md](mcp.md)). |
+| `board_mcp_servers` | none | Written by agent-board's MCP catalog; read like `mcp_servers`, which wins on a shared name (MCP-CAT-7). |
 | `skills` | all found | Skill names to load from `skills_directory`. |
 | `skills_directory` | `skills` | Folder of `<skill>/SKILL.md`, relative to the YAML file. |
 | `workspace_directory` | `workspace` | The agent's working folder. Its files are served by link (CORE-SHARE-1). |

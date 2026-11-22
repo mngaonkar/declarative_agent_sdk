@@ -59,6 +59,17 @@ stream and the static UI.
   every ticket. A `<video>` cannot send the Authorization header, and the
   board token never goes in a URL.
 
+**Rules — MCP catalog:**
+
+- AC-SERVER-14: Attaching, detaching, editing with sync and deleting all go
+  through one step: read the agent's `agent.yaml`, set `board_mcp_servers`
+  from its links (MCP-CAT-6), write it and restart the agent — skipped when
+  nothing changed (MCP-CAT-10). Each agent's outcome is returned; one failing
+  agent does not stop the others.
+- AC-SERVER-15: A secret's value goes from the request straight to
+  `set_env_var` on each attached agent's machine (AC-MACH-11); it is not
+  stored, logged or returned (MCP-CAT-3).
+
 **Rules — logs:**
 
 - AC-SERVER-9: `GET /api/logs?after=&level=&q=&limit=` pages the control log
@@ -93,6 +104,11 @@ stream and the static UI.
 | GET | `/api/agents/{id}/logs`, `/logs/download` | AC-SERVER-10 |
 | POST | `/api/models` | list a provider's models for the create form |
 | GET | `/api/files/relay` | AC-SERVER-8 |
+| GET / POST | `/api/mcp` | the MCP catalog and presets; add an entry (MCP-CAT-1) |
+| PUT / DELETE | `/api/mcp/{id}` | edit (optionally updating attached agents) or delete (MCP-CAT-9) |
+| POST | `/api/mcp/{id}/secret` | write one `${NAME}` into attached agents' `.env` (MCP-CAT-3) |
+| GET / POST | `/api/agents/{id}/mcp` | an agent's attached entries; attach or change overrides (MCP-CAT-5) |
+| DELETE | `/api/agents/{id}/mcp/{server_id}` | detach |
 | POST | `/api/files/ticket` | AC-SERVER-13 |
 | POST | `/api/channels` | create a channel |
 | DELETE | `/api/channels/{id}` | delete a channel |

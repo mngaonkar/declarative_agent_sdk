@@ -25,6 +25,7 @@
       <button class="view-tab active" data-view="board">Board</button>
       <button class="view-tab" data-view="agents">Agents</button>
       <button class="view-tab" data-view="machines">Machines</button>
+      <button class="view-tab" data-view="mcp">MCP</button>
       <button class="view-tab" data-view="logs">Logs</button>
       <button class="view-tab" data-view="settings">Settings</button>
     </nav>
@@ -133,6 +134,18 @@
       </div>
     </header>
     <div class="scroll"><table class="grid" id="machines-table"></table></div>
+  </main>
+
+  <!-- ─── MCP view ────────────────────────────────────────────────────── -->
+  <main class="pane hidden" id="view-mcp">
+    <header class="pane-head">
+      <div><h1>MCP servers</h1><p class="sub">Defined once, attached to agents in their
+        ⚙ Settings — each agent runs its own copy</p></div>
+      <div class="head-actions">
+        <button class="btn primary" id="new-mcp">Add server</button>
+      </div>
+    </header>
+    <div class="scroll"><table class="grid" id="mcp-table"></table></div>
   </main>
 
   <!-- ─── settings view ───────────────────────────────────────────────── -->
@@ -271,6 +284,54 @@
     <p class="note">The host needs <code>uv</code> and key-based SSH. agent-board
        stages <code>install.sh</code> under <code>~/.agent-board/bin</code> and runs it there.</p>
     <div class="form-actions"><button class="btn primary" type="submit">Register</button></div>
+  </form>
+</template>
+
+<template id="tpl-mcp-form">
+  <form class="form mcp-form">
+    <label class="preset-row">Start from a preset
+      <select name="preset"><option value="">—</option></select>
+    </label>
+    <label>Name <input name="name" placeholder="github" required pattern="[a-z0-9_-]+">
+      <small>Lower-case letters, digits, '-' and '_'. Tools appear as
+             <code>name__tool</code>.</small>
+    </label>
+    <label>Transport
+      <select name="transport">
+        <option value="stdio">stdio — a program on the agent's machine</option>
+        <option value="http">http — a remote server (streamable HTTP)</option>
+        <option value="sse">sse — a remote server (older SSE)</option>
+      </select>
+    </label>
+    <div class="when-stdio">
+      <label>Command <input name="command" placeholder="uvx or npx"></label>
+      <label>Arguments <textarea name="args" rows="3" placeholder="one per line"></textarea></label>
+      <label>Environment <textarea name="env" rows="2" placeholder="NAME=value, one per line"></textarea></label>
+      <label>Working directory <input name="cwd" placeholder="optional"></label>
+    </div>
+    <div class="when-remote">
+      <label>URL <input name="url" placeholder="https://…/mcp"></label>
+      <label>Headers <textarea name="headers" rows="2"
+               placeholder="Authorization: Bearer ${GITHUB_TOKEN}"></textarea></label>
+    </div>
+    <label>Tools <input name="tools" placeholder="all — or a comma-separated allowlist"></label>
+    <label>Approval
+      <select name="approval">
+        <option value="false">no — run without asking</option>
+        <option value="destructive">only for tools the server marks destructive</option>
+        <option value="true">always ask</option>
+      </select>
+    </label>
+    <div class="row-2">
+      <label>Call timeout (s) <input name="timeout" type="number" min="1" placeholder="60"></label>
+      <label>Start timeout (s) <input name="startup_timeout" type="number" min="1" placeholder="30"></label>
+    </div>
+    <p class="note">Write secrets as <code>${NAME}</code> — never the value. Set the value
+       with <strong>Set…</strong> on the MCP tab; it goes into each attached agent's
+       <code>.env</code> and is not kept here. <code>${WORKSPACE}</code> is the agent's
+       workspace folder. A stdio server runs on the agent's machine with the agent's
+       access: add only servers you trust.</p>
+    <div class="form-actions"><button class="btn primary" type="submit">Save</button></div>
   </form>
 </template>
 
