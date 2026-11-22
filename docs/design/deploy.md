@@ -68,7 +68,9 @@ config and a supervisord program, then starts it and reports the result.
 
 - DEPLOY-INST-4: `--source git` (default, branch `master`), `release`, or
   `wheel` (a file on this machine). A wheel is always force-reinstalled,
-  because its version does not change while code is being worked on.
+  because its version does not change while code is being worked on. The
+  SDK is always installed with its `mcp` extra, so an agent can be given MCP
+  servers without a reinstall.
 - DEPLOY-INST-5: When a `uv` step fails, the error includes the last 20 lines
   of what it printed.
 

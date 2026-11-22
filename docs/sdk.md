@@ -367,6 +367,43 @@ Add your own with `ToolRegistry.register("my_tool", my_fn)` or
 `ToolRegistry.register_from_scripts_folder("path/to/scripts")` **before**
 building the agent — then list the name in `tools:` like any builtin.
 
+### MCP servers
+
+Give an agent the tools of any [MCP](https://modelcontextprotocol.io) server.
+Install the SDK with the `mcp` extra (`declarative-agent-sdk[mcp]`; agents the
+board installs have it), then list servers in the YAML:
+
+```yaml
+mcp_servers:
+  github:
+    transport: http                  # stdio | http | sse
+    url: https://api.githubcopilot.com/mcp/
+    headers:
+      Authorization: "Bearer ${GITHUB_TOKEN}"   # filled in from the agent's .env
+    tools: [search_code, get_file_contents]     # optional allowlist
+  files:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "${WORKSPACE}"]
+    approval: destructive            # false (default) | true | destructive
+```
+
+- Tools appear as `<server>__<tool>`, for example `github__search_code`.
+- They run **without asking** unless the server says `approval: true` (ask for
+  every tool) or `approval: destructive` (ask for tools the server marks
+  destructive). A stdio server is a program on the agent's machine — add only
+  servers you trust.
+- Images and files a tool returns are saved under `workspace/mcp/<server>/`
+  and linked, so the board previews them.
+- A server that fails to start is left out with the reason in the log; the
+  agent starts anyway. `GET /mcp` on the agent shows each server's state.
+- Other keys: `env`, `cwd` (stdio), `timeout` (per call, default 60 s),
+  `startup_timeout` (default 30 s), `enabled: false`. Quote a server named
+  `on`, `off`, `yes` or `no` — YAML reads those as true/false.
+
+Phase 1 supports the `lean` runtime; `adk` and `deepagent` follow. Design:
+[design/mcp.md](design/mcp.md).
+
 ### Workspace & other
 
 | Parameter | Type | Default | Description |

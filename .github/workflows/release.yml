@@ -34,7 +34,7 @@ jobs:
           # requires-python = ">=3.14" lets uv pick 3.15, where several
           # dependencies have no wheels yet and fall back to source builds that
           # fail. Printed below so the log shows what actually ran.
-          uv sync --extra discord --extra dev
+          uv sync --extra discord --extra dev --extra mcp
           uv run python -V
           uv run pytest tests/ -q
 

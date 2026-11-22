@@ -79,6 +79,7 @@ class AgentFactory:
         with open(yaml_path, "r") as f:
             config = yaml.safe_load(f) or {}
         base_dir = yaml_path.parent
+        config["_config_dir"] = str(base_dir)
         for key in ("instruction_file", "workspace_directory", "skills_directory"):
             value = config.get(key)
             if isinstance(value, str) and value and not Path(value).is_absolute():
@@ -173,6 +174,8 @@ class AgentFactory:
             instruction_file=common.instruction_file,
             tools=common.tools,
             tools_approval_required=common.tools_approval_required,
+            mcp_servers=common.mcp_servers,
+            config_dir=common.config_dir,
             skills_directory=common.skills_directory,
             workspace_directory=common.workspace_directory,
             skills=common.skills,

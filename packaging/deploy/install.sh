@@ -725,18 +725,18 @@ fi
 # --- source ----------------------------------------------------------------
 
 if [ "$SOURCE_KIND" = "git" ]; then
-  WHEEL_SPEC="declarative-agent-sdk @ ${GIT_URL}@${GIT_REF}"
+  WHEEL_SPEC="declarative-agent-sdk[mcp] @ ${GIT_URL}@${GIT_REF}"
   SOURCE_LABEL="git:$GIT_REF"
 elif [ "$SOURCE_KIND" = "wheel" ]; then
   # A file already on this machine. --upgrade alone will not replace an
   # installed wheel of the same version, which is the normal case when
   # iterating on unreleased code, so this one is forced.
-  WHEEL_SPEC="$WHEEL_FILE"
+  WHEEL_SPEC="${WHEEL_FILE}[mcp]"
   SOURCE_LABEL="wheel:$(basename "$WHEEL_FILE")"
   FORCE_REINSTALL=1
 else
   RELEASE_VERSION="${RELEASE_VERSION#v}"
-  WHEEL_SPEC="declarative-agent-sdk @ $REPO_URL/releases/download/v${RELEASE_VERSION}/declarative_agent_sdk-${RELEASE_VERSION}-py3-none-any.whl"
+  WHEEL_SPEC="declarative-agent-sdk[mcp] @ $REPO_URL/releases/download/v${RELEASE_VERSION}/declarative_agent_sdk-${RELEASE_VERSION}-py3-none-any.whl"
   SOURCE_LABEL="release:$RELEASE_VERSION"
 fi
 

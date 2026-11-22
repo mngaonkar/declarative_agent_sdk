@@ -91,6 +91,12 @@ tools = [
     "langchain-tavily>=0.1.0",  # For Tavily search tool
 ]
 
+# MCP servers as tools (docs/design/mcp.md). mcp 2.x: FastMCP became
+# MCPServer and the HTTP client is httpx2.
+mcp = [
+    "mcp>=2.3,<3",
+]
+
 # Discord bot integration
 discord = [
     "discord.py>=2.4.0",
@@ -98,7 +104,7 @@ discord = [
 
 # All optional features
 all = [
-    "declarative-agent-sdk[dev,vllm,tools,discord]",
+    "declarative-agent-sdk[dev,vllm,tools,discord,mcp]",
 ]
 
 [project.scripts]
@@ -129,6 +135,7 @@ packages = [
     "declarative_agent_sdk.agents.deepagent",
     "declarative_agent_sdk.tools",
     "declarative_agent_sdk.tools.builtin",
+    "declarative_agent_sdk.tools.mcp",
     "declarative_agent_sdk.models",
     "declarative_agent_sdk.transports",
     "declarative_agent_sdk.transports.discord",

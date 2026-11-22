@@ -22,7 +22,8 @@ Code: `transports/__init__.py`, `transports/a2a/`.
 - A2A-SERVER-1: Routes: the agent card at `/.well-known/agent-card.json`, the
   JSON-RPC endpoint, `GET /context` (how big the agent's history is),
   `DELETE /context?session=…` (forget one or all histories), and
-  `GET /files/{path}` (workspace files, CORE-SHARE-1).
+  `GET /files/{path}` (workspace files, CORE-SHARE-1), and `GET /mcp` (the
+  agent's MCP servers, MCP-LIFE-5; an empty list when it has none).
 - A2A-SERVER-2: The card's URL is the agent's published address. When bound
   to `0.0.0.0` and no URL is set, it uses the address the default route goes
   out of — never `0.0.0.0`.

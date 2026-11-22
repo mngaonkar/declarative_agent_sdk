@@ -19,7 +19,7 @@ from declarative_agent_sdk.core.constants import SKILLS_DIRECTORY, WORKSPACE_DIR
 from declarative_agent_sdk.agents.lean.runtime.llm import LeanLLMClient
 from declarative_agent_sdk.agents.lean.runtime.loop import LeanLoop, LoopEvent
 from declarative_agent_sdk.agents.lean.runtime.skills import SkillRegistry
-from declarative_agent_sdk.agents.lean.runtime.tools import LeanToolRegistry
+from declarative_agent_sdk.agents.lean.runtime.tools import AUTO_APPROVE_TOOLS, LeanToolRegistry
 from declarative_agent_sdk.tools.tool_registry import ToolRegistry
 from declarative_agent_sdk.core.utils import read_from_file
 
@@ -79,6 +79,8 @@ class LeanAIAgent(BaseAgent):
         description: str = "",
         tools: Optional[list] = None,
         tools_approval_required: bool = True,
+        mcp_servers: Optional[Dict[str, Any]] = None,
+        config_dir: Optional[str] = None,
         skills_directory: str = SKILLS_DIRECTORY,
         workspace_directory: str = WORKSPACE_DIRECTORY,
         skills: Optional[List[str]] = None,  # unused — discovers all under skills_directory
@@ -141,6 +143,18 @@ class LeanAIAgent(BaseAgent):
             except Exception as exc:
                 logger.warning(f"Could not register tool {fn!r}: {exc}")
 
+        # MCP servers (docs/design/mcp.md). A bad block fails the build here,
+        # with the reason; a server that will not start is only left out.
+        self.mcp = None
+        mcp_auto: set = set()
+        if mcp_servers:
+            from declarative_agent_sdk.tools.mcp import McpHub, parse_mcp_servers, register_lean
+            workspace = str(Path(workspace_directory).resolve())
+            configs = parse_mcp_servers(mcp_servers, os.environ, workspace, base_dir=config_dir)
+            if configs:
+                self.mcp = McpHub(configs, workspace).start()
+                mcp_auto = register_lean(self.mcp, self._tools)
+
         base_url = _resolve_base_url(provider, endpoint_url)
         key = _resolve_api_key(provider, api_key)
         # vLLM often needs no key
@@ -166,6 +180,7 @@ class LeanAIAgent(BaseAgent):
             max_step_retries=max_step_retries,
             max_no_tool_continues=max_no_tool_continues,
             tools_approval_required=tools_approval_required,
+            auto_approve=AUTO_APPROVE_TOOLS | mcp_auto,
             **({} if history_limit is None else {"history_limit": history_limit}),
             **({} if tool_payload_keep is None
                else {"tool_payload_keep": tool_payload_keep}),

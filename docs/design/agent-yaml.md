@@ -22,6 +22,7 @@ files that read them.
 | `endpoint.timeout` / `request_timeout` | lean 300 s | Seconds one model call may take. `endpoint.` wins. |
 | `tools` | `[]` | Extra tools by name. Core tools are added anyway (TOOLS-REG-3). |
 | `tools_approval_required` | `true` | Ask a human before running a tool. |
+| `mcp_servers` | none | MCP servers whose tools the agent gets ([mcp.md](mcp.md)). |
 | `skills` | all found | Skill names to load from `skills_directory`. |
 | `skills_directory` | `skills` | Folder of `<skill>/SKILL.md`, relative to the YAML file. |
 | `workspace_directory` | `workspace` | The agent's working folder. Its files are served by link (CORE-SHARE-1). |

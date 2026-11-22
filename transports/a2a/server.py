@@ -69,7 +69,8 @@ class AIAgentServer():
             + create_jsonrpc_routes(request_handler, DEFAULT_RPC_URL)
             + [Route("/context", self._context_route, methods=["GET"]),
                Route("/context", self._reset_context_route, methods=["DELETE"]),
-               Route("/files/{path:path}", self._file_route, methods=["GET"])]
+               Route("/files/{path:path}", self._file_route, methods=["GET"]),
+               Route("/mcp", self._mcp_route, methods=["GET"])]
         )
 
         self.app = Starlette(routes=routes)
@@ -99,6 +100,16 @@ class AIAgentServer():
             # Files change as agents edit them; always read the current one.
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
+
+    async def _mcp_route(self, request):
+        """
+        This agent's MCP servers: connected or why not, and their tools
+        (MCP-LIFE-5). Never headers or env values, which may hold tokens.
+        """
+        hub = getattr(self._agent, "mcp", None)
+        if hub is None:
+            return JSONResponse({"agent": self._agent.name, "servers": []})
+        return JSONResponse({"agent": self._agent.name, "servers": hub.status()})
 
     async def _reset_context_route(self, request):
         """

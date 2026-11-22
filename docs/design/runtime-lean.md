@@ -35,6 +35,10 @@ turns loop events into `AgentEvent`s.
 - LEAN-AGENT-4: `workspace_directory` and `skills_directory` are created if
   missing. `workspace_directory` is kept on the agent so the A2A server can
   serve it (CORE-SHARE-5).
+- LEAN-AGENT-9: With `mcp_servers`, the agent starts an `McpHub` (kept as
+  `agent.mcp`, else `None`) and registers its tools (MCP-RT-1); tools that
+  need no approval (MCP-APPR-1) join the loop's auto-approve set. A bad block
+  fails the build with the reason; a server that will not start is left out.
 - LEAN-AGENT-5: Loop events map one to one: `tool_approval` →
   `AgentEvent.tool_approval`, `final` → `final_text`, `error` → `error`,
   anything else → `status`.

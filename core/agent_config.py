@@ -37,6 +37,11 @@ class CommonAgentConfig:
     retry_malformed_tool_calls: Optional[int] = None
     tools: List[Any] = field(default_factory=list)
     tools_approval_required: bool = True
+    # MCP servers (docs/design/mcp.md): the raw mapping from the YAML, parsed
+    # by tools/mcp/config.py when the agent is built.
+    mcp_servers: Dict[str, Any] = field(default_factory=dict)
+    # The YAML's folder, for a relative MCP server cwd; None for a dict config.
+    config_dir: Optional[str] = None
     skills: Optional[List[str]] = None
     skills_directory: str = SKILLS_DIRECTORY
     workspace_directory: str = WORKSPACE_DIRECTORY
@@ -99,6 +104,8 @@ def parse_common_config(
         retry_malformed_tool_calls=config.get("retry_malformed_tool_calls"),
         tools=list(config.get("tools") or []),
         tools_approval_required=config.get("tools_approval_required", True),
+        mcp_servers=dict(config.get("mcp_servers") or {}),
+        config_dir=config.get("_config_dir"),
         skills=config.get("skills"),
         skills_directory=config.get("skills_directory", SKILLS_DIRECTORY),
         workspace_directory=config.get("workspace_directory", WORKSPACE_DIRECTORY),
