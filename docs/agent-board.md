@@ -21,7 +21,7 @@ Options go after `bash -s --`:
 ```bash
 curl -fsSL …/install.sh | bash -s -- --port 9000       # another port
 curl -fsSL …/install.sh | bash -s -- --host 0.0.0.0    # reachable from other machines (makes a token)
-curl -fsSL …/install.sh | bash -s -- --ref v0.9.2      # a tag, branch or commit
+curl -fsSL …/install.sh | bash -s -- --ref v0.9.3      # a tag, branch or commit
 curl -fsSL …/install.sh | bash -s -- --no-service      # just the command
 curl -fsSL …/install.sh | bash -s -- --uninstall       # remove (keeps ~/.agent-board)
 ```

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "declarative-agent-sdk"
-version = "0.9.2"
+version = "0.9.3"
 description = "YAML-first agents with peer runtimes (lean, Google ADK, deepagents), Discord and A2A transports, progressive skills and tool approval"
 readme = "README.md"
 requires-python = ">=3.14"

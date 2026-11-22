@@ -43,15 +43,15 @@ Python 3.14 itself if the host does not have it.
 # From a published release — no checkout, nothing to download by hand
 uv venv --python 3.14 .venv
 uv pip install --python .venv/bin/python \
-  "declarative-agent-sdk[discord] @ https://github.com/mngaonkar/declarative_agent_sdk/releases/download/v0.9.2/declarative_agent_sdk-0.9.2-py3-none-any.whl"
+  "declarative-agent-sdk[discord] @ https://github.com/mngaonkar/declarative_agent_sdk/releases/download/v0.9.3/declarative_agent_sdk-0.9.3-py3-none-any.whl"
 .venv/bin/declarative-agent version
 
 # From a wheel already on disk — one wheel works on every platform (py3-none-any)
-uv pip install --python .venv/bin/python "./declarative_agent_sdk-0.9.2-py3-none-any.whl[discord]"
+uv pip install --python .venv/bin/python "./declarative_agent_sdk-0.9.3-py3-none-any.whl[discord]"
 
 # From git, pinned to a tag
 uv pip install --python .venv/bin/python \
-  "declarative-agent-sdk[discord] @ git+https://github.com/mngaonkar/declarative_agent_sdk.git@v0.9.2"
+  "declarative-agent-sdk[discord] @ git+https://github.com/mngaonkar/declarative_agent_sdk.git@v0.9.3"
 
 # From a checkout (development)
 uv sync --extra discord --extra dev
@@ -63,8 +63,8 @@ The wheel carries the SDK only — `examples/` is not packaged. To run an exampl
 against an installed wheel, take its directory from the matching tag:
 
 ```bash
-curl -sSL https://github.com/mngaonkar/declarative_agent_sdk/archive/refs/tags/v0.9.2.tar.gz \
-  | tar -xz --strip-components=2 declarative_agent_sdk-0.9.2/examples/a2a_lean
+curl -sSL https://github.com/mngaonkar/declarative_agent_sdk/archive/refs/tags/v0.9.3.tar.gz \
+  | tar -xz --strip-components=2 declarative_agent_sdk-0.9.3/examples/a2a_lean
 ```
 
 **Python 3.14 exactly** for now. `requires-python = ">=3.14"` would also accept
