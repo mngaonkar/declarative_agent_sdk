@@ -161,6 +161,55 @@ class LoopEvent:
 
 MAX_MALFORMED_RECOVERIES = 2
 
+# What a tool call's arguments become when they are not a JSON object. The
+# history is re-sent on every request and llama.cpp parses each past call's
+# arguments again: one broken call left in it fails every later request with
+# "failed to parse tool call arguments" — the session is stuck, and the error
+# blames the model's newest call. So a broken call is replaced at once with
+# this valid marker, which also tells the model what happened.
+UNREADABLE_ARGS = "_unreadable_arguments"
+
+
+def _repair_tool_calls(tool_calls: List[Dict[str, Any]]) -> int:
+    """
+    Make every call's arguments a JSON object string; how many were broken.
+
+    A broken call keeps its name and id, with arguments
+    ``{"_unreadable_arguments": <length of what arrived>}``.
+    """
+    broken = 0
+    for call in tool_calls or []:
+        fn = call.get("function")
+        if not isinstance(fn, dict):
+            continue
+        raw = fn.get("arguments")
+        if isinstance(raw, dict):
+            fn["arguments"] = json.dumps(raw, ensure_ascii=False)
+            continue
+        text = raw if isinstance(raw, str) else ""
+        try:
+            parsed = json.loads(text or "{}")
+        except (TypeError, ValueError):
+            parsed = None
+        if not isinstance(parsed, dict):
+            fn["arguments"] = json.dumps({UNREADABLE_ARGS: len(text)})
+            broken += 1
+    return broken
+
+
+def _unreadable_chars(call: Dict[str, Any]) -> Optional[int]:
+    """For a call _repair_tool_calls marked broken, how long it was; else None."""
+    raw = (call.get("function") or {}).get("arguments")
+    if not isinstance(raw, str) or UNREADABLE_ARGS not in raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    if isinstance(parsed, dict) and set(parsed) == {UNREADABLE_ARGS}:
+        return int(parsed[UNREADABLE_ARGS] or 0)
+    return None
+
 
 def _malformed_nudge(chars: Optional[int]) -> str:
     where = f" after about {chars:,} characters" if chars else ""
@@ -421,7 +470,7 @@ class LeanLoop:
         while i < len(tool_calls) and not stop_batch:
             call = tool_calls[i]
             name = (call.get("function") or {}).get("name") or ""
-            if self._needs_approval(name):
+            if self._needs_approval(name) and _unreadable_chars(call) is None:
                 self._pending[session_id] = PendingApproval(
                     session_id=session_id,
                     messages=messages,
@@ -521,6 +570,12 @@ class LeanLoop:
             if rounds_left <= 1:
                 self._inject_system(messages, history, _BUDGET_NUDGE)
 
+            # Safety net: every past tool call's arguments are valid JSON, or
+            # the server refuses the whole request (see UNREADABLE_ARGS).
+            for past in messages:
+                if past.get("tool_calls"):
+                    _repair_tool_calls(past["tool_calls"])
+
             # Safety net: OpenAI-compatible APIs reject incomplete tool batches.
             _close_open_tool_calls(
                 messages,
@@ -556,6 +611,7 @@ class LeanLoop:
                 return
 
             tool_calls = message.get("tool_calls") or []
+            _repair_tool_calls(tool_calls)
             content = _content_to_text(message.get("content"))
             think_text, without_think = _extract_think_blocks(content)
             visible, decision, phase = _parse_control_tags(without_think)
@@ -653,7 +709,7 @@ class LeanLoop:
             while i < len(tool_calls):
                 call = tool_calls[i]
                 name = (call.get("function") or {}).get("name") or ""
-                if self._needs_approval(name):
+                if self._needs_approval(name) and _unreadable_chars(call) is None:
                     self._pending[session_id] = PendingApproval(
                         session_id=session_id,
                         messages=messages,
@@ -674,6 +730,20 @@ class LeanLoop:
                     stop_batch = True
                     break
                 i += 1
+
+            if turn.malformed_recoveries > MAX_MALFORMED_RECOVERIES:
+                _fill_missing_tool_responses(
+                    messages, tool_calls, history=history,
+                    reason="Skipped: too many unreadable tool calls this turn.")
+                yield LoopEvent(
+                    kind="error",
+                    text=("LLM error: the model's tool calls kept arriving unreadable "
+                          f"({turn.malformed_recoveries} this turn) — its arguments were "
+                          "not valid JSON, usually because the call was too long. Ask "
+                          "for the work in smaller pieces, or use a less heavily "
+                          "quantized model."),
+                )
+                return
 
             if stop_batch:
                 # Answer remaining tool_call_ids so the next model call is valid.
@@ -748,6 +818,24 @@ class LeanLoop:
         # Ensure the assistant tool_calls entry uses this same id.
         if not call.get("id"):
             call["id"] = call_id
+
+        unreadable = _unreadable_chars(call)
+        if unreadable is not None:
+            # Nothing runs and nobody is asked to approve an empty call; the
+            # model is told, and redoes it (bounded by MAX_MALFORMED_RECOVERIES).
+            turn.malformed_recoveries += 1
+            yield LoopEvent(
+                kind="status",
+                text=(f"The model's {name or 'tool'} call arrived unreadable "
+                      f"({unreadable:,} characters of broken JSON); asking it to "
+                      f"redo it in smaller pieces ({turn.malformed_recoveries}/"
+                      f"{MAX_MALFORMED_RECOVERIES})."),
+            )
+            result_msg = {"role": "tool", "tool_call_id": call_id,
+                          "content": _malformed_nudge(unreadable or None)}
+            messages.append(result_msg)
+            history.append(result_msg)
+            return False
 
         if approved:
             yield LoopEvent(kind="status", text=f"Running tool: {name}")
