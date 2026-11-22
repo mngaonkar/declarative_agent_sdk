@@ -1924,10 +1924,13 @@ function mcpSpecFrom(form) {
   return { name: v.name.trim(), spec };
 }
 
-function openMcpEditor(server) {
+function openMcpEditor(server, prefill = null) {
   const form = formFrom('tpl-mcp-form');
   const preset = form.elements.preset;
-  if (server) {
+  if (prefill) {
+    // From the MCP Registry: say where it came from, and what to fill in.
+    form.querySelector('.preset-row').replaceWith(registryNote(prefill));
+  } else if (server) {
     form.querySelector('.preset-row').remove();
   } else {
     state.mcpPresets.forEach((p) => preset.append(new Option(`${p.name} — ${p.label}`, p.name)));
@@ -1942,7 +1945,8 @@ function openMcpEditor(server) {
     form.querySelector('.when-remote').classList.toggle('hidden', stdio);
   };
   form.elements.transport.onchange = showTransport;
-  fillMcpForm(form, server?.name || '', server?.spec || { transport: 'stdio' });
+  fillMcpForm(form, prefill?.name || server?.name || '',
+              prefill?.spec || server?.spec || { transport: 'stdio' });
   showTransport();
 
   form.onsubmit = async (event) => {
@@ -1973,6 +1977,111 @@ function openMcpEditor(server) {
 }
 
 $('#new-mcp').onclick = () => openMcpEditor(null);
+$('#browse-mcp').onclick = () => browseRegistry();
+
+const httpLink = (url, text) => {
+  const link = el('a', '', text || url);
+  if (/^https?:\/\//i.test(url || '')) { link.href = url; link.target = '_blank'; link.rel = 'noopener'; }
+  return link;
+};
+
+/** What the editor shows above a form filled from a registry entry. */
+function registryNote(prefill) {
+  const box = el('div', 'warn-box registry-note');
+  const line = el('div');
+  line.append(document.createTextNode(`From the MCP Registry: ${prefill.registryName} `));
+  if (prefill.repository) line.append(httpLink(prefill.repository, 'repository'));
+  box.append(line);
+  box.append(el('div', '', 'Registry entries are published by their authors and not ' +
+    'reviewed. A stdio server runs on the agent\'s machine with its access — read the ' +
+    'repository before saving. Replace any <placeholder> in the arguments.'));
+  if (prefill.vars.length) {
+    const list = el('ul');
+    prefill.vars.forEach((v) => {
+      const item = el('li');
+      item.append(el('code', '', v.name));
+      const flags = [v.required ? 'required' : 'optional', v.secret ? 'secret' : '']
+        .filter(Boolean).join(', ');
+      item.append(document.createTextNode(` (${flags})${v.description ? ' — ' + v.description : ''}`
+        + (v.required || v.secret ? '' : ' — not added; add it under Environment if needed')));
+      list.append(item);
+    });
+    box.append(el('div', '', 'Variables (set secrets with Set… on the MCP tab once attached):'));
+    box.append(list);
+  }
+  return box;
+}
+
+/** Search the official MCP Registry and pick a server (MCP-CAT-13). */
+function browseRegistry() {
+  const wrap = el('div', 'registry');
+  const bar = el('form', 'registry-bar');
+  const query = el('input');
+  query.placeholder = 'search — e.g. github, postgres, filesystem, browser';
+  const go = el('button', 'btn primary', 'Search');
+  go.type = 'submit';
+  bar.append(query, go);
+  const results = el('div', 'registry-results');
+  const more = el('button', 'btn small hidden', 'More results');
+  wrap.append(bar, el('p', 'note', 'From registry.modelcontextprotocol.io — servers published ' +
+    'from GitHub, npm, PyPI and Docker. Choosing one only fills in the Add server form.'),
+    results, more);
+
+  let cursor = '';
+  const search = async (append) => {
+    go.disabled = true;
+    more.disabled = true;
+    if (!append) { results.innerHTML = ''; cursor = ''; }
+    const status = el('p', 'note', 'Searching…');
+    results.append(status);
+    try {
+      const params = new URLSearchParams({ search: query.value.trim(), cursor });
+      const data = await api(`/api/mcp/registry?${params}`);
+      status.remove();
+      if (!append && !data.servers.length) results.append(el('p', 'note', 'Nothing found.'));
+      data.servers.forEach((entry) => results.append(registryResult(entry)));
+      cursor = data.next || '';
+      more.classList.toggle('hidden', !cursor);
+    } catch (error) {
+      status.className = 'warn-box';
+      status.textContent = error.message;
+    } finally { go.disabled = false; more.disabled = false; }
+  };
+  bar.onsubmit = (event) => { event.preventDefault(); search(false); };
+  more.onclick = () => search(true);
+  openModal('MCP Registry', wrap);
+  search(false);
+}
+
+function registryResult(entry) {
+  const box = el('div', 'registry-item');
+  const head = el('div', 'registry-head');
+  head.append(el('strong', '', entry.title || entry.slug),
+              el('span', 'note mono', ` ${entry.name} ${entry.version ? 'v' + entry.version : ''}`));
+  box.append(head);
+  if (entry.description) box.append(el('div', '', entry.description));
+  const links = el('div', 'note');
+  if (entry.repository) links.append(httpLink(entry.repository, 'repository'));
+  if (entry.website) { links.append(document.createTextNode(' · ')); links.append(httpLink(entry.website, 'website')); }
+  if (links.childNodes.length) box.append(links);
+  const options = el('div', 'btns');
+  entry.options.forEach((option) => {
+    if (!option.spec) {
+      const off = el('span', 'note dim', `${option.label}: ${option.unsupported}`);
+      options.append(off);
+      return;
+    }
+    const use = el('button', 'btn small', `Use ${option.label}`);
+    use.onclick = () => openMcpEditor(null, {
+      name: entry.slug, spec: option.spec, vars: option.vars || [],
+      registryName: entry.name, repository: entry.repository,
+    });
+    options.append(use);
+  });
+  if (!entry.options.length) options.append(el('span', 'note dim', 'no package or URL listed'));
+  box.append(options);
+  return box;
+}
 
 /** The MCP tab of an agent's Settings: attach, detach, override (MCP-CAT-12). */
 async function renderAgentMcp(agent, pane) {

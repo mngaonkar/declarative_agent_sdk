@@ -88,6 +88,11 @@ templates.
   an editor with presets (MCP-CAT-4), Set… for each `${NAME}` (a password
   field, cleared after sending), and each attached agent's state from the
   agent poll, which runs while this tab or Agents is open.
+- AC-UI-MCP-3: **Browse registry** opens a search over the MCP Registry
+  (MCP-CAT-13), with More results for the next page. Each result shows its
+  name, description and repository link, and a button per usable option;
+  choosing one opens Add server filled in, with a note naming the source,
+  the variables and that the entry is not reviewed.
 - AC-UI-MCP-2: An agent's Settings has an MCP tab (MCP-CAT-12). Its changes
   apply at once and say the agent restarts; warnings from attaching
   (MCP-CAT-8) are shown.

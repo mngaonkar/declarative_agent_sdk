@@ -607,7 +607,11 @@ tab, then attach them to agents. Each agent runs its own copy of each server
 it has.
 
 1. **MCP tab → Add server.** Start from a preset (fetch, time, git,
-   filesystem, GitHub, browser) or fill in the command or URL. Write secrets as
+   filesystem, GitHub, browser), fill in the command or URL — or **Browse
+   registry** to search the [MCP Registry](https://registry.modelcontextprotocol.io)
+   for servers published from GitHub, npm, PyPI and Docker, and pick one to
+   fill in the form. Registry entries are not reviewed: read the repository
+   first. Write secrets as
    `${NAME}` — for example `Authorization: Bearer ${GITHUB_TOKEN}` — never the
    value.
 2. **Agent → ⚙ Settings → MCP → Attach.** Optionally narrow its tools or change

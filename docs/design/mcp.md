@@ -307,6 +307,18 @@ definitions, not running servers.
   its connection state from the agent poll (MCP-BOARD-1). Edit and Delete.
 - MCP-CAT-12: An agent's Settings has an MCP tab listing the catalog: attach
   or detach each entry, with the per-agent overrides.
+- MCP-CAT-13: **Browse registry** searches the official MCP Registry
+  (`registry.modelcontextprotocol.io`, latest versions, 30 a page) through
+  the board, sending only the search words and page cursor. Each result
+  offers one option per package or hosted URL: npm → `npx -y <pkg>@<version>`,
+  PyPI → `uvx <pkg>==<version>`, Docker → `docker run -i --rm -e …`, a hosted
+  server → `http` / `sse` with its secret headers as `${NAME}`. Required and
+  secret variables become `${NAME}` in `env`; optional ones are listed, not
+  added; a required argument without a value becomes a `<placeholder>`. A
+  package that serves HTTP itself, or a kind with no runner (NuGet, MCPB), is
+  shown with why it cannot be used. Choosing an option only fills in the Add
+  server form, which says where it came from and that registry entries are
+  not reviewed; nothing is saved until the user saves it.
 
 ## `agent_board/mcp_catalog.py`
 
@@ -328,10 +340,15 @@ entry, presets, the `${NAME}`s an entry uses, and writing an agent's
 - MCP-CATF-4: `runner_for` is `npx` / `uvx` when the stdio command is one of
   them; `hand_written` lists the agent's own `mcp_servers` names (MCP-CAT-8).
 
-**Interface:** `PRESETS`, `BOARD_KEY`, `check`, `clean_spec`, `referenced_vars`,
-`runner_for`, `render`, `board_servers`, `apply`, `current`, `hand_written`.
+- MCP-CATF-5: `registry_entry(item)` turns one registry result into the
+  options of MCP-CAT-13; every option it offers passes `check`, and links are
+  kept only when they are http(s).
 
-**Tests:** `tests/test_mcp_catalog.py`.
+**Interface:** `PRESETS`, `BOARD_KEY`, `REGISTRY_URL`, `check`, `clean_spec`,
+`referenced_vars`, `runner_for`, `render`, `board_servers`, `apply`, `current`,
+`hand_written`, `registry_entry`.
+
+**Tests:** `tests/test_mcp_catalog.py`, `tests/test_mcp_registry.py`.
 
 ## Security
 
@@ -370,7 +387,8 @@ entry, presets, the `${NAME}`s an entry uses, and writing an agent's
    *Built.*
 2. **ADK and deepagent adapters** (MCP-RT-2, MCP-RT-3). *Built.*
 3. **Board:** MCP-BOARD-1..4. *Built.*
-4. **MCP catalog** on the board (MCP-CAT-1..12). *Built.*
+4. **MCP catalog** on the board (MCP-CAT-1..13), with the registry browser.
+   *Built.*
 5. **Later:** MCP resources (read like `read_shared`), MCP prompts (offered
    like skills), OAuth for remote servers, tool search for servers with very
    many tools.

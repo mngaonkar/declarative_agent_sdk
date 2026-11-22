@@ -504,3 +504,13 @@ td.agent-name.tinted { font-weight: 600; }
 .mcp-attach-head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
 .mcp-attach .btns { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 #mcp-table td .btn + .btn { margin-left: 4px; }
+
+/* MCP Registry browser. */
+.registry { display: flex; flex-direction: column; gap: 8px; min-width: min(640px, 90vw); }
+.registry-bar { display: flex; gap: 8px; }
+.registry-bar input { flex: 1; }
+.registry-results { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow: auto; }
+.registry-item { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px;
+  display: flex; flex-direction: column; gap: 6px; }
+.registry-item .btns { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.registry-note ul { margin: 4px 0 0 18px; padding: 0; }

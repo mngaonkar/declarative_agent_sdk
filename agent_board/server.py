@@ -1351,6 +1351,34 @@ def create_app(cp: "ControlPlane") -> Starlette:
         return warnings
 
     @guard
+    async def search_mcp_registry(request: Request) -> Response:
+        """
+        Search the official MCP Registry and offer each result as ready
+        catalog specs (MCP-CAT-13). Only the search words and the page cursor
+        are sent; nothing is added to the catalog from here.
+        """
+        params = {"limit": "30", "version": "latest"}
+        search = str(request.query_params.get("search") or "").strip()[:100]
+        cursor = str(request.query_params.get("cursor") or "").strip()[:300]
+        if search:
+            params["search"] = search
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20)) as client:
+                reply = await client.get(mcp_catalog.REGISTRY_URL, params=params)
+            reply.raise_for_status()
+            data = reply.json()
+        except Exception as exc:  # noqa: BLE001 — reported to the page
+            return JSONResponse({"error": f"could not read the MCP Registry: "
+                                          f"{type(exc).__name__}: {exc}"}, status_code=502)
+        servers = [mcp_catalog.registry_entry(item) for item in data.get("servers") or []
+                   if isinstance(item, dict)]
+        servers = [s for s in servers if s["status"] not in ("deleted",)]
+        return JSONResponse({"servers": servers,
+                             "next": (data.get("metadata") or {}).get("nextCursor") or ""})
+
+    @guard
     async def list_mcp(request: Request) -> Response:
         servers = await in_thread(store.mcp_servers)
         return JSONResponse({"servers": [_mcp_view(s) for s in servers],
@@ -1750,6 +1778,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
               set_auto_approve, methods=["POST"]),
         Route("/api/approvals/{approval_id}", resolve_approval, methods=["POST"]),
         Route("/api/mcp", list_mcp),
+        Route("/api/mcp/registry", search_mcp_registry),
         Route("/api/mcp", create_mcp, methods=["POST"]),
         Route("/api/mcp/{server_id:int}", update_mcp, methods=["PUT"]),
         Route("/api/mcp/{server_id:int}", delete_mcp, methods=["DELETE"]),
