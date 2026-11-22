@@ -8,6 +8,40 @@ kept running and started again after a reboot for you.
 Built on the [Declarative Agent SDK](docs/sdk.md): YAML-defined agents with
 the `lean`, `adk` or `deepagent` runtime.
 
+## What's in the SDK
+
+One package, `declarative_agent_sdk`, installed as one wheel. It holds the SDK
+for building and serving agents, and agent-board, the control plane built on
+it.
+
+### SDK — build and serve agents
+
+| Component | Folder | What it does |
+|-----------|--------|--------------|
+| Core | [`core/`](core/) | `BaseAgent`, `AgentEvent`, the YAML factory, registries, config, logging |
+| Runtimes | [`agents/`](agents/) | Three peer agent loops: `lean` (default), `adk` (Google ADK), `deepagent` (LangGraph) |
+| Tools | [`tools/`](tools/) | `ToolRegistry`, progressive skills, and built-in tools (`exec_command`, `web_request`, files, …) |
+| Models | [`models/`](models/) | Model and provider setup for ADK |
+| Transports | [`transports/`](transports/) | Serve an agent as a Discord bot or an A2A / JSON-RPC server |
+| Workflows | [`workflows/`](workflows/) | Multi-agent LangGraph workflows defined in YAML |
+| CLI | [`cli/`](cli/) | The `declarative-agent` command: `discord`, `board`, `version` |
+
+### agent-board — run agents on your machines
+
+| Component | Folder | What it does |
+|-----------|--------|--------------|
+| Board | [`agent_board/`](agent_board/) | Server, store, machine driver, channel router and web UI |
+| Agent installer | [`packaging/deploy/`](packaging/deploy/) | Installs one agent on a machine under supervisord; the board runs it over SSH |
+| Board installer | [`install.sh`](install.sh) | The one-line install below; fetched from GitHub, not in the wheel |
+
+**SDK tools that turn on when an agent is on a board** — `send_to_agent`,
+`list_agents`, and file links (`read_shared`, `write_link`). They live in the
+SDK because they run inside each agent, and they switch on when the board sets
+`AGENT_BOARD_URL` in the agent's `.env`.
+
+Not in the wheel: [`a2ui/`](a2ui/) (a web client for A2A agents),
+[`examples/`](examples/), [`tests/`](tests/) and [`docs/`](docs/README.md).
+
 ## Install
 
 One command, on macOS or Linux, as your own user (no sudo):
