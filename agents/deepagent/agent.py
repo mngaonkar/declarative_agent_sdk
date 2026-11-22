@@ -327,6 +327,8 @@ class LangChainAIAgent(BaseAgent):
         description: str = "",
         tools: Optional[list] = None,
         tools_approval_required: bool = True,
+        mcp_servers: Optional[Dict[str, Any]] = None,
+        config_dir: Optional[str] = None,
         skills_directory: str = SKILLS_DIRECTORY,
         workspace_directory: str = WORKSPACE_DIRECTORY,
         skills: Optional[List[str]] = None,
@@ -397,11 +399,28 @@ class LangChainAIAgent(BaseAgent):
             except Exception as exc:
                 logger.warning(f"Skipping non-convertible tool {fn!r}: {exc}")
 
+        # MCP servers (docs/design/mcp.md): the shared hub, as StructuredTools.
+        self.mcp = None
+        mcp_auto: set = set()
+        if mcp_servers:
+            from declarative_agent_sdk.tools.mcp import langchain_tools, start_hub
+            self.mcp = start_hub(mcp_servers, workspace_directory, config_dir)
+            if self.mcp is not None:
+                mcp_lc, mcp_auto = langchain_tools(self.mcp, {t.name for t in lc_tools})
+                lc_tools.extend(mcp_lc)
+
         logger.info(f"LangChainAIAgent '{name}' loaded {len(lc_tools)} user tool(s)")
 
         resolved_interrupt_on = _build_interrupt_on(
             lc_tools, tools_approval_required, interrupt_on
         )
+        # MCP tools whose server needs no approval are not interrupted for,
+        # unless the YAML's own interrupt_on names them.
+        if resolved_interrupt_on and interrupt_on is None:
+            for name in mcp_auto:
+                resolved_interrupt_on.pop(name, None)
+        # Kept for diagnostics and tests: which tools pause for approval.
+        self.interrupt_on = resolved_interrupt_on or {}
         if resolved_interrupt_on:
             logger.info(
                 f"LangChainAIAgent '{name}' tool approval enabled for "

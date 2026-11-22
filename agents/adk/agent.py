@@ -92,6 +92,8 @@ class ADKAIAgent(BaseAgent):
         description: str = "",
         tools: Optional[list] = None,
         tools_approval_required: bool = True,
+        mcp_servers: Optional[Dict[str, Any]] = None,
+        config_dir: Optional[str] = None,
         skills_directory: str = SKILLS_DIRECTORY,
         workspace_directory: str = WORKSPACE_DIRECTORY,
         skills: Optional[List[str]] = None,
@@ -190,6 +192,16 @@ class ADKAIAgent(BaseAgent):
             resolved_tools = [
                 FunctionTool(t, require_confirmation=True) for t in resolved_tools
             ]
+
+        # MCP servers (docs/design/mcp.md): the shared hub, as ADK tools that
+        # ask for confirmation only when their server's `approval` says so.
+        self.mcp = None
+        if mcp_servers:
+            from declarative_agent_sdk.tools.mcp import adk_tools, start_hub
+            self.mcp = start_hub(mcp_servers, workspace_directory, config_dir)
+            if self.mcp is not None:
+                taken = {getattr(t, "name", getattr(t, "__name__", "")) for t in resolved_tools}
+                resolved_tools.extend(adk_tools(self.mcp, tools_approval_required, taken))
 
         # AFC config
         afc_config = types.AutomaticFunctionCallingConfig(

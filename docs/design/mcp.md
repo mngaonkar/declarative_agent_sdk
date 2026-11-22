@@ -1,8 +1,8 @@
 # MCP tools — design spec
 
-**Status:** phase 1 built — the hub, config, results and the lean runtime
-(see Phases). ADK, deepagent and the board parts are still planned: those
-rules are marked *(planned)*. A file not written yet stays under a `###`
+**Status:** phases 1 and 2 built — the hub, config, results and all three
+runtimes (see Phases). The board parts are still planned: those rules are
+marked *(planned)*. A file not written yet stays under a `###`
 heading; once written, its heading becomes `` ## `path` `` so
 `tests/test_design_spec.py` checks it.
 
@@ -173,20 +173,38 @@ stdio and streamable HTTP.
 
 ## `tools/mcp/adapters.py`
 
-**Does:** presents hub tools to each runtime. Phase 1 has lean
-(`register_lean`); ADK and deepagent come next, in this file.
+**Does:** starts an agent's hub (`start_hub`) and presents its tools to each
+runtime. The runtime frameworks are imported inside each function, so a lean
+agent never imports ADK or LangChain for MCP.
 
 **Rules — runtimes:**
 
+- MCP-RT-0: Every runtime starts its servers the same way: `start_hub(
+  mcp_servers, workspace, config_dir)` parses the block (MCP-CFG), starts the
+  hub and keeps it as `agent.mcp` (None without servers). A tool whose name
+  is already taken by the runtime's own tools is skipped (MCP-TOOL-2).
 - MCP-RT-1 (lean): each `McpTool` is registered with
   `LeanToolRegistry.add(name, description, properties, required, handler)`;
   the handler calls `hub.call` and returns MCP-RES text.
-- MCP-RT-2 (adk, *planned*): each `McpTool` is a `google.adk.tools.BaseTool` subclass
-  whose declaration is built from the JSON schema and whose `run_async` calls
-  `hub.acall`. Approval uses ADK's tool confirmation.
-- MCP-RT-3 (deepagent, *planned*): each `McpTool` is a LangChain `StructuredTool` with
-  the JSON schema as `args_schema` and a coroutine calling `hub.acall`.
-  Approval goes through `_build_interrupt_on`.
+- MCP-RT-2 (adk): each `McpTool` is a `google.adk.tools.BaseTool` subclass
+  declaring the JSON schema as `parameters_json_schema` (Gemini reads it
+  directly; ADK's LiteLLM path turns it into an OpenAI tool), whose
+  `run_async` calls `hub.acall` and returns `{"result": text}`. When the tool
+  needs approval it asks with `tool_context.request_confirmation`, exactly as
+  ADK's `FunctionTool(require_confirmation=True)` does (ADK-2, ADK-3), and a
+  rejected call returns `{"error": "This tool call is rejected."}`.
+- MCP-RT-3 (deepagent): each `McpTool` is a LangChain `StructuredTool` with
+  the JSON schema as `args_schema` (no schema inference), a function calling
+  `hub.call` and a coroutine calling `hub.acall`. Tools that need no approval
+  are taken out of `interrupt_on` (DEEP-3), unless the YAML gives its own
+  `interrupt_on`; the agent keeps the result as `agent.interrupt_on`.
+
+**Interface:** `start_hub`, `register_lean(hub, registry) -> auto-approve
+names`, `adk_tools(hub, approval_required, taken)`, `langchain_tools(hub,
+taken) -> (tools, auto-approve names)`.
+
+**Tests:** `tests/test_mcp_runtimes.py` (all three runtimes), `tests/test_mcp_hub.py`
+(`TestLean`).
 
 **Rules — approval:**
 
@@ -203,7 +221,7 @@ stdio and streamable HTTP.
   passes it to the runtime; resolves relative `cwd` against the YAML's folder.
 - `agents/lean/agent.py`, `agents/lean/runtime/tools.py`: register hub tools
   (MCP-RT-1); add the auto-approve names (MCP-APPR-1).
-- `agents/adk/agent.py`, `agents/deepagent/agent.py` *(planned)*: MCP-RT-2, MCP-RT-3.
+- `agents/adk/agent.py`, `agents/deepagent/agent.py`: MCP-RT-2, MCP-RT-3.
 - `transports/a2a/server.py`: `GET /mcp` returns `hub.status()`.
 - `pyproject.toml`: the `mcp` extra (the official `mcp` Python SDK), and in
   `all`.
@@ -247,16 +265,16 @@ the token in the agent's `.env`.
 - `tests/test_mcp_config.py`: MCP-CFG rules.
 - `tests/test_mcp_hub.py`: names, schemas, results (text, image → file link,
   error, cut), timeout, a server that fails to start, reconnect, shutdown.
-- The lean runtime is tested in `tests/test_mcp_hub.py` (`TestLean`). Phase 2
-  adds `tests/test_mcp_runtimes.py`: each runtime sees the same tools and
-  calls them; approval for `false` / `true` / `destructive`.
+- `tests/test_mcp_runtimes.py`: each runtime sees the same tools and calls
+  them; approval for `false` / `true` / `destructive`, and
+  `tools_approval_required: false` turning it all off, the same in all three.
 
 ## Phases
 
 1. **Hub, config, results, lean adapter**, the extra, the A2A `/mcp` route
    and the tests above. The default runtime and the board are then usable.
    *Built.*
-2. **ADK and deepagent adapters** (MCP-RT-2, MCP-RT-3).
+2. **ADK and deepagent adapters** (MCP-RT-2, MCP-RT-3). *Built.*
 3. **Board:** MCP-BOARD-1..4.
 4. **Later:** MCP resources (read like `read_shared`), MCP prompts (offered
    like skills), OAuth for remote servers, tool search for servers with very

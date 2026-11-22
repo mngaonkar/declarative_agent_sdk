@@ -31,6 +31,9 @@ in-memory session service.
   before each model call (CORE-TOK-1).
 - ADK-6: `provider` + `model` go through `ModelFactory` (MODEL-1).
 - ADK-7: Each ADK event becomes one `AgentEvent` via `from_adk_event`.
+- ADK-8: With `mcp_servers`, the agent starts the shared MCP hub (kept as
+  `agent.mcp`) and adds its tools after the others (MCP-RT-2). They ask for
+  confirmation by their server's `approval` (MCP-APPR-1), not by ADK-2.
 
 **Tests:** `tests/test_agent_factory.py`.
 

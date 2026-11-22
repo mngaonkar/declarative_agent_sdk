@@ -38,5 +38,9 @@ graph.
 - DEEP-6: Sessions are LangGraph threads keyed by the session id.
 - DEEP-7: `middleware` and `subagents` from the YAML are passed straight to
   `create_deep_agent`.
+- DEEP-8: With `mcp_servers`, the agent starts the shared MCP hub (kept as
+  `agent.mcp`) and adds its tools as `StructuredTool`s (MCP-RT-3). Those whose
+  server needs no approval (MCP-APPR-1) are left out of DEEP-3's
+  `interrupt_on`.
 
 **Tests:** `tests/test_langchain_ai_agent.py`.

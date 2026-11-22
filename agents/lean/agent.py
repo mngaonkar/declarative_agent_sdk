@@ -148,11 +148,9 @@ class LeanAIAgent(BaseAgent):
         self.mcp = None
         mcp_auto: set = set()
         if mcp_servers:
-            from declarative_agent_sdk.tools.mcp import McpHub, parse_mcp_servers, register_lean
-            workspace = str(Path(workspace_directory).resolve())
-            configs = parse_mcp_servers(mcp_servers, os.environ, workspace, base_dir=config_dir)
-            if configs:
-                self.mcp = McpHub(configs, workspace).start()
+            from declarative_agent_sdk.tools.mcp import register_lean, start_hub
+            self.mcp = start_hub(mcp_servers, workspace_directory, config_dir)
+            if self.mcp is not None:
                 mcp_auto = register_lean(self.mcp, self._tools)
 
         base_url = _resolve_base_url(provider, endpoint_url)

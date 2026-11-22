@@ -401,7 +401,7 @@ mcp_servers:
   `startup_timeout` (default 30 s), `enabled: false`. Quote a server named
   `on`, `off`, `yes` or `no` — YAML reads those as true/false.
 
-Phase 1 supports the `lean` runtime; `adk` and `deepagent` follow. Design:
+Works the same in all three runtimes (`lean`, `adk`, `deepagent`). Design:
 [design/mcp.md](design/mcp.md).
 
 ### Workspace & other

@@ -21,7 +21,7 @@ for a code change.
 | Google ADK runtime | [runtime-adk.md](runtime-adk.md) | `agents/adk/` |
 | Deepagents runtime | [runtime-deepagent.md](runtime-deepagent.md) | `agents/deepagent/` |
 | Tools and skills | [tools.md](tools.md) | `tools/` |
-| MCP tools (phase 1: lean) | [mcp.md](mcp.md) | `tools/mcp/` |
+| MCP tools | [mcp.md](mcp.md) | `tools/mcp/` |
 | A2A transport | [transport-a2a.md](transport-a2a.md) | `transports/a2a/` |
 | Discord transport | [transport-discord.md](transport-discord.md) | `transports/discord/` |
 | Workflows | [workflows.md](workflows.md) | `workflows/` |
