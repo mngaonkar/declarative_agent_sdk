@@ -4,7 +4,8 @@ YAML-first agents with **three peer runtimes**, shared transports (Discord, A2A)
 
 > **TL;DR:** Define an agent in YAML, pick `lean` (default), `adk`, or `deepagent` as the **end-to-end** loop, then serve it over Discord or A2A. Same `BaseAgent` / `AgentEvent` contract for every runtime.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed flows and package layout.
+See [docs/architecture.md](docs/architecture.md) for detailed flows and package layout, and
+[docs/design/](docs/design/README.md) for the file-by-file design spec.
 
 ---
 
@@ -159,7 +160,7 @@ binds `0.0.0.0`, and publishes this host's primary address in its agent card;
 override with `--host` / `--advertise-host` behind NAT or a proxy. `--json`
 prints one result object, so an orchestrating agent can provision sub-agents.
 Without `--enable-at-boot`, agents survive crashes but not reboots. Details:
-[packaging/deploy/README.md](packaging/deploy/README.md).
+[docs/deployment.md](docs/deployment.md).
 
 ### CLI
 
@@ -184,7 +185,7 @@ declarative-agent version
 Also available as `python -m declarative_agent_sdk.cli`. To serve over A2A, use
 `AIAgentServer` from Python (see [A2A Server](#a2a-server)).
 
-Full setup notes: [examples/discord_bot/README.md](examples/discord_bot/README.md).
+Full setup notes: [docs/examples/discord_bot.md](docs/examples/discord_bot.md).
 
 ### Examples
 
@@ -555,7 +556,7 @@ declarative-agent control --port 8900     # → http://127.0.0.1:8900
 ```
 
 - **Machines** — register a macOS/Linux host (SSH key + [`uv`](https://astral.sh/uv)),
-  or this one. Provisioning runs [`packaging/deploy/install.sh`](packaging/deploy/README.md)
+  or this one. Provisioning runs [`packaging/deploy/install.sh`](docs/deployment.md)
   on the target; API keys travel over SSH stdin to a 0600 file, never in argv.
 - **Agents** — create, list and delete. The create form picks the **host
   interface** from the addresses discovered on that machine, which matters on a
@@ -575,11 +576,11 @@ declarative-agent control --port 8900     # → http://127.0.0.1:8900
 It provisions agents with `exec_command` on every registered machine, so it
 binds loopback by default and refuses a public bind without a token. Details,
 including the kill switch's limits and a supervisord unit for the service
-itself: [agents_control/README.md](agents_control/README.md).
+itself: [docs/agents-control.md](docs/agents-control.md).
 
 ## Workflows
 
-Multi-agent LangGraph workflows are configured in YAML and built with `WorkflowFactory`. Register node/router functions on `WorkflowRegistry` first. See [examples/workflow](examples/workflow/) and [ARCHITECTURE.md](ARCHITECTURE.md).
+Multi-agent LangGraph workflows are configured in YAML and built with `WorkflowFactory`. Register node/router functions on `WorkflowRegistry` first. See [examples/workflow](examples/workflow/) and [docs/architecture.md](docs/architecture.md).
 
 ---
 
@@ -623,13 +624,16 @@ version.
 
 ## Documentation
 
+All documentation lives in [docs/](docs/README.md).
+
 | Doc | Contents |
 |-----|----------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Runtimes, events, Discord images, package map |
-| [examples/discord_bot/README.md](examples/discord_bot/README.md) | Discord modes, intents, troubleshooting |
-| [packaging/deploy/README.md](packaging/deploy/README.md) | Background A2A agents under supervisord |
-| [agents_control/README.md](agents_control/README.md) | agents-control: machines, board, peer chat, kill switch |
-| [DOCKER.md](DOCKER.md) | Container image and mounts |
+| [docs/design/](docs/design/README.md) | Design spec: what each source file does, as numbered rules — the reference for code changes |
+| [docs/architecture.md](docs/architecture.md) | Runtimes, events, Discord images, package map |
+| [docs/examples/discord_bot.md](docs/examples/discord_bot.md) | Discord modes, intents, troubleshooting |
+| [docs/deployment.md](docs/deployment.md) | Background A2A agents under supervisord |
+| [docs/agents-control.md](docs/agents-control.md) | agents-control: machines, board, peer chat, kill switch |
+| [docs/docker.md](docs/docker.md) | Container image and mounts |
 
 ---
 

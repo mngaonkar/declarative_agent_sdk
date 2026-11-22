@@ -8,7 +8,7 @@ jobs are to get those scripts onto the machine, to pass flags, and to keep
 secrets off the command line.
 
 Transport is plain SSH, by design. The agents' supervisord listens on a unix
-socket with no network listener (``packaging/deploy/README.md`` rejects
+socket with no network listener (``docs/deployment.md`` rejects
 ``inet_http_server`` because it has no authentication), so there is nothing to
 dial remotely even if we wanted to — and SSH means no new privileged daemon on
 every box.
