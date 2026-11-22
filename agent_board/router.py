@@ -391,7 +391,10 @@ class ChannelRouter:
                 f" Every file in your workspace is at {base}/files/<path inside "
                 f"the workspace> — e.g. workspace/report.md is {base}/files/report.md. "
                 "To give another agent a file, put its link in your reply; do "
-                "not paste the file's contents."
+                "not paste the file's contents. The board previews these links "
+                "(images inline), so to show someone a file, save it under "
+                "workspace/ and link it: attachments/ is not served, and "
+                "[[attach:…]] markers only work on Discord."
             )
         text += (" Read another agent's file link (http://…/files/…) with "
                  "read_shared; to keep, edit or pass on that file, save it with "

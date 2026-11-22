@@ -46,7 +46,20 @@ templates.
 - AC-UI-BOARD-3: An agent file link (`http(s)://<agent>/files/<path>`) on a
   registered agent's address shows as a 📎 chip with the file name and owner;
   clicking it previews the file through the relay (AC-SERVER-8), with a
-  download button.
+  download button. Text and Markdown show as text, raster images as an
+  image; videos stream (AC-UI-BOARD-7).
+- AC-UI-BOARD-6: A link to a raster image (png, jpg, gif, webp, bmp, avif;
+  never SVG) also shows a thumbnail under its chip. It is fetched through the
+  relay once it scrolls into view, with the token in a header, once per page;
+  a file over 10 MB, or one that is not an image, shows a note instead.
+  Clicking the thumbnail opens the full preview.
+- AC-UI-BOARD-7: A link to a video (mp4, m4v, webm, ogv, mov) shows a player
+  under its chip once it scrolls into view, with a still from the video
+  (`#t=0.1`) under its play button; clicking the chip opens a larger player.
+  Both stream the relay with a file ticket (AC-SERVER-13), so only enough to
+  draw the still is fetched before play, play starts at once and seeks by
+  byte range, and there is no size limit. A ticket is reused for its link
+  until it has 10 minutes left. A video that cannot play says why it may be.
 
 **Rules — agent colours:**
 

@@ -11,6 +11,8 @@ bind demands a token (``AGENT_BOARD_TOKEN``) or refuses to start.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -24,7 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 import httpx
 from starlette.background import BackgroundTask
@@ -98,6 +100,36 @@ def _servable(path: str) -> bool:
     return not any(part in ("", "..") or part.startswith(".") for part in path.split("/"))
 
 
+# How long a file ticket lets a <video> or <audio> fetch one link. Long enough
+# to watch a long video and seek in it; a seek is a new request on the ticket.
+TICKET_TTL_SECONDS = 3600
+
+
+def make_ticket(key: bytes, link: str, now: Optional[float] = None) -> str:
+    """
+    A ticket for one file link: ``<expiry>.<hmac>``.
+
+    A media element fetches its own URL and cannot send the Authorization
+    header, so it carries this instead of the board token. It names one link
+    and expires, so a ticket that leaks (history, logs) opens that one file
+    for a while, not the board.
+    """
+    expires = int((now if now is not None else time.time()) + TICKET_TTL_SECONDS)
+    mac = hmac.new(key, f"{expires}\n{link}".encode(), hashlib.sha256).hexdigest()
+    return f"{expires}.{mac}"
+
+
+def check_ticket(key: bytes, ticket: str, link: str, now: Optional[float] = None) -> bool:
+    """True when ``ticket`` was made for exactly ``link`` and has not expired."""
+    expires, _, mac = (ticket or "").partition(".")
+    if not expires.isdigit() or not mac:
+        return False
+    if int(expires) < (now if now is not None else time.time()):
+        return False
+    want = hmac.new(key, f"{expires}\n{link}".encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(mac, want)
+
+
 def _netloc(url: str) -> str:
     parsed = urlparse(url or "")
     host = (parsed.hostname or "").lower()
@@ -152,6 +184,9 @@ class ControlPlane:
         # reported over the window between polls, not just since boot.
         self.sampler = model_metrics.Sampler()
         self.token = token if token is not None else board_env("TOKEN")
+        # Signs file tickets. Per process: a restart ends every ticket, and
+        # the page simply asks for a new one.
+        self.ticket_key = secrets.token_bytes(32)
         self.public_url = public_url.rstrip("/")
         self.app = create_app(self)
 
@@ -234,7 +269,13 @@ def create_app(cp: "ControlPlane") -> Starlette:
         if header.startswith("Bearer "):
             return secrets.compare_digest(header[7:], cp.token)
         supplied = request.query_params.get("token", "")
-        return bool(supplied) and secrets.compare_digest(supplied, cp.token)
+        if supplied:
+            return secrets.compare_digest(supplied, cp.token)
+        # A file ticket opens the relay for the one link it was made for.
+        if path == "/api/files/relay" and request.method in ("GET", "HEAD"):
+            return check_ticket(cp.ticket_key, request.query_params.get("ticket", ""),
+                                request.query_params.get("url", ""))
+        return False
 
     def guard(handler):
         """
@@ -785,21 +826,14 @@ def create_app(cp: "ControlPlane") -> Starlette:
             "status": status,
         })
 
-    @guard
-    async def relay_file(request: Request) -> Response:
+    def relay_target(link: str):
         """
-        Pass a shared file through from the agent that owns it.
-
-        For readers that cannot reach the owner themselves — this board's
-        page, and agents on another network. Nothing is stored: the response
-        streams as it arrives.
+        (owner, URL to fetch) for an agent file link, or ValueError / LookupError.
 
         Not an open proxy: the link must be a /files/ link whose address is a
         registered agent's, and the request goes to that agent's recorded
-        address, never to whatever host the link names. The owner still checks
-        the path stays inside its workspace.
+        address, never to whatever host the link names.
         """
-        link = str(request.query_params.get("url") or "")
         parsed = urlparse(link)
         match = SHARE_PATH_RE.match(parsed.path or "")
         if parsed.scheme not in ("http", "https") or not match or not _servable(
@@ -810,10 +844,44 @@ def create_app(cp: "ControlPlane") -> Starlette:
         if owner is None:
             raise LookupError(f"no agent on this board serves {wanted}")
         # Still percent-encoded as it was in the link, so it goes on unchanged.
-        target = f"{str(owner['url']).rstrip('/')}/files/{match.group(1)}"
+        return owner, f"{str(owner['url']).rstrip('/')}/files/{match.group(1)}"
+
+    @guard
+    async def file_ticket(request: Request) -> Response:
+        """
+        A ticket that lets a media element stream one file through the relay.
+
+        Asked for with the board token (in the header, like every other call);
+        the answer is a relay URL that carries the ticket instead of the token.
+        """
+        link = str(need(await body(request), "url"))
+        relay_target(link)                       # refuse what the relay would
+        ticket = make_ticket(cp.ticket_key, link)
+        query = urlencode({"url": link, "ticket": ticket})
+        return JSONResponse({"ticket": ticket, "expires": int(ticket.split(".")[0]),
+                             "src": f"/api/files/relay?{query}"})
+
+    @guard
+    async def relay_file(request: Request) -> Response:
+        """
+        Pass a shared file through from the agent that owns it.
+
+        For readers that cannot reach the owner themselves — this board's
+        page, and agents on another network. Nothing is stored: the response
+        streams as it arrives.
+
+        Only for links on registered agents (``relay_target``); the owner
+        still checks the path stays inside its workspace. Authorised by the
+        board token, or by a ticket for exactly this link (``file_ticket``).
+        """
+        owner, target = relay_target(str(request.query_params.get("url") or ""))
+        # A media element streams by asking for byte ranges; the owner answers
+        # them (206), so pass the request and the answer through.
+        ask = {k: v for k, v in request.headers.items() if k.lower() in ("range", "if-range")}
         client = httpx.AsyncClient(timeout=httpx.Timeout(30, read=120))
         try:
-            upstream = await client.send(client.build_request("GET", target), stream=True)
+            upstream = await client.send(client.build_request("GET", target, headers=ask),
+                                         stream=True)
         except Exception as exc:  # noqa: BLE001 — reported to the reader
             await client.aclose()
             return JSONResponse(
@@ -826,7 +894,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
 
         # aiter_bytes undoes any Content-Encoding, so a compressed length
         # would no longer match what is sent; let the server count it then.
-        keep = {"content-type", "content-disposition"}
+        keep = {"content-type", "content-disposition", "content-range", "accept-ranges"}
         if not upstream.headers.get("content-encoding"):
             keep.add("content-length")
         passed = {k: v for k, v in upstream.headers.items() if k.lower() in keep}
@@ -1434,6 +1502,7 @@ def create_app(cp: "ControlPlane") -> Starlette:
         Route("/api/agents", create_agent, methods=["POST"]),
         Route("/api/models", list_models, methods=["POST"]),
         Route("/api/files/relay", relay_file),
+        Route("/api/files/ticket", file_ticket, methods=["POST"]),
         Route("/api/agents/{agent_id:int}", delete_agent, methods=["DELETE"]),
         Route("/api/agents/metrics", agent_metrics),
         Route("/api/logs", control_logs),

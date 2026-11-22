@@ -4577,6 +4577,8 @@ class TestFileRelay:
         assert "http://100.1.1.1:8000/files/report.md" in block
         assert "with read_shared" in block and "write_link" in block
         assert "share_file" not in block
+        # The board previews links; Discord markers and attachments/ do not work here.
+        assert "previews these links" in block and "[[attach:" in block
 
 
 class TestReinstall:
