@@ -261,9 +261,12 @@ PLIST
       info "  started the launchd service ($LABEL)"
     fi
   else
-    command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1 \
-      || die "no systemd user session here. Re-run with --no-service and start
+    if ! { command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; }; then
+      local no_session="no systemd user session here. Re-run with --no-service and start
        'declarative-agent board' yourself (for example under tmux)"
+      # A dry run changes nothing, so it reports this and shows the rest.
+      if [ "$DRY_RUN" -eq 1 ]; then warn "$no_session"; else die "$no_session"; fi
+    fi
     local token_line=""
     [ -n "$TOKEN" ] && token_line="Environment=AGENT_BOARD_TOKEN=$TOKEN"
     if [ "$DRY_RUN" -eq 1 ]; then
