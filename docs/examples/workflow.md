@@ -1,5 +1,7 @@
 # Declarative Multi-Agent Workflow Example
 
+> Files for this page: [`examples/workflow/`](../../examples/workflow/)
+
 Demonstrates building and running multi-agent workflows defined declaratively in **YAML** using LangGraph's `StateGraph` through `WorkflowFactory`.
 
 ---

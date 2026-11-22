@@ -1,5 +1,7 @@
 # Docker Deployment Example
 
+> Files for this page: [`examples/docker/`](../../examples/docker/)
+
 Demonstrates running agents built with the **Declarative Agent SDK** inside Docker containers using the generic image and `docker compose`.
 
 ---

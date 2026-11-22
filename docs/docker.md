@@ -26,7 +26,7 @@ This means:
 - **build-docker.sh**: Script to build the generic Docker image (run once)
 - **run_ui.sh**: Script to run the A2UI development server
 - **.dockerignore**: Files to exclude from Docker build context
-- **DOCKER.md**: This documentation
+- **docs/docker.md**: This documentation
 
 **In each agent directory (e.g., wazy_agent/):**
 - **run.sh**: Script to run the agent container
@@ -375,5 +375,5 @@ The container is configured with `--restart unless-stopped`, meaning it will aut
 ## Additional Resources
 
 - [Google ADK Documentation](https://github.com/google/adk)
-- [Declarative Agent SDK](../declarative_agent_sdk/README.md)
+- [Declarative Agent SDK](../README.md)
 - [Docker Documentation](https://docs.docker.com/)

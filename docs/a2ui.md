@@ -1,5 +1,7 @@
 # A2UI Contact Sample
 
+> Files for this page: [`a2ui/`](../a2ui/)
+
 A UI component for generating and visualizing A2UI (Agent-to-User Interface) contact responses.
 
 ## Prerequisites

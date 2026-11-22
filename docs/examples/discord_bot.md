@@ -1,5 +1,7 @@
 # Discord Bot Example
 
+> Files for this page: [`examples/discord_bot/`](../../examples/discord_bot/)
+
 Serves an agent defined in `agent.yaml` as a Discord bot, via `DiscordAgentServer`.
 
 ```bash

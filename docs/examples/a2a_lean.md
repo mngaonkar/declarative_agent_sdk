@@ -1,5 +1,7 @@
 # Lean agent + A2A server
 
+> Files for this page: [`examples/a2a_lean/`](../../examples/a2a_lean/)
+
 Run the **lean** deliberative loop behind the shared A2A transport (`AIAgentServer`).
 
 ## Prerequisites

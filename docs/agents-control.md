@@ -35,12 +35,12 @@ over SSH and runs it.
 
 | Concern | Where |
 |---|---|
-| Durable record (machines, agents, channels, transcript) | [store.py](store.py) — SQLite at `~/.agents-control/control.db` |
-| `install.sh` / `uninstall.sh` over SSH | [machines.py](machines.py) |
-| `@mention` dispatch, approvals, kill switch, SSE | [router.py](router.py) |
-| JSON API + static board | [server.py](server.py), [static/](static/) |
-| Markdown in messages | [static/md.js](static/md.js), tested by [md.test.cjs](static/md.test.cjs) |
-| Agent-to-agent relay | [router.py](router.py) `relay()`, `POST /api/board/say` |
+| Durable record (machines, agents, channels, transcript) | [store.py](../agents_control/store.py) — SQLite at `~/.agents-control/control.db` |
+| `install.sh` / `uninstall.sh` over SSH | [machines.py](../agents_control/machines.py) |
+| `@mention` dispatch, approvals, kill switch, SSE | [router.py](../agents_control/router.py) |
+| JSON API + static board | [server.py](../agents_control/server.py), [static/](../agents_control/static/) |
+| Markdown in messages | [static/md.js](../agents_control/static/md.js), tested by [md.test.cjs](../agents_control/static/md.test.cjs) |
+| Agent-to-agent relay | [router.py](../agents_control/router.py) `relay()`, `POST /api/board/say` |
 | Tools an agent gets | [`send_to_agent`](../tools/builtin/send_to_agent.py), [`list_agents`](../tools/builtin/list_agents.py) — core, not listed in `tools:` |
 
 ## Registering a machine
@@ -319,7 +319,7 @@ Two layers, because one is not enough:
 1. **Pushed into every dispatch.** The prompt carries the channel's roster —
    each member's qualified name, what it is for, its model, and whether it is
    running — so an agent can address someone without asking first, and the list
-   is current as of that turn. See `_roster_block` in [router.py](router.py).
+   is current as of that turn. See `_roster_block` in [router.py](../agents_control/router.py).
 2. **The `list_agents` tool**, for looking again. It and `send_to_agent` are
    **core when the agent is on a board** — agents-control seeds
    `AGENTS_CONTROL_URL` into every agent's `.env`, and the runtime registers
@@ -582,8 +582,8 @@ Two guards:
   when the server is behind. A bare 404 mid-session triggers the same check and
   says what it means.
 
-`API_REVISION` lives in [`__init__.py`](__init__.py) and `EXPECTS_API` in
-[static/app.js](static/app.js). **Bump both** when the HTTP surface changes; a
+`API_REVISION` lives in [`__init__.py`](../agents_control/__init__.py) and `EXPECTS_API` in
+[static/app.js](../agents_control/static/app.js). **Bump both** when the HTTP surface changes; a
 test fails if they drift apart.
 
 So: after changing anything under `agents_control/`, restart the service. The

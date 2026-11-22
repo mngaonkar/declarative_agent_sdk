@@ -1,5 +1,7 @@
 # Simple Agent Example (Python CLI & Script)
 
+> Files for this page: [`examples/simple_agent/`](../../examples/simple_agent/)
+
 Demonstrates how to run an agent built with the **Declarative Agent SDK** directly in Python using both **synchronous** and **asynchronous streaming** interfaces.
 
 ---

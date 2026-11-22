@@ -1,5 +1,7 @@
 # Lean Agent Example (`agent_framework: lean`)
 
+> Files for this page: [`examples/lean_agent/`](../../examples/lean_agent/)
+
 Demonstrates an agent using the **Lean** runtime — a native ReAct loop featuring deliberative planning, tool execution, and progressive skill discovery (ESP-style).
 
 ---

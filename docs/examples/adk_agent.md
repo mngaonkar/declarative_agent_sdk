@@ -1,5 +1,7 @@
 # Google ADK Agent Example (`agent_framework: adk`)
 
+> Files for this page: [`examples/adk_agent/`](../../examples/adk_agent/)
+
 Demonstrates an agent using the **Google ADK** (Agent Development Kit) runtime — delegating loop execution directly to the ADK `Runner` with native Gemini models and ADK session management.
 
 ---

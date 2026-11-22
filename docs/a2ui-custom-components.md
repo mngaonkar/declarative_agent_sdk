@@ -1,5 +1,7 @@
 # A2UI custom component integration guide
 
+> Files for this page: [`a2ui/ui/custom-components/`](../a2ui/ui/custom-components/)
+
 This guide details how to create, register, and use a custom component in the A2UI client.
 
 ## Create the component

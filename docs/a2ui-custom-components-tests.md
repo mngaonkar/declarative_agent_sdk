@@ -1,5 +1,7 @@
 # Contact sample verification tests
 
+> Files for this page: [`a2ui/ui/custom-components/test/`](../a2ui/ui/custom-components/test/)
+
 This directory contains tests to verify custom component integration specifically within the `contact` sample application environment.
 
 ## How to run

@@ -1,5 +1,7 @@
 # DeepAgent Example (`agent_framework: deepagent`)
 
+> Files for this page: [`examples/deepagent_agent/`](../../examples/deepagent_agent/)
+
 Demonstrates an agent using the **DeepAgent** runtime — backed by `deepagents` and LangGraph's compiled state graph execution with built-in human-in-the-loop (HITL) tool approval interrupts.
 
 ---

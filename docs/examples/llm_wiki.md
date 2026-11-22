@@ -1,5 +1,7 @@
 # LLM-as-Wiki on the lean runtime
 
+> Files for this page: [`examples/llm_wiki/`](../../examples/llm_wiki/)
+
 An agent that reads your sources and compiles them into a persistent,
 interlinked markdown wiki — then keeps that wiki current as more sources
 arrive. Tuned here for a personal knowledge base (journals, articles, podcast
