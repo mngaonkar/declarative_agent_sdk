@@ -321,9 +321,13 @@ definitions, not running servers.
   not reviewed; nothing is saved until the user saves it.
 - MCP-CAT-14: **Official publishers only** (on by default) keeps to servers
   published under their vendor's own namespace, from `OFFICIAL_PUBLISHERS`
-  (`io.github.github` → GitHub, `com.stripe` → Stripe, …), matched exactly.
-  The registry proves who owns a namespace (a GitHub login, or a domain), so
-  that is what "official" means; every other result is marked community.
+  (`io.github.github` → GitHub, `com.stripe` → Stripe, `com.googleapis` →
+  Google, …). The registry proves who owns a namespace (a GitHub login, or a
+  domain), so that is what "official" means; every other result is marked
+  community. A domain namespace also covers its sub-namespaces
+  (`com.googleapis.compute` is Google's — the domain's owner holds them); an
+  `io.github.<login>` namespace is that login only (`io.github.google-fan` is
+  not Google's).
   The official set is gathered by searching each namespace, in parallel,
   cached for 10 minutes, and searched on the board — the registry ranks a
   vendor's own server below dozens of third-party ones. Search words are

@@ -152,7 +152,13 @@ REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers"
 # that vendor. Anyone can publish under their own name, and most services
 # have dozens of third-party servers; this list is what "official" means.
 # Kept to namespaces checked against the registry; add more the same way.
+# A domain namespace also covers its sub-namespaces (com.googleapis.compute
+# is googleapis.com's); an io.github.<login> one is that login only.
 OFFICIAL_PUBLISHERS: Dict[str, str] = {
+    "com.googleapis": "Google",
+    "io.github.google": "Google",
+    "io.github.googleapis": "Google",
+    "io.github.googlecloudplatform": "Google",
     "io.github.github": "GitHub",
     "com.stripe": "Stripe",
     "com.notion": "Notion",
@@ -201,7 +207,17 @@ OFFICIAL_PUBLISHERS: Dict[str, str] = {
 def publisher(registry_name: str) -> str:
     """The vendor that published a registry server, or "" when it is third-party."""
     namespace = str(registry_name or "").split("/", 1)[0].lower()
-    return OFFICIAL_PUBLISHERS.get(namespace, "")
+    if namespace in OFFICIAL_PUBLISHERS:
+        return OFFICIAL_PUBLISHERS[namespace]
+    # A sub-namespace of an official domain (com.googleapis.compute). Never of
+    # a GitHub login: io.github.google does not vouch for io.github.google-fan.
+    if not namespace.startswith("io.github."):
+        parts = namespace.split(".")
+        for cut in range(len(parts) - 1, 1, -1):
+            vendor = OFFICIAL_PUBLISHERS.get(".".join(parts[:cut]))
+            if vendor and not ".".join(parts[:cut]).startswith("io.github."):
+                return vendor
+    return ""
 
 
 def _slug(registry_name: str) -> str:

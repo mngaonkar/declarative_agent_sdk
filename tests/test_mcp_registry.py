@@ -139,6 +139,19 @@ class TestOfficial:
         assert mcp_catalog.publisher("com.thenextgennexus/github-mcp-server") == ""
         assert mcp_catalog.publisher("io.github.ClickHouse/mcp-clickhouse") == "ClickHouse"
 
+    def test_a_domain_vouches_for_its_sub_namespaces(self):
+        """Google publishes one sub-namespace per API: com.googleapis.compute, …"""
+        assert mcp_catalog.publisher("com.googleapis.compute/mcp") == "Google"
+        assert mcp_catalog.publisher("com.googleapis.a.b/mcp") == "Google"
+        assert mcp_catalog.publisher("com.cloudflare.mcp/x") == "Cloudflare"
+        assert mcp_catalog.publisher("com.googleapisfake/x") == ""       # not a sub-namespace
+        assert mcp_catalog.publisher("com.trycloudflare.foo/x") == ""
+
+    def test_a_github_login_vouches_only_for_itself(self):
+        assert mcp_catalog.publisher("io.github.google/x") == "Google"
+        assert mcp_catalog.publisher("io.github.google-fan/x") == ""
+        assert mcp_catalog.publisher("io.github.googleapis.evil/x") == ""
+
     def test_an_entry_carries_its_publisher(self):
         assert registry_entry(item(name="com.notion/mcp"))["publisher"] == "Notion"
         assert registry_entry(NPM)["publisher"] == ""
