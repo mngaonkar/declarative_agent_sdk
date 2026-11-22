@@ -35,10 +35,16 @@ DEFAULT_DB_PATH = HOME_DIR + "/control.db"
 
 
 def board_home() -> Path:
-    """~/.agent-board, or the legacy ~/.agents-control when only that holds a board."""
+    """
+    ~/.agent-board, or the legacy ~/.agents-control when only that holds a board.
+
+    Decided by where the database is, not by which folder exists: the board
+    itself creates folders (wheels, staged .env files), and a folder alone
+    once switched a board with four machines onto a new, empty database.
+    """
     home = Path(HOME_DIR).expanduser()
     legacy = Path(LEGACY_HOME_DIR).expanduser()
-    if not home.exists() and (legacy / "control.db").is_file():
+    if not (home / "control.db").is_file() and (legacy / "control.db").is_file():
         return legacy
     return home
 
