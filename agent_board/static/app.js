@@ -539,11 +539,11 @@ function sharedFileChip(href) {
     box.append(el('span', 'note', 'loading preview…'));
     whenVisible(box, () => showThumb(box, href));
   } else if (VIDEO_PATH.test(name)) {
-    // A video can be large, so it loads only when asked to.
-    const play = el('button', 'btn small play', '▶ Play video');
-    play.type = 'button';
-    play.onclick = () => showVideo(box, href);
-    box.append(play);
+    // A still from the video, with the player's own play button over it,
+    // once it scrolls into view. Only enough to draw that frame is fetched
+    // (byte ranges) until play is pressed.
+    box.append(el('span', 'note', 'loading preview…'));
+    whenVisible(box, () => showVideo(box, href));
   } else {
     return chip;
   }
@@ -624,15 +624,21 @@ async function showThumb(box, href) {
  * opens this file for an hour and nothing else; the board token never goes
  * in a URL.
  */
+// href → {src, expires}: a message is redrawn whenever its channel reloads,
+// and one ticket serves every redraw until it nears its end.
+const tickets = new Map();
+
 async function streamSrc(href) {
+  const held = tickets.get(href);
+  if (held && held.expires - Date.now() / 1000 > 600) return held.src;
   const answer = await api('/api/files/ticket', {
     method: 'POST', body: JSON.stringify({ url: href }),
   });
+  tickets.set(href, { src: answer.src, expires: answer.expires });
   return answer.src;
 }
 
 async function showVideo(box, href) {
-  box.replaceChildren(el('span', 'note', 'starting video…'));
   let src;
   try {
     src = await streamSrc(href);
@@ -640,20 +646,21 @@ async function showVideo(box, href) {
     box.replaceChildren(el('span', 'note', `no preview: ${error.message}`));
     return;
   }
-  const video = videoPlayer(src);
-  video.autoplay = true;
-  box.replaceChildren(video);
+  box.replaceChildren(videoPlayer(src));
 }
 
 function videoPlayer(url) {
   const video = el('video', 'file-video');
-  video.src = url;
+  // #t=0.1: show a frame from just after the start as the preview. Without
+  // it Safari draws nothing until play, and the first frame is often black.
+  video.src = `${url}#t=0.1`;
   video.controls = true;
   video.playsInline = true;
   video.preload = 'metadata';
-  // A .mov in Chrome, say: the file arrived, the browser cannot decode it.
-  video.onerror = () => video.replaceWith(
-    el('span', 'note', 'this browser cannot play this video format — download it from the chip'));
+  // A .mov in Chrome, say, or a ticket that ran out on a page left open.
+  video.onerror = () => video.replaceWith(el('span', 'note',
+    'could not play this video: this browser may not support its format ' +
+    '(download it from the chip), or the page was open too long (reload it)'));
   return video;
 }
 

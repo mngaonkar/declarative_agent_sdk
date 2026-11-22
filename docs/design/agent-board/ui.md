@@ -53,11 +53,13 @@ templates.
   relay once it scrolls into view, with the token in a header, once per page;
   a file over 10 MB, or one that is not an image, shows a note instead.
   Clicking the thumbnail opens the full preview.
-- AC-UI-BOARD-7: A link to a video (mp4, m4v, webm, ogv, mov) shows a "Play
-  video" button under its chip; clicking the chip opens a larger player. Both
-  ask for a file ticket (AC-SERVER-13) and stream the relay with it, so play
-  starts at once and seeks by byte range — nothing is downloaded first and
-  there is no size limit. A format the browser cannot decode says so.
+- AC-UI-BOARD-7: A link to a video (mp4, m4v, webm, ogv, mov) shows a player
+  under its chip once it scrolls into view, with a still from the video
+  (`#t=0.1`) under its play button; clicking the chip opens a larger player.
+  Both stream the relay with a file ticket (AC-SERVER-13), so only enough to
+  draw the still is fetched before play, play starts at once and seeks by
+  byte range, and there is no size limit. A ticket is reused for its link
+  until it has 10 minutes left. A video that cannot play says why it may be.
 
 **Rules — agent colours:**
 
