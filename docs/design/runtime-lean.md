@@ -130,12 +130,21 @@ decides whether the turn is finished.
 - LEAN-LOOP-10: Any other `LLMError` ends the turn with an `error` event.
 - LEAN-LOOP-11: History is trimmed to `history_limit` messages without
   starting in the middle of a tool block.
+- LEAN-LOOP-12: A tool call whose arguments arrive but are not a JSON object
+  is repaired as soon as it is received: its arguments become
+  `{"_unreadable_arguments": <length>}`, so the history stays valid. The
+  server re-parses every past call on each request, and one broken call left
+  in the history would fail every later request in the session. Such a call
+  never runs and is never offered for approval: it is answered with the
+  LEAN-LOOP-9 advice and counts toward `MAX_MALFORMED_RECOVERIES`; one more
+  ends the turn with an error. Before each request the whole history is
+  checked the same way.
 
 **Interface:** `LeanLoop.run(query, session_id)`, `resume(session_id,
 approved)`, `reset(session_id)`, `reset_all()`, `context_report()`.
 
 **Tests:** `tests/test_lean_runtime.py`, `tests/test_file_tools.py`
-(`TestMalformedRecovery`).
+(`TestMalformedRecovery`), `tests/test_unreadable_tool_calls.py`.
 
 ## `agents/lean/runtime/skills.py`
 
